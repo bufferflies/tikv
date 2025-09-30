@@ -87,7 +87,8 @@ pub mod tests {
     use kvproto::kvrpcpb::Context;
     #[cfg(test)]
     use kvproto::kvrpcpb::PrewriteRequestPessimisticAction::*;
-    use txn_types::TimeStamp;
+    use tikv_kv::WriteData;
+    use txn_types::{ReqType, TimeStamp};
 
     use super::*;
     #[cfg(test)]
@@ -123,7 +124,10 @@ pub mod tests {
         let mut txn = MvccTxn::new(start_ts, cm);
         let mut reader = SnapshotReader::new(start_ts, snapshot, true);
         cleanup(&mut txn, &mut reader, Key::from_raw(key), current_ts, true).unwrap();
-        write(engine, &ctx, txn.into_modifies());
+        let mut data = WriteData::from_modifies(txn.into_modifies());
+        // TODO: determine this type.
+        data.extra.req_type = ReqType::ResolveLock;
+        write(engine, &ctx, data);
     }
 
     pub fn must_err<E: Engine>(
@@ -155,7 +159,10 @@ pub mod tests {
         let current_ts = current_ts.into();
 
         if !gc_fence.is_zero() && without_target_write {
-            // Put a dummy record and remove it after doing cleanup.
+            // NOTE: kvengine does not support delete key directly with the original commit
+            // ts, so the gc fence handle need 3 ts: prewrite,
+            // commit(prewrite+1),delete(commit+1). Put a dummy record and
+            // remove it after doing cleanup.
             must_not_have_write(engine, key, gc_fence);
             must_prewrite_put(engine, key, b"dummy_value", key, gc_fence.prev());
             must_commit(engine, key, gc_fence.prev(), gc_fence);
@@ -167,7 +174,10 @@ pub mod tests {
         let mut reader = SnapshotReader::new(start_ts, snapshot, true);
         cleanup(&mut txn, &mut reader, Key::from_raw(key), current_ts, true).unwrap();
 
-        write(engine, &ctx, txn.into_modifies());
+        let mut data = tikv_kv::WriteData::from_modifies(txn.into_modifies());
+        // TODO: determine the correct req type.
+        data.extra.req_type = txn_types::ReqType::Rollback;
+        write(engine, &ctx, data);
 
         let w = must_have_write(engine, key, start_ts);
         assert_ne!(w.start_ts, start_ts, "no overlapping write record");

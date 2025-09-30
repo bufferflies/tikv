@@ -713,12 +713,12 @@ pub fn configure_for_encryption<T: Simulator>(cluster: &mut Cluster<T>) {
     }
 }
 
-pub fn configure_for_causal_ts<T: Simulator>(
-    cluster: &mut Cluster<T>,
+pub fn configure_for_causal_ts(
+    cfg: &mut TikvConfig,
     renew_interval: &str,
     renew_batch_min_size: u32,
 ) {
-    let cfg = &mut cluster.cfg.causal_ts;
+    let cfg = &mut cfg.causal_ts;
     cfg.renew_interval = ReadableDuration::from_str(renew_interval).unwrap();
     cfg.renew_batch_min_size = renew_batch_min_size;
 }

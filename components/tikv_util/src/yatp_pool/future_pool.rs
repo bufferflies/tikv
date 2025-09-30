@@ -99,6 +99,16 @@ impl FuturePool {
     {
         self.inner.spawn_handle(TrackedFuture::new(future))
     }
+
+    /// Cancel all pending futures and join all threads.
+    pub fn shutdown(&self) {
+        self.inner.pool.shutdown();
+    }
+
+    //  Get a remote queue for spawning tasks without owning the thread pool.
+    pub fn remote(&self) -> &yatp::Remote<future::TaskCell> {
+        self.inner.pool.remote()
+    }
 }
 
 struct PoolInner {

@@ -3,64 +3,66 @@
 use std::{
     sync::{mpsc, Arc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use api_version::{test_kv_format_impl, KvFormat};
-use causal_ts::CausalTsProvider;
 use cdc::{recv_timeout, Delegate, OldValueCache, Task, Validate};
 use futures::{executor::block_on, sink::SinkExt};
-use grpcio::{ChannelBuilder, Environment, WriteFlags};
-use kvproto::{cdcpb::*, kvrpcpb::*, tikvpb_grpc::TikvClient};
+use grpcio::WriteFlags;
+use kvproto::{cdcpb::*, kvrpcpb::*};
 use pd_client::PdClient;
 use test_raftstore::*;
-use tikv_util::{debug, worker::Scheduler, HandyRwLock};
-use txn_types::TimeStamp;
+use tikv_util::{debug, worker::Scheduler};
+use txn_types::Key;
 
-use crate::{new_event_feed, ClientReceiver, TestSuite, TestSuiteBuilder};
+use crate::{new_event_feed, new_event_feed_v2, ClientReceiver, CloudTestSuiteBuilder, TestSuite};
 
 #[test]
 fn test_cdc_double_scan_deregister() {
-    test_kv_format_impl!(test_cdc_double_scan_deregister_impl<ApiV1 ApiV2>);
+    test_kv_format_impl!(test_cdc_double_scan_deregister_impl<ApiV2>);
 }
 
 fn test_cdc_double_scan_deregister_impl<F: KvFormat>() {
     let mut suite = TestSuite::new(1, F::TAG);
+    let region_id = suite.cluster.get_region(b"xkey0").id;
+    let node_id = suite.cluster.pd_client().get_all_stores(true).unwrap()[0].id;
 
     // If tikv enable ApiV2, txn key needs to start with 'x';
     let (k, v) = (b"xkey1".to_vec(), b"value".to_vec());
     // Prewrite
-    let start_ts1 = block_on(suite.cluster.pd_client.get_tso()).unwrap();
+    let start_ts1 = block_on(suite.cluster.pd_client().get_tso()).unwrap();
     let mut mutation = Mutation::default();
     mutation.set_op(Op::Put);
     mutation.key = k.clone();
     mutation.value = v;
-    suite.must_kv_prewrite(1, vec![mutation], k.clone(), start_ts1);
+    suite.must_kv_prewrite(region_id, vec![mutation], k.clone(), start_ts1);
     // Commit
-    let commit_ts1 = block_on(suite.cluster.pd_client.get_tso()).unwrap();
-    suite.must_kv_commit(1, vec![k], start_ts1, commit_ts1);
+    let commit_ts1 = block_on(suite.cluster.pd_client().get_tso()).unwrap();
+    suite.must_kv_commit(region_id, vec![k], start_ts1, commit_ts1);
 
     let fp = "cdc_incremental_scan_start";
     fail::cfg(fp, "pause").unwrap();
 
-    let mut req = suite.new_changedata_request(1);
+    let mut req = suite.new_changedata_request(region_id);
     req.mut_header().set_ticdc_version("5.0.0".into());
     let (mut req_tx, event_feed_wrap, _receive_event) =
-        new_event_feed(suite.get_region_cdc_client(1));
+        new_event_feed(suite.get_region_cdc_client(region_id));
     block_on(req_tx.send((req, WriteFlags::default()))).unwrap();
 
     // wait for the first connection to start incremental scan
     sleep_ms(1000);
 
-    let mut req = suite.new_changedata_request(1);
+    let mut req = suite.new_changedata_request(region_id);
     req.mut_header().set_ticdc_version("5.0.0".into());
     let (mut req_tx_1, event_feed_wrap_1, receive_event_1) =
-        new_event_feed(suite.get_region_cdc_client(1));
+        new_event_feed(suite.get_region_cdc_client(region_id));
     block_on(req_tx_1.send((req, WriteFlags::default()))).unwrap();
 
     // wait for the second connection register to the delegate.
     suite.must_wait_delegate_condition(
-        1,
+        node_id,
+        region_id,
         Arc::new(|d: Option<&Delegate>| d.unwrap().downstreams().len() == 2),
     );
 
@@ -90,40 +92,42 @@ fn test_cdc_double_scan_deregister_impl<F: KvFormat>() {
 
 #[test]
 fn test_cdc_double_scan_io_error() {
-    test_kv_format_impl!(test_cdc_double_scan_io_error_impl<ApiV1 ApiV2>);
+    test_kv_format_impl!(test_cdc_double_scan_io_error_impl<ApiV2>);
 }
 
 fn test_cdc_double_scan_io_error_impl<F: KvFormat>() {
     let mut suite = TestSuite::new(1, F::TAG);
 
+    let region_id = suite.cluster.get_region(b"xkey0").id;
+    let _node_id = suite.cluster.pd_client().get_all_stores(true).unwrap()[0].id;
     let (k, v) = (b"xkey1".to_vec(), b"value".to_vec());
     // Prewrite
-    let start_ts1 = block_on(suite.cluster.pd_client.get_tso()).unwrap();
+    let start_ts1 = block_on(suite.cluster.pd_client().get_tso()).unwrap();
     let mut mutation = Mutation::default();
     mutation.set_op(Op::Put);
     mutation.key = k.clone();
     mutation.value = v;
-    suite.must_kv_prewrite(1, vec![mutation], k.clone(), start_ts1);
+    suite.must_kv_prewrite(region_id, vec![mutation], k.clone(), start_ts1);
     // Commit
-    let commit_ts1 = block_on(suite.cluster.pd_client.get_tso()).unwrap();
-    suite.must_kv_commit(1, vec![k], start_ts1, commit_ts1);
+    let commit_ts1 = block_on(suite.cluster.pd_client().get_tso()).unwrap();
+    suite.must_kv_commit(region_id, vec![k], start_ts1, commit_ts1);
 
     fail::cfg("cdc_incremental_scan_start", "pause").unwrap();
     fail::cfg("cdc_scan_batch_fail", "1*return").unwrap();
 
-    let mut req = suite.new_changedata_request(1);
+    let mut req = suite.new_changedata_request(region_id);
     req.mut_header().set_ticdc_version("5.0.0".into());
     let (mut req_tx, event_feed_wrap, receive_event) =
-        new_event_feed(suite.get_region_cdc_client(1));
+        new_event_feed(suite.get_region_cdc_client(region_id));
     block_on(req_tx.send((req, WriteFlags::default()))).unwrap();
 
     // wait for the first connection to start incremental scan
     sleep_ms(1000);
 
-    let mut req = suite.new_changedata_request(1);
+    let mut req = suite.new_changedata_request(region_id);
     req.mut_header().set_ticdc_version("5.0.0".into());
     let (mut req_tx_1, event_feed_wrap_1, receive_event_1) =
-        new_event_feed(suite.get_region_cdc_client(1));
+        new_event_feed(suite.get_region_cdc_client(region_id));
     block_on(req_tx_1.send((req, WriteFlags::default()))).unwrap();
 
     // wait for the second connection to start incremental scan
@@ -194,14 +198,14 @@ fn test_cdc_scan_continues_after_region_split_impl<F: KvFormat>() {
 
     let (k, v) = (b"xkey1".to_vec(), b"value".to_vec());
     // Prewrite
-    let start_ts1 = block_on(suite.cluster.pd_client.get_tso()).unwrap();
+    let start_ts1 = block_on(suite.cluster.pd_client().get_tso()).unwrap();
     let mut mutation = Mutation::default();
     mutation.set_op(Op::Put);
     mutation.key = k.clone();
     mutation.value = v;
     suite.must_kv_prewrite(1, vec![mutation], k.clone(), start_ts1);
     // Commit
-    let commit_ts1 = block_on(suite.cluster.pd_client.get_tso()).unwrap();
+    let commit_ts1 = block_on(suite.cluster.pd_client().get_tso()).unwrap();
     suite.must_kv_commit(1, vec![k], start_ts1, commit_ts1);
 
     let mut req = suite.new_changedata_request(1);
@@ -274,9 +278,9 @@ fn test_no_resolved_ts_before_downstream_initialized() {
 }
 
 fn do_test_no_resolved_ts_before_downstream_initialized(version: &str) {
-    let cluster = new_server_cluster(0, 1);
-    cluster.pd_client.disable_default_operator();
-    let mut suite = TestSuiteBuilder::new().cluster(cluster).build();
+    let mut suite = CloudTestSuiteBuilder::new()
+        .after_cluster_bootstrapped(|c| c.get_pd_client().disable_default_operator())
+        .build();
     let region = suite.cluster.get_region(b"");
 
     let recv_resolved_ts = |event_feed: &ClientReceiver| {
@@ -337,12 +341,19 @@ fn do_test_no_resolved_ts_before_downstream_initialized(version: &str) {
 // delta changes are sent to CDC's `Endpoint` before the incremental scan, but
 // `Sink` may break this rule. This case tests it won't happen any more.
 #[test]
+#[ignore = "PeerClient not yet supported in Cloud Engine Test"]
+#[cfg(NO_NEXT_GEN_COMPATIBLE)]
 fn test_cdc_observed_before_incremental_scan_snapshot() {
-    let cluster = new_server_cluster(0, 1);
-    cluster.pd_client.disable_default_operator();
-    let mut suite = TestSuiteBuilder::new().cluster(cluster).build();
+    let mut suite = CloudTestSuiteBuilder::new()
+        .after_cluster_bootstrapped(|c| {
+            c.get_pd_client().disable_default_operator();
+        })
+        .build();
     let region = suite.cluster.get_region(b"");
-    let lead_client = PeerClient::new(&suite.cluster, region.id, new_peer(1, 1));
+    let region_id = region.id;
+    let node_id = suite.cluster.pd_client().get_all_stores(true).unwrap()[0].id;
+
+    let lead_client = PeerClient::new(&suite.cluster, region.id, region.peers[0].clone());
 
     // So that the second changefeed can get some delta changes elder than its
     // snapshot.
@@ -360,13 +371,13 @@ fn test_cdc_observed_before_incremental_scan_snapshot() {
 
     for version in 0..10 {
         let key = format!("key-{:0>6}", version);
-        let start_ts = get_tso(&suite.cluster.pd_client);
+        let start_ts = get_tso(&suite.cluster.pd_client());
         lead_client.must_kv_prewrite(
             vec![new_mutation(Op::Put, key.as_bytes(), b"value")],
             key.as_bytes().to_owned(),
             start_ts,
         );
-        let commit_ts = get_tso(&suite.cluster.pd_client);
+        let commit_ts = get_tso(&suite.cluster.pd_client());
         lead_client.must_kv_commit(vec![key.into_bytes()], start_ts, commit_ts);
     }
 
@@ -415,26 +426,31 @@ fn test_old_value_cache_without_downstreams() {
     let mutation = || {
         let mut mutation = Mutation::default();
         mutation.set_op(Op::Put);
-        mutation.key = b"key".to_vec();
+        mutation.key = b"xkeykey".to_vec();
         mutation.value = b"value".to_vec();
         mutation
     };
 
     fail::cfg("cdc_flush_old_value_metrics", "return").unwrap();
 
-    let cluster = new_server_cluster(0, 1);
-    let mut suite = TestSuiteBuilder::new().cluster(cluster).build();
-    let scheduler = suite.endpoints[&1].scheduler();
+    let mut suite = CloudTestSuiteBuilder::new()
+        .cfg_fun(|_, cfg| cfg.storage.check_backup_ts = false)
+        .build();
+    let region_id = suite.cluster.get_region(b"xkey0").id;
+    let node_id = suite.cluster.pd_client().get_all_stores(true).unwrap()[0].id;
+
+    let scheduler = suite.endpoints[&node_id].clone();
 
     // Add a subscription and then check old value cache.
-    let (mut req_tx, event_feed, receive_event) = new_event_feed(suite.get_region_cdc_client(1));
-    let req = suite.new_changedata_request(1);
+    let (mut req_tx, event_feed, receive_event) =
+        new_event_feed(suite.get_region_cdc_client(region_id));
+    let req = suite.new_changedata_request(region_id);
     block_on(req_tx.send((req, WriteFlags::default()))).unwrap();
     receive_event(false); // Wait until the initialization finishes.
 
     // Old value cache will be updated because there is 1 capture.
-    suite.must_kv_prewrite(1, vec![mutation()], b"key".to_vec(), 3.into());
-    suite.must_kv_commit(1, vec![b"key".to_vec()], 3.into(), 4.into());
+    suite.must_kv_prewrite(region_id, vec![mutation()], b"xkeykey".to_vec(), 3.into());
+    suite.must_kv_commit(region_id, vec![b"xkeykey".to_vec()], 3.into(), 4.into());
     check_old_value_cache(&scheduler, 1);
 
     drop(req_tx);
@@ -443,14 +459,16 @@ fn test_old_value_cache_without_downstreams() {
     sleep_ms(200);
 
     // Old value cache won't be updated because there is no captures.
-    suite.must_kv_prewrite(1, vec![mutation()], b"key".to_vec(), 5.into());
-    suite.must_kv_commit(1, vec![b"key".to_vec()], 5.into(), 6.into());
+    suite.must_kv_prewrite(region_id, vec![mutation()], b"xkeykey".to_vec(), 5.into());
+    suite.must_kv_commit(region_id, vec![b"xkeykey".to_vec()], 5.into(), 6.into());
     check_old_value_cache(&scheduler, 1);
 
     fail::remove("cdc_flush_old_value_metrics");
 }
 
 #[test]
+#[ignore = "raw kv api not supported yet in Cloud Engine"]
+#[cfg(NO_NEXT_GEN_COMPATIBLE)]
 fn test_cdc_rawkv_resolved_ts() {
     let mut suite = TestSuite::new(1, ApiVersion::V2);
     let cluster = &suite.cluster;
@@ -524,4 +542,392 @@ fn test_cdc_rawkv_resolved_ts() {
 
     fail::remove(pause_write_fp);
     handle.join().unwrap();
+}
+
+// Test one region can be subscribed multiple times in one stream with different
+// `request_id`s.
+#[test]
+fn test_cdc_stream_multiplexing() {
+    let mut suite = CloudTestSuiteBuilder::new()
+        .num_nodes(2)
+        .after_cluster_bootstrapped(|c| c.get_pd_client().disable_default_operator())
+        .build();
+    let rid = suite.cluster.get_region(&[]).id;
+    let (mut req_tx, _, receive_event) = new_event_feed_v2(suite.get_region_cdc_client(rid));
+
+    // Subscribe the region with request_id 1.
+    let mut req = suite.new_changedata_request(rid);
+    req.request_id = 1;
+    block_on(req_tx.send((req, WriteFlags::default()))).unwrap();
+    receive_event(false);
+
+    // Subscribe the region with request_id 2.
+    fail::cfg("before_post_incremental_scan", "pause").unwrap();
+    let mut req = suite.new_changedata_request(rid);
+    req.request_id = 2;
+    block_on(req_tx.send((req, WriteFlags::default()))).unwrap();
+    receive_event(false);
+
+    // Request 2 can't receive a ResolvedTs, because it's not ready.
+    for _ in 0..10 {
+        let event = receive_event(true);
+        let req_id = event.get_resolved_ts().get_request_id();
+        assert_eq!(req_id, 1);
+    }
+
+    // After request 2 is ready, it must receive a ResolvedTs.
+    fail::remove("before_post_incremental_scan");
+    let mut request_2_ready = false;
+    for _ in 0..20 {
+        let event = receive_event(true);
+        let req_id = event.get_resolved_ts().get_request_id();
+        if req_id == 2 {
+            request_2_ready = true;
+            break;
+        }
+    }
+    assert!(request_2_ready);
+}
+
+// This case tests pending regions can still get region split/merge
+// notifications.
+#[test]
+fn test_cdc_notify_pending_regions() {
+    let mut suite = CloudTestSuiteBuilder::new()
+        .num_nodes(1)
+        .after_cluster_bootstrapped(|c| c.get_pd_client().disable_default_operator())
+        .build();
+    let region = suite.cluster.get_region(&[]);
+    let rid = region.id;
+    let (mut req_tx, _, receive_event) = new_event_feed_v2(suite.get_region_cdc_client(rid));
+
+    fail::cfg("cdc_before_initialize", "pause").unwrap();
+    let mut req = suite.new_changedata_request(rid);
+    req.request_id = 1;
+    block_on(req_tx.send((req, WriteFlags::default()))).unwrap();
+
+    thread::sleep(Duration::from_millis(100));
+    suite.cluster.must_split(&region, b"x");
+    let event = receive_event(false);
+    matches!(
+        event.get_events()[0].event,
+        Some(Event_oneof_event::Error(ref e)) if e.has_region_not_found(),
+    );
+    fail::remove("cdc_before_initialize");
+}
+
+// The case check whether https://github.com/tikv/tikv/issues/17233 is fixed or not.
+#[test]
+fn test_delegate_fail_during_incremental_scan() {
+    let mut suite = CloudTestSuiteBuilder::new()
+        .num_nodes(1)
+        .cfg_fun(|_, cfg| {
+            configure_for_lease_read(cfg, Some(100), Some(10));
+        })
+        .after_cluster_bootstrapped(|c| c.get_pd_client().disable_default_operator())
+        .build();
+    let region = suite.cluster.get_region(b"xkey0");
+    let rid = region.id;
+    let cf_tso = block_on(suite.cluster.pd_client().get_tso()).unwrap();
+
+    let start_tso = cf_tso.next();
+    let pk = format!("xkeykey_{:03}", 0).into_bytes();
+    let mut mutations = Vec::with_capacity(10);
+    for i in 0..10 {
+        let mut mutation = Mutation::default();
+        mutation.set_op(Op::Put);
+        mutation.key = format!("xkeykey_{:03}", i).into_bytes();
+        mutation.value = vec![b'x'; 16];
+        mutations.push(mutation);
+    }
+    suite.must_kv_prewrite(rid, mutations, pk.clone(), start_tso);
+
+    fail::cfg("before_schedule_incremental_scan", "1*pause").unwrap();
+
+    let (mut req_tx, recv, receive_event) = new_event_feed_v2(suite.get_region_cdc_client(rid));
+    let mut req = suite.new_changedata_request(rid);
+    req.request_id = 100;
+    req.checkpoint_ts = cf_tso.into_inner();
+    req.set_start_key(Key::from_raw(b"xkeya").into_encoded());
+    req.set_end_key(Key::from_raw(b"xkeyz").into_encoded());
+    block_on(req_tx.send((req.clone(), WriteFlags::default()))).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    suite.cluster.must_split(&region, b"xkeyf");
+
+    // After the incremental scan is canceled, we can get the epoch_not_match error.
+    // And after the error is retrieved, no more entries can be received.
+    let mut get_epoch_not_match = false;
+    while !get_epoch_not_match {
+        for event in receive_event(false).events.to_vec() {
+            match event.event {
+                Some(Event_oneof_event::Error(err)) => {
+                    assert!(err.has_epoch_not_match(), "{:?}", err);
+                    get_epoch_not_match = true;
+                }
+                Some(Event_oneof_event::Entries(..)) => {
+                    assert!(!get_epoch_not_match);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fail::remove("before_schedule_incremental_scan");
+
+    let mut recver = recv.replace(None).unwrap();
+    recv_timeout(&mut recver, Duration::from_secs(1)).unwrap_err();
+    recv.replace(Some(recver));
+}
+
+// The case shows it's possible that unordered Prewrite events on one same key
+// can be sent to TiCDC clients. Generally it only happens when a region changes
+// during a Pipelined-DML transaction.
+//
+// To ensure TiCDC can handle the situation, `generation` should be carried in
+// Prewrite events.
+#[test]
+#[ignore = "pipeline dml supported? (Maybe TODO)"]
+fn test_cdc_pipeline_dml() {
+    let mut suite = CloudTestSuiteBuilder::new()
+        .num_nodes(1)
+        .cfg_fun(|_, cfg| {
+            configure_for_lease_read(cfg, Some(100), Some(10));
+        })
+        .after_cluster_bootstrapped(|c| c.get_pd_client().disable_default_operator())
+        .build();
+    let region = suite.cluster.get_region(b"xkey0");
+    let rid = region.id;
+
+    let prewrite_tso = block_on(suite.cluster.pd_client().get_tso()).unwrap();
+    let (k, v) = (b"xkeykey".to_vec(), vec![b'x'; 16]);
+    let mut mutation = Mutation::default();
+    mutation.set_op(Op::Put);
+    mutation.key = k.clone();
+    mutation.value = v;
+    suite.must_kv_flush(rid, vec![mutation], k.clone(), prewrite_tso, 1);
+
+    fail::cfg("cdc_incremental_scan_start", "pause").unwrap();
+
+    let cf_tso = block_on(suite.cluster.pd_client().get_tso()).unwrap();
+    let (mut req_tx, _, receive_event) = new_event_feed_v2(suite.get_region_cdc_client(rid));
+    let mut req = suite.new_changedata_request(rid);
+    req.request_id = 1;
+    req.checkpoint_ts = cf_tso.into_inner();
+    block_on(req_tx.send((req, WriteFlags::default()))).unwrap();
+    sleep_ms(100);
+
+    let (k, v) = (b"xkeykey".to_vec(), vec![b'y'; 16]);
+    let mut mutation = Mutation::default();
+    mutation.set_op(Op::Put);
+    mutation.key = k.clone();
+    mutation.value = v;
+    suite.must_kv_flush(rid, vec![mutation], k.clone(), prewrite_tso, 2);
+
+    let events = receive_event(false).take_events().into_vec();
+    for entry in events[0].get_entries().get_entries() {
+        assert_eq!(entry.r_type, EventLogType::Prewrite);
+        assert_eq!(entry.generation, 2);
+        assert_eq!(entry.value, vec![b'y'; 16]);
+    }
+
+    let commit_tso = block_on(suite.cluster.pd_client().get_tso()).unwrap();
+    suite.must_kv_commit(rid, vec![b"xkeykey".to_vec()], prewrite_tso, commit_tso);
+
+    let events = receive_event(false).take_events().into_vec();
+    for entry in events[0].get_entries().get_entries() {
+        assert_eq!(entry.r_type, EventLogType::Commit);
+        assert_eq!(entry.start_ts, prewrite_tso.into_inner());
+        assert_eq!(entry.commit_ts, commit_tso.into_inner());
+    }
+
+    fail::remove("cdc_incremental_scan_start");
+
+    let events = receive_event(false).take_events().into_vec();
+    let entries = events[0].get_entries().get_entries();
+    assert_eq!(entries[0].r_type, EventLogType::Prewrite);
+    assert_eq!(entries[0].generation, 1);
+    assert_eq!(entries[0].value, vec![b'x'; 16]);
+    assert_eq!(entries[1].r_type, EventLogType::Initialized);
+}
+
+#[test]
+fn test_cdc_unresolved_region_count_before_finish_scan_lock() {
+    fn check_unresolved_region_count(scheduler: &Scheduler<Task>, target_count: usize) {
+        let start = Instant::now();
+        loop {
+            sleep_ms(100);
+            let (tx, rx) = mpsc::sync_channel(1);
+            let checker = move |c: usize| tx.send(c).unwrap();
+            scheduler
+                .schedule(Task::Validate(Validate::UnresolvedRegion(Box::new(
+                    checker,
+                ))))
+                .unwrap();
+            let actual_count = rx.recv().unwrap();
+            if actual_count == target_count {
+                return;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                panic!(
+                    "check unresolve region failed, actual_count: {}, target_count: {}",
+                    actual_count, target_count
+                );
+            }
+        }
+    }
+
+    let mut suite = CloudTestSuiteBuilder::new().num_nodes(1).build();
+    let node_id = suite.cluster.pd_client().get_all_stores(true).unwrap()[0].id;
+
+    // create regions
+    let region_count = 100;
+    let split_keys: Vec<Vec<u8>> = (1..=region_count * 2 - 1)
+        .step_by(2)
+        .map(|i| format!("key_{:03}", i).into_bytes())
+        .collect();
+    let get_keys: Vec<Vec<u8>> = (0..=region_count * 2)
+        .step_by(2)
+        .map(|i| format!("key_{:03}", i).into_bytes())
+        .collect();
+    for i in 0..region_count - 1 {
+        let split_key = &split_keys[i];
+        let target_region = suite.cluster.get_region(split_key);
+        suite.cluster.must_split(&target_region, split_key);
+    }
+    let mut regions = Vec::with_capacity(region_count);
+    for i in 0..region_count {
+        let get_key = &get_keys[i];
+        let region = suite.cluster.get_region(get_key);
+        regions.push(region.clone());
+    }
+
+    fail::cfg("before_schedule_resolver_ready", "pause").unwrap();
+
+    // create event feed for all regions
+    let mut req_txs = Vec::with_capacity(region_count);
+    let mut event_feeds = Vec::with_capacity(region_count);
+    let mut receive_events = Vec::with_capacity(region_count);
+    for region in regions.clone() {
+        let (mut req_tx, event_feed, receive_event) =
+            new_event_feed(suite.get_region_cdc_client(region.id));
+        let mut req = suite.new_changedata_request(region.id);
+        req.mut_header().set_ticdc_version("7.0.0".into());
+        req.set_region_epoch(region.get_region_epoch().clone());
+        block_on(req_tx.send((req, WriteFlags::default()))).unwrap();
+        req_txs.push(req_tx);
+        event_feeds.push(event_feed);
+        receive_events.push(receive_event);
+    }
+
+    check_unresolved_region_count(&suite.endpoints[&node_id].clone(), region_count);
+
+    // Wait until all initialization finishes and check again.
+    fail::remove("before_schedule_resolver_ready");
+    for receive_event in receive_events {
+        receive_event(false);
+    }
+    check_unresolved_region_count(&suite.endpoints[&node_id].clone(), 0);
+
+    for req_tx in req_txs {
+        drop(req_tx);
+    }
+    for event_feed in event_feeds {
+        drop(event_feed);
+    }
+    suite.stop();
+}
+
+#[test]
+fn test_cdc_watchdog_idle_timeout() {
+    // let cluster = new_server_cluster(0, 1);
+    // cluster.pd_client.disable_default_operator();
+    let mut suite = CloudTestSuiteBuilder::new()
+        .num_nodes(1)
+        .after_cluster_bootstrapped(|c| c.get_pd_client().disable_default_operator())
+        .build();
+    let region = suite.cluster.get_region(b"");
+
+    // Enable failpoints to control the watchdog behavior
+    // cdc_idle_deregister_threshold will make the threshold 20 seconds instead of
+    // 20 minutes cdc_sleep_after_sink_flush will make the sink sleep for 30
+    // seconds after each flush
+    fail::cfg("cdc_idle_deregister_threshold", "return(true)").unwrap();
+    fail::cfg("cdc_sleep_after_sink_flush", "return(true)").unwrap(); // Remove the "1*" to make it trigger continuously
+
+    // Create event feed connection
+    let (mut req_tx, event_feed, _) = new_event_feed(suite.get_region_cdc_client(region.id));
+    let mut req = suite.new_changedata_request(region.id);
+    req.mut_header().set_ticdc_version("7.5.0".into());
+    block_on(req_tx.send((req, WriteFlags::default()))).unwrap();
+
+    // Wait for the connection to be established and initialized
+    thread::sleep(Duration::from_millis(1000));
+
+    debug!("Starting watchdog test - waiting for connection to be cancelled");
+
+    // Wait for the watchdog to trigger and cancel the connection
+    // The watchdog should trigger after 5 seconds due to
+    // cdc_idle_deregister_threshold failpoint and cdc_sleep_after_sink_flush
+    // failpoint will make the sink sleep for 6 seconds
+    thread::sleep(Duration::from_secs(6));
+
+    debug!("Finished waiting, now checking if connection was cancelled");
+
+    // Try to detect if the connection was cancelled by watchdog
+    // We can do this by trying to receive from the underlying receiver
+    // If the connection is closed, recv_timeout should return an error
+    let mut connection_cancelled = false;
+    let start_time = Instant::now();
+
+    // Try to detect connection closure for up to 5 seconds (shorter timeout for
+    // testing)
+    while start_time.elapsed() < Duration::from_secs(5) {
+        // Get the underlying receiver
+        let mut rx = event_feed.replace(None).unwrap();
+
+        // Try to receive with a short timeout
+        match recv_timeout(&mut rx, Duration::from_millis(100)) {
+            Ok(Some(Ok(_))) => {
+                // Still receiving data, connection is alive
+                debug!("Connection still alive, received data");
+                // Put the receiver back
+                event_feed.replace(Some(rx));
+            }
+            Ok(Some(Err(_))) => {
+                // Received an error, connection was cancelled
+                debug!("Connection cancelled with error");
+                connection_cancelled = true;
+                break;
+            }
+            Ok(None) => {
+                // No data available, but connection might still be alive
+                debug!("No data available, connection might still be alive");
+                // Put the receiver back
+                event_feed.replace(Some(rx));
+            }
+            Err(_) => {
+                // Connection is closed
+                debug!("Connection closed");
+                connection_cancelled = true;
+                break;
+            }
+        }
+
+        // Small delay before next check
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Verify that the connection was cancelled due to watchdog timeout
+    assert!(
+        connection_cancelled,
+        "Connection should have been cancelled by watchdog after idle timeout"
+    );
+
+    // Clean up
+    fail::remove("cdc_idle_deregister_threshold");
+    fail::remove("cdc_sleep_after_sink_flush");
+
+    drop(event_feed);
+    suite.stop();
 }

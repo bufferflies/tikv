@@ -7,7 +7,10 @@ use kvengine::{read, Item, SnapAccess, UserMeta};
 use kvproto::kvrpcpb::IsolationLevel;
 use tikv_kv::{Snapshot, Statistics};
 use tikv_util::txn_debug;
-use txn_types::{is_short_value, Key, Lock, OldValue, TimeStamp, TsSet, Value, Write, WriteType};
+use txn_types::{
+    is_short_value, Key, Lock, LockType, OldValue, TimeStamp, TsSet, Value, Write, WriteType,
+    SHORT_VALUE_MAX_LEN,
+};
 
 use crate::storage::{
     mvcc,
@@ -356,6 +359,320 @@ fn range_error(
         lower_bound: Some(snap_start.into_encoded()),
         upper_bound: Some(snap_end.into_encoded()),
     }))
+}
+
+/// DeltaScanner scans a key range and yields all MVCC versions of each key
+/// after (but excluded) `start_ts` with representing:
+/// - committed versions (from Write CF) as `TxnEntry::Commit` (including
+///   deletes),
+/// - uncommitted prewrite locks (from Lock CF) as `TxnEntry::Prewrite`.
+pub struct CloudDeltaScanner {
+    lock_iter: kvengine::read::Iterator,
+    iter: kvengine::read::Iterator,
+    start_ts: u64,
+    pub stats: Statistics,
+    lower_bound: Bytes,
+    upper_bound: Bytes,
+    filter_by_ts: bool,
+
+    is_started: bool,
+    current_raw_key: Vec<u8>,
+    snap: SnapAccess,
+}
+
+pub enum DeltaEntry {
+    Version {
+        user_meta: UserMeta,
+        value: Vec<u8>,
+        encoded_key: Key,
+        old_value: OldValue,
+    },
+    Lock {
+        lock: Lock,
+        raw_key: Vec<u8>,
+        old_value: OldValue,
+    },
+}
+
+impl std::fmt::Debug for DeltaEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Version {
+                user_meta,
+                value,
+                encoded_key,
+                old_value,
+            } => f
+                .debug_struct("Version")
+                .field("user_meta", user_meta)
+                .field("value", &format_args!("<{} byte(s)>", value.len()))
+                .field("encoded_key", encoded_key)
+                .field("old_value", old_value)
+                .finish(),
+            Self::Lock {
+                lock,
+                raw_key,
+                old_value,
+            } => f
+                .debug_struct("Lock")
+                .field("lock", lock)
+                .field("raw_key", &log_wrappers::Value::key(raw_key))
+                .field("old_value", old_value)
+                .finish(),
+        }
+    }
+}
+
+impl DeltaEntry {
+    fn into_txn_entry(self) -> TxnEntry {
+        match self {
+            DeltaEntry::Version {
+                user_meta,
+                value,
+                encoded_key,
+                old_value,
+            } => {
+                let write_key = encoded_key.clone().append_ts(user_meta.commit_ts.into());
+                let write_ty = if value.is_empty() {
+                    WriteType::Delete
+                } else {
+                    WriteType::Put
+                };
+                let default_key = encoded_key.append_ts(user_meta.start_ts.into());
+                if value.len() < SHORT_VALUE_MAX_LEN {
+                    let write_record = Write::new(write_ty, user_meta.start_ts.into(), Some(value));
+                    TxnEntry::Commit {
+                        default: (vec![], vec![]),
+                        write: (write_key.into_encoded(), write_record.as_ref().to_bytes()),
+                        old_value,
+                    }
+                } else {
+                    let write_record = Write::new(write_ty, user_meta.start_ts.into(), None);
+                    let default_value = value;
+                    TxnEntry::Commit {
+                        default: (default_key.into_encoded(), default_value),
+                        write: (write_key.into_encoded(), write_record.as_ref().to_bytes()),
+                        old_value,
+                    }
+                }
+            }
+            DeltaEntry::Lock {
+                mut lock,
+                raw_key,
+                old_value,
+            } => {
+                assert!(
+                    lock.short_value.is_some() || lock.lock_type == LockType::Delete,
+                    "lock value in cloud engine without short value; lock = {:?}, key = {}",
+                    lock,
+                    log_wrappers::Value::key(&raw_key)
+                );
+                let encoded_key = Key::from_raw(&raw_key).into_encoded();
+                if lock.short_value.as_ref().map(|v| v.len()).unwrap_or(0) > SHORT_VALUE_MAX_LEN {
+                    let val = lock.short_value.take().unwrap();
+                    let default_key = Key::from_raw(&raw_key).append_ts(lock.ts);
+                    return TxnEntry::Prewrite {
+                        default: (default_key.into_encoded(), val),
+                        lock: (encoded_key, lock.to_bytes()),
+                        old_value,
+                    };
+                }
+
+                TxnEntry::Prewrite {
+                    default: (vec![], vec![]),
+                    lock: (encoded_key, lock.to_bytes()),
+                    old_value,
+                }
+            }
+        }
+    }
+}
+
+impl CloudDeltaScanner {
+    #[maybe_async::both]
+    pub async fn new(
+        snap: SnapAccess,
+        start_ts: u64,
+        lower_bound: Option<Key>,
+        upper_bound: Option<Key>,
+        filter_by_ts: bool,
+    ) -> Self {
+        let stats = Statistics::default();
+        let lock_iter = snap.new_iterator(LOCK_CF, false, false, None, false);
+        let iter = if filter_by_ts {
+            snap.new_delta_iterator(false, start_ts)
+        } else {
+            snap.new_iterator(WRITE_CF, false, true, None, false)
+        };
+        let (lower_bound, upper_bound) =
+            verify_range(&snap, lower_bound, upper_bound).unwrap_or((Bytes::new(), Bytes::new()));
+        Self {
+            lock_iter,
+            start_ts,
+            iter,
+            lower_bound,
+            upper_bound,
+            stats,
+            filter_by_ts,
+            is_started: false,
+            current_raw_key: vec![],
+            snap,
+        }
+    }
+
+    #[maybe_async::both]
+    pub async fn init(&mut self) -> Result<()> {
+        if self
+            .lock_iter
+            .set_range(self.lower_bound.clone(), self.upper_bound.clone())
+        {
+            self.stats.lock.seek += 1;
+        }
+        if self
+            .iter
+            .set_range(self.lower_bound.clone(), self.upper_bound.clone())
+        {
+            self.stats.write.seek += 1;
+        }
+        self.is_started = true;
+        if self.iter.valid() {
+            self.current_raw_key = self.iter.key().to_vec();
+        }
+        Ok(())
+    }
+
+    #[maybe_async::both]
+    async fn get_old_value(&self, key: &[u8], before_ts: u64) -> OldValue {
+        let item = self.snap.get(WRITE_CF, key, before_ts - 1).await;
+        let v = item.get_value();
+        if v.is_empty() {
+            OldValue::None
+        } else {
+            OldValue::value(v.to_vec())
+        }
+    }
+
+    #[maybe_async::both]
+    pub async fn next_inner(&mut self) -> Result<Option<DeltaEntry>> {
+        if !self.is_started {
+            self.init().await?;
+        }
+
+        loop {
+            // As we assume the lock cf's kv count should be relatively small, we use
+            // `get_old_value` instead of reusing the write cf's iterator to
+            // simplify the code.
+            if self.lock_iter.valid() {
+                let raw_key_len = self.lock_iter.key().len();
+                let val_len = self.lock_iter.val().len();
+                if self.current_raw_key.is_empty() // Write iter reachs the end...
+                    // or it exceeds the lock iter. (We should yield Prewrite records before Commits.)
+                    || self.lock_iter.key() <= self.current_raw_key.as_slice()
+                {
+                    let lock = Lock::parse(self.lock_iter.val()).map_err(Error::from_mvcc)?;
+                    // ignore pessimistic lock.
+                    if lock.lock_type == LockType::Pessimistic {
+                        self.lock_iter.next().await;
+                        continue;
+                    }
+
+                    let lock_ts = std::cmp::max(lock.ts, lock.for_update_ts);
+                    let entry = DeltaEntry::Lock {
+                        lock,
+                        raw_key: self.lock_iter.key().to_vec(),
+                        // NOTE: maybe read it from the `WRITE_CF` state.
+                        // if `lock.key == write.key` => old value is `write.val`
+                        old_value: self
+                            .get_old_value(self.lock_iter.key(), lock_ts.into_inner())
+                            .await,
+                    };
+
+                    self.lock_iter.next().await;
+                    self.stats.lock.next += 1;
+                    self.stats.lock.flow_stats.read_keys += 1;
+                    self.stats.lock.flow_stats.read_bytes += raw_key_len + val_len;
+                    self.stats.lock.processed_keys += 1;
+
+                    return Ok(Some(entry));
+                }
+            }
+
+            if self.iter.valid() {
+                let iter_key = self.iter.key();
+                let key_len = iter_key.len();
+                let key = Key::from_raw(iter_key);
+                let user_meta = UserMeta::from_slice(self.iter.user_meta());
+
+                if user_meta.commit_ts <= self.start_ts {
+                    debug!("delta scanner get a commit record less than start_ts";
+                        "key" => log_wrappers::Value::key(key.as_encoded()),
+                        "user_meta" => ?user_meta,
+                        "start_ts" => ?self.start_ts,
+                    );
+                    self.iter.next().await;
+                    if !self.iter.valid() || self.iter.key() != self.current_raw_key {
+                        self.current_raw_key.truncate(0);
+                        if self.iter.valid() {
+                            self.current_raw_key.extend_from_slice(self.iter.key());
+                        }
+                    }
+                    continue;
+                }
+
+                let val = self.iter.val();
+                let val_len = val.len();
+                let val_vec = val.to_vec();
+
+                self.iter.next().await;
+                self.stats.write.next += 1;
+                self.stats.write.flow_stats.read_keys += 1;
+                self.stats.write.flow_stats.read_bytes += key_len + val_len;
+                let old_value = if !self.iter.valid() || self.iter.key() != self.current_raw_key {
+                    let old_value = if self.filter_by_ts {
+                        self.get_old_value(&self.current_raw_key, user_meta.commit_ts)
+                            .await
+                    } else {
+                        OldValue::None
+                    };
+                    self.stats.write.processed_keys += 1;
+                    self.current_raw_key.truncate(0);
+                    if self.iter.valid() {
+                        self.current_raw_key.extend_from_slice(self.iter.key());
+                    }
+                    old_value
+                } else {
+                    // Here we are in the previous version.
+                    let prev = self.iter.val();
+                    if prev.is_empty() {
+                        OldValue::None
+                    } else {
+                        OldValue::value(prev.to_vec())
+                    }
+                };
+                self.stats.processed_size += key_len + val_len;
+
+                let entry = DeltaEntry::Version {
+                    user_meta,
+                    value: val_vec,
+                    encoded_key: key,
+                    old_value,
+                };
+                return Ok(Some(entry));
+            }
+
+            return Ok(None);
+        }
+    }
+}
+
+impl super::TxnEntryScanner for CloudDeltaScanner {
+    fn next_entry(&mut self) -> Result<Option<TxnEntry>> {
+        Ok(self.next_inner()?.map(DeltaEntry::into_txn_entry))
+    }
+
+    fn take_statistics(&mut self) -> Statistics {
+        std::mem::take(&mut self.stats)
+    }
 }
 
 pub struct CloudStoreScanner {

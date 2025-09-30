@@ -832,7 +832,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                         task.extra_op = extra_op;
 
                         txn_debug!(
-                            "process cmd with snapshot"; 
+                            "process cmd with snapshot";
                             "cid" => task.cid, "term" => ?term, "extra_op" => ?extra_op, "tracker" => ?task.tracker
                         );
                         sched.process(snapshot, task).await;
@@ -1445,6 +1445,15 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 with_tls_engine(|engine: &mut E| {
                     // We skip writing the raftstore, but to improve CDC old value hit rate,
                     // we should send the old values to the CDC scheduler.
+                    // Probe hook for old_value testing (always compiled for test package)
+                    if tikv_kv::PROBE_OLD_VALUES_IN_TEST.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        tikv_kv::populate_old_values_probe_cache(
+                            &to_be_write.extra.old_values,
+                            &[],
+                        );
+                    }
+
                     engine.schedule_txn_extra(to_be_write.extra);
                 })
             }
@@ -1596,6 +1605,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let mut res = unsafe {
             with_tls_engine(|e: &mut E| {
                 tikv_util::set_current_region(region_id);
+                // Probe hook for old_value testing (always compiled for test package)
+                if tikv_kv::PROBE_OLD_VALUES_IN_TEST.load(std::sync::atomic::Ordering::Relaxed) {
+                    tikv_kv::populate_old_values_probe_cache(&to_be_write.extra.old_values, &[]);
+                }
+
                 e.async_write(
                     &ctx,
                     to_be_write,

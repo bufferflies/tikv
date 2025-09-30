@@ -1,8 +1,12 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::cell::RefCell;
+use std::{
+    cell::RefCell,
+    sync::{Arc, Mutex},
+};
 
-use kvproto::{raft_cmdpb::RaftCmdRequest, raft_serverpb::RaftMessage};
+use kvproto::{metapb, raft_cmdpb::RaftCmdRequest, raft_serverpb::RaftMessage};
+use raftstore::store::fsm::ChangeObserver;
 use tikv_util::{deadline::Deadline, mpsc::Sender, time::ThreadReadId, warn};
 
 use crate::{
@@ -204,6 +208,82 @@ fn send_command_impl(
     let cmd = RaftCommand::new(req, cb);
     // TODO(x) handle deadline
     router.send(cmd)
+}
+
+/// A handle for cdc and pitr to schedule some command back to raftstore.
+pub trait CdcHandle: Clone + Send {
+    fn capture_change(
+        &self,
+        region_id: u64,
+        region_epoch: metapb::RegionEpoch,
+        change_observer: ChangeObserver,
+        callback: Callback,
+    ) -> RaftStoreResult<()>;
+
+    fn check_leadership(&self, region_id: u64, callback: Callback) -> RaftStoreResult<()>;
+}
+
+impl<T: CdcHandle> CdcHandle for Arc<Mutex<T>> {
+    fn capture_change(
+        &self,
+        region_id: u64,
+        region_epoch: metapb::RegionEpoch,
+        change_observer: ChangeObserver,
+        callback: Callback,
+    ) -> RaftStoreResult<()> {
+        Mutex::lock(self).unwrap().capture_change(
+            region_id,
+            region_epoch,
+            change_observer,
+            callback,
+        )
+    }
+
+    fn check_leadership(&self, region_id: u64, callback: Callback) -> RaftStoreResult<()> {
+        Mutex::lock(self)
+            .unwrap()
+            .check_leadership(region_id, callback)
+    }
+}
+
+/// A wrapper of SignificantRouter that is specialized for implementing
+/// CdcHandle.
+#[derive(Clone)]
+pub struct CdcRaftRouter<T>(pub T);
+
+impl<T> std::ops::Deref for CdcRaftRouter<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: RaftStoreRouter> CdcHandle for CdcRaftRouter<T> {
+    fn capture_change(
+        &self,
+        region_id: u64,
+        region_epoch: metapb::RegionEpoch,
+        change_observer: ChangeObserver,
+        callback: Callback,
+    ) -> RaftStoreResult<()> {
+        self.0.significant_send(
+            region_id,
+            SignificantMsg::CaptureChange {
+                cmd: change_observer,
+                region_epoch,
+                callback,
+                can_apply: false,
+            },
+        );
+        Ok(())
+    }
+
+    fn check_leadership(&self, region_id: u64, callback: Callback) -> RaftStoreResult<()> {
+        self.0
+            .significant_send(region_id, SignificantMsg::LeaderCallback(callback));
+        Ok(())
+    }
 }
 
 #[cfg(test)]

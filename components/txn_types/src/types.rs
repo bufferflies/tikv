@@ -13,6 +13,7 @@ use tikv_util::{
         bytes::BytesEncoder,
         number::{self, NumberEncoder},
     },
+    memory::HeapSize,
 };
 
 use super::timestamp::TimeStamp;
@@ -239,10 +240,14 @@ impl Key {
         farmhash::fingerprint64(&self.to_raw().unwrap())
     }
 
-    #[allow(clippy::len_without_is_empty)]
     #[inline]
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -265,6 +270,11 @@ impl Debug for Key {
 impl Display for Key {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", &log_wrappers::Value::key(&self.0))
+    }
+}
+impl HeapSize for Key {
+    fn approximate_heap_size(&self) -> usize {
+        self.0.approximate_heap_size()
     }
 }
 
@@ -558,6 +568,15 @@ pub struct TxnExtra {
 impl TxnExtra {
     pub fn is_empty(&self) -> bool {
         self.old_values.is_empty()
+    }
+
+    pub fn size(&self) -> usize {
+        let mut result = 0;
+        for (key, value) in &self.old_values {
+            result += key.len();
+            result += value.0.size();
+        }
+        result + std::mem::size_of::<Self>()
     }
 }
 

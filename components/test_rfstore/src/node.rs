@@ -147,7 +147,7 @@ impl Simulator for NodeCluster {
             engines,
             Box::new(simulate_trans.clone()),
             pd_worker,
-            store_meta,
+            Arc::new(Mutex::new(store_meta)),
             coprocessor_host,
             importer,
             cm,

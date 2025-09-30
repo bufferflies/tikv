@@ -342,6 +342,7 @@ impl ServerCluster {
         );
         gc_worker.start(node_id).unwrap();
 
+        #[cfg(NO_NEXT_GEN_COMPATIBLE)]
         let rts_worker = if cfg.resolved_ts.enable {
             // Resolved ts worker
             let mut rts_worker = LazyWorker::new("resolved-ts");
@@ -627,7 +628,8 @@ impl ServerCluster {
                 sim_router,
                 sim_trans: simulate_trans,
                 gc_worker,
-                rts_worker,
+                // NO_NEXT_GEN_COMPATIBLE
+                rts_worker: None,
                 rsmeter_cleanup,
             },
         );

@@ -226,7 +226,9 @@ pub mod tests {
             .unwrap();
         if let ProcessResult::SecondaryLocksStatus { status } = result.pr {
             assert_eq!(status, expect_status);
-            write(engine, &ctx, result.to_be_write.modifies);
+            let mut data = tikv_kv::WriteData::from_modifies(result.to_be_write.modifies);
+            data.extra.req_type = txn_types::ReqType::CheckSecondaryLocks;
+            write(engine, &ctx, data);
         } else {
             unreachable!();
         }

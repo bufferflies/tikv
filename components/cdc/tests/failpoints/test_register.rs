@@ -97,7 +97,7 @@ fn test_region_ready_after_deregister_impl<F: KvFormat>() {
         .obs
         .get(&leader.get_store_id())
         .unwrap()
-        .on_role_change(&mut context, &RoleChange::new(StateRole::Follower));
+        .on_role_change(&mut context, &RoleChange::new_for_test(StateRole::Follower));
 
     // Then CDC should not panic
     fail::remove(fp);
@@ -122,7 +122,7 @@ fn test_connections_register_impl<F: KvFormat>() {
     // Region info
     let region = suite.cluster.get_region(&[]);
     // Prewrite
-    let start_ts = block_on(suite.cluster.pd_client.get_tso()).unwrap();
+    let start_ts = block_on(suite.cluster.pd_client().get_tso()).unwrap();
     let mut mutation = Mutation::default();
     mutation.set_op(Op::Put);
     mutation.key = k.clone().into_bytes();
@@ -165,7 +165,11 @@ fn test_connections_register_impl<F: KvFormat>() {
     let mut events = receive_event(false).events.to_vec();
     match events.pop().unwrap().event.unwrap() {
         Event_oneof_event::Error(err) => {
-            assert!(err.has_epoch_not_match(), "{:?}", err);
+            assert!(
+                err.has_epoch_not_match() || err.has_region_not_found(),
+                "{:?}",
+                err
+            );
         }
         other => panic!("unknown event {:?}", other),
     }

@@ -144,7 +144,10 @@ pub mod tests {
         let mut txn = MvccTxn::new(TimeStamp::zero(), cm);
         let mut reader = MvccReader::new(snapshot, Some(ScanMode::Forward), true);
         gc(&mut txn, &mut reader, Key::from_raw(key), safe_point.into()).unwrap();
-        write(engine, &Context::default(), txn.into_modifies());
+        let mut data = tikv_kv::WriteData::from_modifies(txn.into_modifies());
+        // TODO: determine the correct req type.
+        data.extra.req_type = txn_types::ReqType::Noop;
+        write(engine, &Context::default(), data);
     }
 
     #[cfg(test)]

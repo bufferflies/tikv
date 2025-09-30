@@ -48,7 +48,7 @@ impl ReadIndexRequest {
 
     pub fn push_command(&mut self, req: RaftCmdRequest, cb: Callback, read_index: u64) {
         RAFT_READ_INDEX_PENDING_COUNT.inc();
-        self.cmds_heap_size += req.heap_size();
+        self.cmds_heap_size += req.approximate_heap_size();
         self.cmds.push((req, cb, Some(read_index)));
     }
 
@@ -61,7 +61,7 @@ impl ReadIndexRequest {
         RAFT_READ_INDEX_PENDING_COUNT.inc();
 
         // Ignore heap allocations for `Callback`.
-        let cmds_heap_size = req.heap_size();
+        let cmds_heap_size = req.approximate_heap_size();
 
         let mut cmds = MustConsumeVec::with_capacity("callback of index read", 1);
         cmds.push((req, cb, None));
@@ -414,10 +414,10 @@ mod memtrace {
     use super::*;
 
     impl HeapSize for ReadIndexRequest {
-        fn heap_size(&self) -> usize {
+        fn approximate_heap_size(&self) -> usize {
             let mut size = self.cmds_heap_size + Self::CMD_SIZE * self.cmds.capacity();
             if let Some(ref add) = self.addition_request {
-                size += add.heap_size();
+                size += add.approximate_heap_size();
             }
             size
         }
@@ -425,12 +425,12 @@ mod memtrace {
 
     impl HeapSize for ReadIndexQueue {
         #[inline]
-        fn heap_size(&self) -> usize {
+        fn approximate_heap_size(&self) -> usize {
             let mut size = self.reads.capacity() * mem::size_of::<ReadIndexRequest>()
                 // For one Uuid and one usize.
                 + 24 * self.contexts.len();
             for read in &self.reads {
-                size += read.heap_size();
+                size += read.approximate_heap_size();
             }
             size
         }

@@ -1,6 +1,10 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{sync::Arc, thread, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
 
 use api_version::KvFormat;
 use concurrency_manager::ConcurrencyManager;
@@ -166,14 +170,12 @@ impl Node {
         engines: Engines,
         trans: Box<dyn Transport>,
         pd_worker: LazyWorker<PdTask>,
-        mut store_meta: StoreMeta,
+        store_meta: Arc<Mutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost<kvengine::Engine>,
         importer: Arc<SstImporter>,
         concurrency_manager: ConcurrencyManager,
     ) -> Result<()> {
         let store_id = self.id();
-        store_meta.store_id = Some(store_id);
-        store_meta.cop_host = Some(coprocessor_host.clone());
         if let Some(first_region) = self.check_or_prepare_bootstrap_cluster(&engines, store_id)? {
             info!("trying to bootstrap cluster"; "store_id" => store_id, "region" => ?first_region);
             // cluster is not bootstrapped, and we choose first store to bootstrap
@@ -182,7 +184,12 @@ impl Node {
             )));
             self.bootstrap_cluster(&engines, first_region)?;
         }
-        store_meta.black_list = engines.black_list.clone();
+        {
+            let mut store_meta_mut = store_meta.lock().unwrap();
+            store_meta_mut.store_id = Some(store_id);
+            store_meta_mut.cop_host = Some(coprocessor_host.clone());
+            store_meta_mut.black_list = engines.black_list.clone();
+        }
 
         // Put store only if the cluster is bootstrapped.
         info!("put store to PD"; "store" => ?&self.store);
@@ -362,12 +369,12 @@ impl Node {
         engines: Engines,
         trans: Box<dyn Transport>,
         pd_worker: LazyWorker<PdTask>,
-        store_meta: StoreMeta,
+        store_meta: Arc<Mutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost<kvengine::Engine>,
         importer: Arc<SstImporter>,
         concurrency_manager: ConcurrencyManager,
     ) -> Result<()> {
-        let store_id = store_meta.store_id.unwrap();
+        let store_id = store_meta.lock().unwrap().store_id.unwrap();
         info!("start raft store thread"; "store_id" => store_id);
 
         if self.has_started {

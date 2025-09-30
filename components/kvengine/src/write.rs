@@ -55,7 +55,8 @@ impl WriteBatch {
         self.update_inner_key_offset = false;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testexport"))]
+    #[allow(dead_code)]
     pub(crate) fn new(shard_id: u64) -> Self {
         let mut wb = Self::default();
         wb.shard_id = shard_id;

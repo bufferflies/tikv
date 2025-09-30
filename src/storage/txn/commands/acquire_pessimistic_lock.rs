@@ -174,6 +174,11 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for AcquirePessim
 
         let pr = ProcessResult::PessimisticLockRes { res };
 
+        // Probe hook for old_value testing (always compiled for test package)
+        if tikv_kv::PROBE_OLD_VALUES_IN_TEST.load(std::sync::atomic::Ordering::Relaxed) {
+            tikv_kv::populate_old_values_probe_cache(&old_values, &[]);
+        }
+
         let to_be_write = make_write_data(modifies, old_values, ReqType::PessimisticLock);
 
         Ok(WriteResult {

@@ -18,11 +18,12 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{atomic::AtomicU64, Arc, Once},
+    sync::{atomic::AtomicU64, Arc, Mutex, Once},
     thread, u64,
 };
 
 use api_version::{dispatch_api_version, KvFormat};
+use causal_ts::CausalTsProviderImpl;
 use cloud_encryption::MasterKey;
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::from_rocks_compression_type;
@@ -38,8 +39,9 @@ use kvengine::{
     limiter::{LimiterOptions, StoreLimiter},
 };
 use kvproto::{
-    brpb::create_backup, deadlock::create_deadlock, diagnosticspb_grpc::create_diagnostics,
-    import_sstpb_grpc::create_import_sst, raft_serverpb::StoreIdent,
+    brpb::create_backup, cdcpb::create_change_data, deadlock::create_deadlock,
+    diagnosticspb_grpc::create_diagnostics, import_sstpb_grpc::create_import_sst,
+    kvrpcpb::ApiVersion, raft_serverpb::StoreIdent,
     resource_usage_agent::create_resource_metering_pub_sub,
 };
 use overload_protector::{OverloadProtector, OverloadProtectorWorker};
@@ -57,12 +59,15 @@ use raftstore::{
     RegionInfoAccessor,
 };
 use rfengine::{RfEngine, STORE_IDENT_KEY};
+#[cfg(feature = "testexport")]
+use rfstore::store::Transport;
 use rfstore::{
     store::{
-        memory::MEMTRACE_ROOT as MEMTRACE_RFSTORE, BlackList, Engines, LocalReader,
-        MetaChangeListener, PdIdAllocator, RaftBatchSystem, StoreMeta, StoreMsg, PENDING_MSG_CAP,
+        memory::MEMTRACE_ROOT as MEMTRACE_RFSTORE, BlackList, CheckLeaderRunner, Engines,
+        LocalReader, MetaChangeListener, PdIdAllocator, RaftBatchSystem, StoreMeta, StoreMsg,
+        PENDING_MSG_CAP,
     },
-    RaftRouter, ServerRaftStoreRouter,
+    CdcRaftRouter, RaftRouter, ServerRaftStoreRouter,
 };
 use security::SecurityManager;
 use sst_importer::SstImporter;
@@ -82,10 +87,14 @@ use tikv::{
     tikv_build_version,
 };
 use tikv_kv::Engine;
+#[cfg(feature = "testexport")]
+use tikv_util::worker::Scheduler;
 use tikv_util::{
     check_environment_variables,
     config::{ensure_dir_exist, ReadableDuration, ReadableSize, VersionTrack},
-    get_panic_region_count, mpsc,
+    get_panic_region_count,
+    memory::MemoryQuota,
+    mpsc,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
     sys::{
         disk::get_disk_capacity,
@@ -109,6 +118,7 @@ use crate::{
     service::{DiagnosticsService, ImportSstService},
     setup::{initial_logger, initial_metric, validate_and_persist_config},
     status_server::StatusServer,
+    transport::ServerTransport,
 };
 
 const RESERVED_OPEN_FDS: u64 = 1000;
@@ -120,6 +130,25 @@ const ZSTD_COMPRESSION_LEVEL_FOR_LOCAL: &str = "3";
 const PD_CLIENT_RETRY_COUNT: usize = 10;
 const ENV_K8S_HOST: &str = "KUBERNETES_SERVICE_HOST";
 const K8S_MIN_DISK_CAPACITY: u64 = ReadableSize::gb(50).0;
+
+pub type CloudServerTransport = ServerTransport<RaftRouter, resolve::PdStoreAddrResolver>;
+
+#[derive(Default)]
+#[cfg(feature = "testexport")]
+/// A set of hooks for tweaking TikvServer during testing.
+pub struct TestExport {
+    // These hooks may be set before `run`.
+    pub on_cdc_creation: Option<Box<dyn FnOnce(CdcCreationContext<'_>)>>,
+    // Override the transport used for server cluster.
+    pub override_transport: Option<Box<dyn FnOnce(CloudServerTransport) -> Box<dyn Transport>>>,
+}
+
+#[cfg(feature = "testexport")]
+pub struct CdcCreationContext<'a> {
+    pub endpoint: &'a mut cdc::Endpoint<CdcRaftRouter<RaftRouter>, StoreMeta>,
+    pub scheduler: &'a Scheduler<cdc::Task>,
+    pub observer: &'a cdc::CdcObserver,
+}
 
 /// A complete TiKV server.
 pub struct TikvServer {
@@ -140,15 +169,20 @@ pub struct TikvServer {
     lock_files: Vec<File>,
     concurrency_manager: ConcurrencyManager,
     env: Arc<Environment>,
+    check_leader_worker: Worker,
     background_worker: Worker,
     quota_limiter: Arc<QuotaLimiter>,
     io_rate_limiter: Arc<IoRateLimiter>,
     overload_protector: OverloadProtector,
     flow_controller: Arc<FlowController>,
+    causal_ts_provider: Option<Arc<CausalTsProviderImpl>>, // used for cdc
+
+    #[cfg(feature = "testexport")]
+    pub test_export: TestExport,
 }
 
 struct TikvEngines {
-    store_meta: Option<StoreMeta>,
+    store_meta: Arc<Mutex<StoreMeta>>,
     engine: RaftKv,
 }
 
@@ -158,6 +192,15 @@ struct Servers {
     node: Node,
     importer: Arc<SstImporter>,
     rsmeter_pubsub_service: resource_metering::PubSubService,
+    cdc_scheduler: tikv_util::worker::Scheduler<cdc::Task>,
+    cdc_memory_quota: Arc<MemoryQuota>,
+}
+
+#[cfg(feature = "testexport")]
+impl TikvServer {
+    pub fn mut_system(&mut self) -> &mut RaftBatchSystem {
+        self.system.as_mut().unwrap()
+    }
 }
 
 impl TikvServer {
@@ -330,6 +373,23 @@ impl TikvServer {
             config.quota.max_delay_duration,
             config.quota.enable_auto_tune,
         ));
+
+        let mut causal_ts_provider = None;
+        if config.storage.api_version() == ApiVersion::V2 {
+            let tso = block_on(causal_ts::BatchTsoProvider::new_opt(
+                pd_client.clone(),
+                config.causal_ts.renew_interval.0,
+                config.causal_ts.alloc_ahead_buffer.0,
+                config.causal_ts.renew_batch_min_size,
+                config.causal_ts.renew_batch_max_size,
+            ));
+            if let Err(e) = tso {
+                fatal!("Causal timestamp provider initialize failed: {:?}", e);
+            }
+            causal_ts_provider = Some(Arc::new(tso.unwrap().into()));
+            info!("Causal timestamp provider startup.");
+        }
+
         let mut overload_protector_worker = OverloadProtectorWorker::new(config.overload.clone());
         let overload_protector = overload_protector_worker.get_protector();
         std::thread::Builder::new()
@@ -338,6 +398,10 @@ impl TikvServer {
                 overload_protector_worker.run();
             })
             .unwrap();
+
+        // Run check leader in a dedicate thread, because it is time sensitive
+        // and crucial to TiCDC replication lag.
+        let check_leader_worker = WorkerBuilder::new("check-leader").thread_count(1).create();
 
         info!("created tikv server");
         TikvServer {
@@ -358,11 +422,16 @@ impl TikvServer {
             lock_files: vec![],
             concurrency_manager,
             env,
+            check_leader_worker,
             background_worker,
             quota_limiter,
             io_rate_limiter,
             overload_protector,
             flow_controller: Arc::new(flow_controller),
+            causal_ts_provider,
+
+            #[cfg(feature = "testexport")]
+            test_export: TestExport::default(),
         }
     }
 
@@ -581,7 +650,7 @@ impl TikvServer {
             ),
             self.raw_engines.kv.clone(),
         );
-        let store_meta = Some(store_meta);
+        let store_meta = Arc::new(Mutex::new(store_meta));
         self.engines = Some(TikvEngines { store_meta, engine });
     }
 
@@ -602,6 +671,17 @@ impl TikvServer {
         lock_mgr.register_detector_role_change_observer(self.coprocessor_host.as_mut().unwrap());
 
         let engines = self.engines.as_mut().unwrap();
+
+        // Create cdc.
+        let cdc_memory_quota = Arc::new(MemoryQuota::new(self.config.cdc.sink_memory_quota.0 as _));
+        let mut cdc_worker = Box::new(LazyWorker::new("cdc"));
+        let cdc_scheduler = cdc_worker.scheduler();
+        let txn_extra_scheduler =
+            cdc::CdcTxnExtraScheduler::new(cdc_scheduler.clone(), cdc_memory_quota.clone());
+
+        engines
+            .engine
+            .set_txn_extra_scheduler(Arc::new(txn_extra_scheduler));
 
         let pd_worker = LazyWorker::new("pd-worker");
         let pd_sender = pd_worker.scheduler();
@@ -725,6 +805,23 @@ impl TikvServer {
             .unwrap_or_else(|e| fatal!("failed to bootstrap node id: {}", e));
         info!("store bootstrapped");
 
+        // Register cdc.
+        let cdc_ob = cdc::CdcObserver::new(cdc_scheduler.clone(), cdc_memory_quota.clone());
+        cdc_ob.register_to(self.coprocessor_host.as_mut().unwrap());
+        // Register cdc config manager.
+        cfg_controller.register(
+            tikv::config::Module::Cdc,
+            Box::new(cdc::CdcConfigManager(cdc_worker.scheduler())),
+        );
+
+        let check_leader_runner = CheckLeaderRunner::new(
+            engines.store_meta.clone(),
+            self.coprocessor_host.clone().unwrap(),
+        );
+        let check_leader_scheduler = self
+            .check_leader_worker
+            .start("check-leader", check_leader_runner);
+
         let mut copr = coprocessor::Endpoint::new(
             &server_config.value(),
             cop_read_pool_handle,
@@ -752,6 +849,7 @@ impl TikvServer {
             self.env.clone(),
             unified_read_pool,
             debug_thread_pool,
+            check_leader_scheduler,
         )
         .unwrap_or_else(|e| fatal!("failed to create server: {}", e));
 
@@ -793,11 +891,19 @@ impl TikvServer {
             .registry
             .register_consistency_check_observer(100, observer);
 
+        #[cfg(not(feature = "testexport"))]
+        let transport = Box::new(server.transport());
+        #[cfg(feature = "testexport")]
+        let transport = if let Some(ot) = self.test_export.override_transport.take() {
+            ot(server.transport())
+        } else {
+            Box::new(server.transport())
+        };
         node.start(
             self.raw_engines.clone(),
-            Box::new(server.transport()),
+            transport,
             pd_worker,
-            engines.store_meta.take().unwrap(),
+            engines.store_meta.clone(),
             self.coprocessor_host.clone().unwrap(),
             importer.clone(),
             self.concurrency_manager.clone(),
@@ -806,12 +912,44 @@ impl TikvServer {
 
         initial_metric(&self.config.metric);
 
+        // Start CDC.
+        #[allow(unused_mut)]
+        let mut cdc_endpoint = cdc::Endpoint::new(
+            self.config.server.cluster_id,
+            &self.config.cdc,
+            &self.config.resolved_ts,
+            self.config.storage.api_version(),
+            self.pd_client.clone(),
+            cdc_scheduler.clone(),
+            CdcRaftRouter(self.router.clone()),
+            cdc_ob.clone(),
+            engines.store_meta.clone(),
+            self.concurrency_manager.clone(),
+            server.env(),
+            self.security_mgr.clone(),
+            cdc_memory_quota.clone(),
+            self.causal_ts_provider.clone(),
+        );
+        #[cfg(feature = "testexport")]
+        if let Some(on_cdc_creation) = self.test_export.on_cdc_creation.take() {
+            on_cdc_creation(CdcCreationContext {
+                endpoint: &mut cdc_endpoint,
+                scheduler: &cdc_scheduler,
+                observer: &cdc_ob,
+            });
+        }
+
+        cdc_worker.start_with_timer(cdc_endpoint);
+        self.to_stop.push(cdc_worker);
+
         self.servers = Some(Servers {
+            cdc_scheduler,
             lock_mgr,
             server,
             node,
             importer,
             rsmeter_pubsub_service,
+            cdc_memory_quota,
         });
 
         server_config
@@ -879,6 +1017,18 @@ impl TikvServer {
             .is_some()
         {
             fatal!("failed to register backup service");
+        }
+        let cdc_service = cdc::Service::new(
+            servers.cdc_scheduler.clone(),
+            servers.cdc_memory_quota.clone(),
+            Arc::new(self.background_worker.clone()),
+        );
+        if servers
+            .server
+            .register_service(create_change_data(cdc_service))
+            .is_some()
+        {
+            fatal!("failed to register cdc service");
         }
 
         let backup_endpoint = backup::Endpoint::new(
@@ -1021,6 +1171,14 @@ impl TikvServer {
 
     pub fn get_raft_router(&self) -> RaftRouter {
         self.router.clone()
+    }
+
+    pub fn get_concurrency_manager(&self) -> &ConcurrencyManager {
+        &self.concurrency_manager
+    }
+
+    pub fn get_causal_ts_provider(&self) -> Option<&Arc<CausalTsProviderImpl>> {
+        self.causal_ts_provider.as_ref()
     }
 }
 

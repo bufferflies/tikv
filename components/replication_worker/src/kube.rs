@@ -15,7 +15,7 @@ use kube::{api::PostParams, Api};
 use pd_client::PdClient;
 use resolved_ts::Resolver;
 use security::SecurityConfig;
-use tikv_util::{info, warn};
+use tikv_util::{info, memory::MemoryQuota, warn};
 
 use crate::{
     bootstrap, worker::new_keyspace_pd_client, Error, KeyspaceService, KeyspaceStates,
@@ -62,7 +62,7 @@ impl KeyspaceKubeService {
             conf: conf.clone(),
             sec_conf: sec_conf.clone(),
             task_states,
-            resolver: Resolver::new(0),
+            resolver: Resolver::new(0, Arc::new(MemoryQuota::new(usize::MAX))),
             pd_client: None,
             scheme,
         }

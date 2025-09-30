@@ -52,8 +52,11 @@ extern crate slog_global;
 #[allow(unused_extern_crates)]
 extern crate tikv_alloc;
 
+#[cfg(any(test, feature = "testexport"))]
+pub mod test_engine;
+
 #[cfg(test)]
-mod tests;
+pub mod tests;
 
 #[cfg(feature = "debug-trace-mem-table")]
 pub mod debug;

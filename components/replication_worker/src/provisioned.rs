@@ -15,7 +15,7 @@ use nix::{
 use pd_client::PdClient;
 use resolved_ts::Resolver;
 use security::SecurityConfig;
-use tikv_util::info;
+use tikv_util::{info, memory::MemoryQuota};
 
 use crate::{
     bootstrap, worker::new_keyspace_pd_client, KeyspaceService, KeyspaceStates,
@@ -44,7 +44,7 @@ impl KeyspaceProvisionedService {
             sec_conf: sec_conf.clone(),
             states,
             pd_client: None,
-            resolver: Resolver::new(0),
+            resolver: Resolver::new(0, Arc::new(MemoryQuota::new(usize::MAX))),
         }
     }
 }

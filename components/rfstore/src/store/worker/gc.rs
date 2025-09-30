@@ -71,7 +71,7 @@ impl GcRunner {
     pub fn new(kv: kvengine::Engine, importer: Arc<SstImporter>, timeout: Duration) -> Self {
         let ia_gc_runner = match kv.ia_ctx() {
             IaCtx::Enabled(ia_mgr, meta_path) => {
-                #[cfg_attr(not(feature = "textexport"), allow(unused_mut))]
+                #[cfg_attr(not(feature = "testexport"), allow(unused_mut))]
                 let mut config = IaGcConfig::default();
 
                 // For test purpose:

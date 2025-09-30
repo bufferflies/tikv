@@ -17,12 +17,16 @@ use raft::eraftpb::MessageType;
 use rfstore::{
     router::{LocalReadRouter, RaftStoreRouter},
     store::{
-        Callback, CasualMessage, CasualRouter, ProposalRouter, RaftCommand, SignificantMsg,
-        StoreMsg, StoreRouter, Transport,
+        Callback, CasualMessage, CasualRouter, PeerMsg, ProposalRouter, RaftCommand,
+        SignificantMsg, StoreMsg, StoreRouter, Transport,
     },
     DiscardReason, Error, Result,
 };
-use tikv_util::{error, time::ThreadReadId, Either, HandyRwLock};
+use tikv_util::{
+    error, spawn_anonymous_thread_with, time::ThreadReadId, warn, Either, HandyRwLock,
+};
+
+pub type SharedFilters = Arc<RwLock<Vec<Box<dyn Filter>>>>;
 
 pub fn check_messages(msgs: &[RaftMessage]) -> Result<()> {
     if msgs.is_empty() {
@@ -153,6 +157,10 @@ impl<C> SimulateTransport<C> {
         }
     }
 
+    pub fn with_filters(ch: C, filters: SharedFilters) -> SimulateTransport<C> {
+        SimulateTransport { filters, ch }
+    }
+
     pub fn clear_filters(&mut self) {
         self.filters.wl().clear();
     }
@@ -239,6 +247,32 @@ impl<C: RaftStoreRouter> RaftStoreRouter for SimulateTransport<C> {
     fn significant_send(&self, region_id: u64, msg: SignificantMsg) {
         self.ch.significant_send(region_id, msg)
     }
+}
+
+pub fn spawn_recv_filter(
+    recv: tikv_util::mpsc::Receiver<(u64, Box<PeerMsg>)>,
+    filters: SharedFilters,
+) -> tikv_util::mpsc::Receiver<(u64, Box<PeerMsg>)> {
+    let (tx, rx) = tikv_util::mpsc::unbounded();
+    use tikv_util::sys::thread::StdThreadBuildWrapper;
+    spawn_anonymous_thread_with!(move || {
+        while let Ok((id, msg)) = recv.recv() {
+            if let box PeerMsg::RaftMessage(rm) = msg {
+                let _ = filter_send(&filters, rm, |m| {
+                    if let Err(err) = tx.send((id, Box::new(PeerMsg::RaftMessage(m)))) {
+                        warn!("server is gone; dropping filtered message"; "m" => ?err.into_inner());
+                    }
+                    Ok(())
+                });
+            } else {
+                let send_res = tx.send((id, msg));
+                if let Err(err) = send_res {
+                    warn!("server is gone; dropping message"; "m" => ?err.into_inner());
+                }
+            }
+        }
+    });
+    rx
 }
 
 impl<C: LocalReadRouter> LocalReadRouter for SimulateTransport<C> {

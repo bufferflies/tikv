@@ -448,7 +448,9 @@ impl SstImporter {
             }
             shrink_file_count
         } else {
-            info!("shrink cache by tick"; "shrink size" => shrink_buff_size, "retain size" => retain_buff_size);
+            if shrink_buff_size > 0 || retain_buff_size > 0 {
+                info!("shrink cache by tick"; "shrink size" => shrink_buff_size, "retain size" => retain_buff_size);
+            }
             self.dec_mem(shrink_buff_size as _);
             shrink_buff_size
         }

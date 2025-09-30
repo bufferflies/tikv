@@ -5,6 +5,7 @@ use std::sync::{
     Arc,
 };
 
+use crossbeam::atomic::AtomicCell;
 use fail::fail_point;
 use kvproto::{
     kvrpcpb::ExtraOp as TxnExtraOp,
@@ -163,6 +164,8 @@ pub struct ReadDelegate {
     pub tag: String,
     pub txn_ext: Arc<TxnExt>,
     pub bucket_meta: Option<Arc<BucketMeta>>,
+    // TODO: finish txn_extra_op
+    pub txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
 
     // `track_ver` used to keep the local `ReadDelegate` in `LocalReader`
     // up-to-date with the global `ReadDelegate` stored at `StoreMeta`
@@ -186,6 +189,7 @@ impl ReadDelegate {
             tag: format!("[region {}] {}", region_id, peer_id),
             txn_ext: peer.txn_ext.clone(),
             bucket_meta: peer.buckets.as_ref().map(|b| b.meta.clone()),
+            txn_extra_op: peer.txn_extra_op.clone(),
             track_ver: TrackVer::new(),
         }
     }
@@ -234,6 +238,26 @@ impl ReadDelegate {
         }
         false
     }
+
+    /// Used in some external tests.
+    pub fn mock(region_id: u64) -> Self {
+        let mut region: metapb::Region = Default::default();
+        region.set_id(region_id);
+        ReadDelegate {
+            region: Arc::new(region),
+            peer_id: 1,
+            store_id: 1,
+            term: 1,
+            applied_index_term: 1,
+            leader_lease: None,
+            last_valid_ts: Timespec::new(0, 0),
+            tag: format!("[region {}] {}", region_id, 1),
+            txn_extra_op: Default::default(),
+            txn_ext: Default::default(),
+            track_ver: TrackVer::new(),
+            bucket_meta: None,
+        }
+    }
 }
 
 pub struct LocalReader {
@@ -250,7 +274,14 @@ impl ReadExecutor for LocalReader {
     fn get_snapshot(&self, region_id: u64, region_ver: u64) -> Result<RegionSnapshot> {
         if let Some(snap) = self.kv_engine.get_snap_access(region_id) {
             if snap.get_version() == region_ver {
-                return Ok(RegionSnapshot::from_snapshot(snap));
+                let extra_op = self
+                    .delegates
+                    .get_no_promote(&region_id)
+                    .map(|d| d.txn_extra_op.load())
+                    .unwrap_or(TxnExtraOp::Noop);
+                let mut snapshot = RegionSnapshot::from_snapshot(snap, None);
+                snapshot.txn_extra_op = extra_op;
+                return Ok(snapshot);
             }
         }
         Err(Error::StaleCommand)
@@ -399,9 +430,11 @@ impl LocalReader {
                     }
                     _ => unreachable!(),
                 };
+                response.txn_extra_op = delegate.txn_extra_op.load();
                 cmd_resp::bind_term(&mut response.response, delegate.term);
                 if let Some(snap) = response.snapshot.as_mut() {
                     snap.txn_ext = Some(delegate.txn_ext.clone());
+                    snap.txn_extra_op = response.txn_extra_op;
                     snap.bucket_meta = delegate.bucket_meta.clone();
                 }
                 cb.invoke_read(response);

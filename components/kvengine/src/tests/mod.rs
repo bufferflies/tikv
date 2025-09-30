@@ -4,39 +4,26 @@ mod test_columnar;
 mod test_txn_file;
 
 use std::{
-    collections::HashMap,
-    env,
-    iter::Iterator,
-    ops::Deref,
-    path::Path,
-    rc::Rc,
-    sync::{atomic::AtomicU64, Arc},
-    thread,
-    time::Duration,
-    u64, vec,
+    collections::HashMap, iter::Iterator, rc::Rc, sync::Arc, thread, time::Duration, u64, vec,
 };
 
-use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
-use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use cloud_encryption::{EncryptionKey, MasterKey};
-use file_system::IoRateLimiter;
 use kvenginepb as pb;
 use rand::prelude::*;
 use rstest::rstest;
-use security::SecurityManager;
-use tempfile::TempDir;
 use tikv_util::{mpsc, time::Instant};
 use txn_types::{ClusterGcStates, GcState, NULL_KEYSPACE_ID};
-use util::test_util::KeyBuilder;
 
 use crate::{
-    dfs::InMemFs,
-    limiter::StoreLimiter,
     table::{
         file::{File, InMemFile},
         sstable::{BlockCache, L0Builder, L0Table, SsTable},
         BoundedDataSet, ChecksumType, DataBound, InnerKey, BIT_DELETE, OP_PUT,
+    },
+    test_engine::{
+        new_test_engine, new_test_engine_api_v2, new_test_engine_opt, ApplyTask, TestEngine,
+        DEF_BLOCK_SIZE, KEYSPACE_ID, TABLE_KEY_PREFIX,
     },
     tests::test_txn_file::{build_txn_chunk, make_lock_prefix, make_txn_file_refs},
     *,
@@ -52,95 +39,6 @@ macro_rules! unwrap_or_return {
             }
         }
     };
-}
-
-const KEYSPACE_ID: u32 = 1;
-
-const DEF_BLOCK_SIZE: usize = 4 << 10;
-const DEF_MIN_BLOB_SIZE: u32 = 64;
-
-const TABLE_KEY_PREFIX: &str = "t_";
-
-/// Wrap `Engine` to make sure that it will be closed after the test, and not
-/// interfere with other tests.
-struct TestEngine {
-    engine: Engine,
-    key_builder: KeyBuilder,
-}
-
-impl std::ops::Deref for TestEngine {
-    type Target = Engine;
-
-    fn deref(&self) -> &Self::Target {
-        &self.engine
-    }
-}
-
-impl Drop for TestEngine {
-    fn drop(&mut self) {
-        self.engine.close();
-    }
-}
-
-impl TestEngine {
-    fn key_builder(&self) -> &KeyBuilder {
-        &self.key_builder
-    }
-}
-
-fn new_test_engine() -> (TestEngine, mpsc::Sender<ApplyTask>) {
-    new_test_engine_opt(false, DEF_BLOCK_SIZE, "")
-}
-
-fn new_test_engine_opt(
-    enable_inner_key_off: bool,
-    block_size: usize,
-    key_prefix: &str,
-) -> (TestEngine, mpsc::Sender<ApplyTask>) {
-    let (listener_tx, listener_rx) = mpsc::unbounded();
-    let tester = EngineTester::new(enable_inner_key_off, block_size);
-    let meta_change_listener = Box::new(TestMetaChangeListener {
-        sender: listener_tx,
-    });
-    let rate_limiter = Arc::new(IoRateLimiter::new_for_test());
-    let store_limiter = Arc::new(StoreLimiter::dummy());
-    let mut meta_iter = tester.clone();
-    let engine = Engine::open(
-        tester.fs.clone(),
-        tester.opts.clone(),
-        tester.config.clone(),
-        &mut meta_iter,
-        tester.clone(),
-        tester.core.clone(),
-        meta_change_listener,
-        rate_limiter,
-        store_limiter,
-        MasterKey::new(&[1u8; 32]),
-        Arc::new(SecurityManager::default()),
-    )
-    .unwrap();
-    {
-        let shard = engine.get_shard(1).unwrap();
-        store_bool(&shard.active, true);
-    }
-    let (applier_tx, applier_rx) = mpsc::unbounded();
-    let meta_listener = MetaListener::new(listener_rx, applier_tx.clone());
-    thread::spawn(move || {
-        meta_listener.run();
-    });
-    let applier = Applier::new(engine.clone(), applier_rx);
-    thread::spawn(move || {
-        applier.run();
-    });
-    let keyspace_id = if enable_inner_key_off { 1 } else { 0 };
-    let key_builder = KeyBuilder::new(keyspace_id, key_prefix);
-    (
-        TestEngine {
-            engine,
-            key_builder,
-        },
-        applier_tx,
-    )
 }
 
 // NOTE: In async test, access underlying file with async methods is not
@@ -446,6 +344,63 @@ async fn test_read_iterator_all_versions() {
         assert_eq!(iter.val(), key.repeat(2).as_slice());
         iter.next().await;
     }
+}
+
+// Basic sanity for SnapAccess::new_delta_iterator over WRITE_CF.
+// Build two versions of the same key range and verify:
+// - since_ts = 0 returns both versions (2x keys)
+// - since_ts > older_version returns only the newer version (1x keys)
+#[test]
+fn test_delta_iterator_basic() {
+    let (engine, _) = new_test_engine_api_v2();
+    let shard = engine.get_shard(1).unwrap();
+
+    // Build write CF with two non-deleted versions for keys [0, 50).
+    let cf = WRITE_CF;
+    let mut cf_builder = ShardCfBuilder::new(cf);
+    let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
+
+    // Older version = 100, Newer version = 200.
+    cf_builder.add_table(
+        new_table(&engine, 1001, 0, 50, 100, false, &mut saved_vals),
+        3,
+    );
+    cf_builder.add_table(
+        new_table(&engine, 1002, 0, 50, 200, false, &mut saved_vals),
+        2,
+    );
+
+    // Wire into shard data (other CFs empty).
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_cfs([cf_builder.build(), ShardCf::new(1), ShardCf::new(2)]);
+    shard.set_data(builder.build());
+
+    // Create snapshot and set a very large managed_ts so parse_item doesn't filter
+    // by read_ts.
+    let snap = SnapAccess::new(&shard);
+
+    let lower = Bytes::from(snap.get_start_key().to_vec());
+    let upper = Bytes::from(snap.get_end_key().to_vec());
+
+    // since_ts = 0 -> expect two versions per key
+    let mut it = snap.new_delta_iterator(false, 0);
+    it.set_range(lower.clone(), upper.clone());
+    let mut cnt = 0;
+    while it.valid() {
+        cnt += 1;
+        it.next();
+    }
+    assert_eq!(cnt, 50 /* keys */ * 2 /* versions */);
+
+    // since_ts = 150 -> expect only version 200
+    let mut it2 = snap.new_delta_iterator(false, 150);
+    it2.set_range(lower.clone(), upper.clone());
+    let mut cnt2 = 0;
+    while it2.valid() {
+        cnt2 += 1;
+        it2.next();
+    }
+    assert_eq!(cnt2, 50);
 }
 
 #[test]
@@ -1104,203 +1059,6 @@ fn prepare_table_region(
     4
 }
 
-#[derive(Clone)]
-struct TestMetaChangeListener {
-    sender: mpsc::Sender<pb::ChangeSet>,
-}
-
-impl MetaChangeListener for TestMetaChangeListener {
-    fn on_change_set(&self, cs: pb::ChangeSet) {
-        info!("on meta change listener");
-        self.sender.send(cs).unwrap();
-    }
-}
-
-#[derive(Clone)]
-struct EngineTester {
-    core: Arc<EngineTesterCore>,
-}
-
-impl Deref for EngineTester {
-    type Target = EngineTesterCore;
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-impl EngineTester {
-    fn new(enable_inner_key_off: bool, block_size: usize) -> Self {
-        let initial_cs = new_initial_cs(enable_inner_key_off);
-        let initial_meta = ShardMeta::new(1, &initial_cs);
-        let metas = dashmap::DashMap::new();
-        metas.insert(1, Arc::new(initial_meta));
-        let tmp_dir = TempDir::new().unwrap();
-        let opts = new_test_options(tmp_dir.path(), enable_inner_key_off, block_size);
-        let config = KvEngineConfig::default();
-
-        Self {
-            core: Arc::new(EngineTesterCore {
-                _tmp_dir: tmp_dir,
-                metas,
-                fs: Arc::new(InMemFs::new()),
-                opts: Arc::new(opts),
-                config,
-                id: AtomicU64::new(0),
-            }),
-        }
-    }
-}
-
-struct EngineTesterCore {
-    _tmp_dir: TempDir,
-    metas: dashmap::DashMap<u64, Arc<ShardMeta>>,
-    fs: Arc<dfs::InMemFs>,
-    opts: Arc<Options>,
-    config: KvEngineConfig,
-    id: AtomicU64,
-}
-
-impl MetaIterator for EngineTester {
-    fn iterate<F>(&mut self, mut f: F) -> Result<()>
-    where
-        F: FnMut(kvenginepb::ChangeSet),
-    {
-        for meta in &self.metas {
-            f(meta.value().to_change_set())
-        }
-        Ok(())
-    }
-
-    fn engine_id(&self) -> u64 {
-        1
-    }
-}
-
-impl RecoverHandler for EngineTester {
-    fn recover(&self, _engine: &Engine, _shard: &Arc<Shard>, _info: &ShardMeta) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl IdAllocator for EngineTesterCore {
-    fn alloc_id(&self, count: usize) -> Result<Vec<u64>> {
-        let start_id = self
-            .id
-            .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        let end_id = start_id + count as u64;
-        let mut ids = Vec::with_capacity(count);
-        for id in start_id..end_id {
-            ids.push(id);
-        }
-        Ok(ids)
-    }
-
-    async fn alloc_id_async(&self, count: usize) -> Result<Vec<u64>> {
-        self.alloc_id(count)
-    }
-}
-
-struct MetaListener {
-    applier_tx: mpsc::Sender<ApplyTask>,
-    meta_rx: mpsc::Receiver<pb::ChangeSet>,
-}
-
-impl MetaListener {
-    fn new(meta_rx: mpsc::Receiver<pb::ChangeSet>, applier_tx: mpsc::Sender<ApplyTask>) -> Self {
-        Self {
-            meta_rx,
-            applier_tx,
-        }
-    }
-
-    fn run(&self) {
-        loop {
-            let cs = unwrap_or_return!(self.meta_rx.recv(), "meta_listener_a");
-            let (tx, rx) = mpsc::bounded(1);
-            let task = ApplyTask::new_cs(cs, tx);
-            self.applier_tx.send(task).unwrap();
-            let res = unwrap_or_return!(rx.recv(), "meta_listener_b");
-            unwrap_or_return!(res, "meta_listener_c");
-        }
-    }
-}
-
-struct Applier {
-    engine: Engine,
-    task_rx: mpsc::Receiver<ApplyTask>,
-}
-
-impl Applier {
-    fn new(engine: Engine, task_rx: mpsc::Receiver<ApplyTask>) -> Self {
-        Self { engine, task_rx }
-    }
-
-    fn run(&self) {
-        let mut seq = 2;
-        loop {
-            let mut task = unwrap_or_return!(self.task_rx.recv(), "apply recv task");
-            seq += 1;
-            if let Some(wb) = task.wb.as_mut() {
-                wb.set_sequence(seq);
-                self.engine.write(wb, &[]);
-            }
-            if let Some(mut cs) = task.cs.take() {
-                cs.set_sequence(seq);
-                if cs.has_split() {
-                    let mut ids = vec![];
-                    for new_shard in cs.get_split().get_new_shards() {
-                        ids.push(new_shard.shard_id);
-                    }
-                    unwrap_or_return!(self.engine.split(cs, 1), "apply split");
-                    for id in ids {
-                        let shard = self.engine.get_shard(id).unwrap();
-                        shard.set_active(true);
-                    }
-                    info!("applier executed split");
-                } else {
-                    self.engine.meta_committed(&cs, false);
-                    unwrap_or_return!(
-                        self.engine.apply_change_set(
-                            &self
-                                .engine
-                                .prepare_change_set(cs, false, false, None, None, None)
-                                .unwrap()
-                        ),
-                        "applier apply changeset"
-                    );
-                }
-            }
-            task.result_tx.send(Ok(seq)).unwrap();
-        }
-    }
-}
-
-struct ApplyTask {
-    wb: Option<WriteBatch>,
-    cs: Option<pb::ChangeSet>,
-    result_tx: mpsc::Sender<Result<u64 /* write_sequence */>>,
-}
-
-impl ApplyTask {
-    fn new_cs(cs: pb::ChangeSet, result_tx: mpsc::Sender<Result<u64>>) -> Self {
-        Self {
-            wb: None,
-            cs: Some(cs),
-            result_tx,
-        }
-    }
-
-    fn new_wb(wb: WriteBatch, result_tx: mpsc::Sender<Result<u64>>) -> Self {
-        Self {
-            wb: Some(wb),
-            cs: None,
-            result_tx,
-        }
-    }
-}
-
 struct Splitter {
     apply_sender: mpsc::Sender<ApplyTask>,
     keys: Vec<Vec<u8>>,
@@ -1364,60 +1122,6 @@ impl Splitter {
         self.send_task(cs);
         self.shard_ver += 1;
     }
-}
-
-fn new_initial_cs(enable_inner_key_off: bool) -> pb::ChangeSet {
-    let mut cs = pb::ChangeSet::new();
-    cs.set_shard_id(1);
-    cs.set_shard_ver(1);
-    cs.set_sequence(1);
-    let mut snap = pb::Snapshot::new();
-    snap.set_base_version(1);
-    if enable_inner_key_off {
-        let (start, end) = ApiV2::get_txn_keyspace_range(KEYSPACE_ID);
-        snap.set_outer_start(start);
-        snap.set_outer_end(end);
-        snap.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32);
-    } else {
-        snap.set_outer_end(GLOBAL_SHARD_END_KEY.to_vec());
-    }
-    let props = snap.mut_properties();
-    props.shard_id = 1;
-    cs.set_snapshot(snap);
-    cs
-}
-
-fn new_test_options(
-    path: impl AsRef<Path>,
-    enable_inner_key_off: bool,
-    block_size: usize,
-) -> Options {
-    let min_blob_size: u32 = match env::var("MIN_BLOB_SIZE") {
-        Ok(val) => match val.trim().parse() {
-            Ok(n) => n,
-            Err(e) => {
-                warn!("MIN_BLOB_SIZE=<number>, got {}", e);
-                DEF_MIN_BLOB_SIZE
-            }
-        },
-        Err(_) => DEF_MIN_BLOB_SIZE,
-    };
-    info!("MIN_BLOB_SIZE={}", min_blob_size);
-    let mut opts = Options::default();
-    opts.local_dir = path.as_ref().to_path_buf();
-    opts.base_size = 64 << 10;
-    opts.table_builder_options.block_size = block_size;
-    opts.table_builder_options.max_table_size = 8 << 10;
-    opts.table_builder_options.flush_split_l0 = true;
-    opts.columnar_build_options.max_columnar_table_size = 1024;
-    opts.columnar_build_options.pack_max_row_count = 9;
-    opts.max_mem_table_size = 32 << 10; // mem-table size should be much larger than max_table_size.
-    opts.num_compactors = 2;
-    opts.blob_table_build_options.min_blob_size = min_blob_size;
-    opts.max_del_range_delay = Duration::from_secs(1);
-    opts.enable_inner_key_offset = enable_inner_key_off;
-    opts.read_columnar = true;
-    opts
 }
 
 fn i_to_key(i: i32, min_blob_size: u32) -> String {

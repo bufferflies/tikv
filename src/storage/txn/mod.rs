@@ -36,7 +36,7 @@ pub use self::{
         gc::gc,
         prewrite::{prewrite, prewrite_async, CommitKind, TransactionKind, TransactionProperties},
     },
-    cloud_store::{check_locks, CloudStore, CloudStoreScanner},
+    cloud_store::{check_locks, CloudDeltaScanner, CloudStore, CloudStoreScanner},
     commands::{Command, RESOLVE_LOCK_BATCH_SIZE},
     latch::{Latches, Lock},
     region_latch::GlobalLatches,

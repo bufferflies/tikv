@@ -59,7 +59,8 @@ where
         )
         .unwrap();
     }
-    let write_data = WriteData::from_modifies(txn.into_modifies());
+    let mut write_data = WriteData::from_modifies(txn.into_modifies());
+    write_data.extra.req_type = txn_types::ReqType::Prewrite;
     let _ = tikv_kv::write(engine, &ctx, write_data, None);
     let keys: Vec<Key> = kvs.iter().map(|(k, _)| Key::from_raw(k)).collect();
     let snapshot = engine.snapshot(Default::default()).unwrap();

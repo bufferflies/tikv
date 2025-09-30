@@ -36,7 +36,10 @@ use kvproto::{
 use protobuf::Message;
 use raft::{self, eraftpb::MessageType, GetEntriesContext, Storage};
 use raft_proto::eraftpb;
-use raftstore::store::util;
+use raftstore::store::{
+    fsm::{new_read_index_request, ChangeObserver},
+    util,
+};
 use rand::{thread_rng, Rng};
 use schema::schema::StorageClass;
 use strum::{EnumCount, VariantNames};
@@ -397,6 +400,65 @@ impl<'a> PeerMsgHandler<'a> {
         self.ticker.schedule(PEER_TICK_CHECK_STALE_STATE);
     }
 
+    fn on_leader_callback(&mut self, cb: Callback) {
+        let msg = new_read_index_request(
+            self.region_id(),
+            self.region().get_region_epoch().clone(),
+            self.fsm.peer.peer.clone(),
+        );
+        self.propose_raft_command(msg, cb, None);
+    }
+
+    fn on_capture_change(
+        &mut self,
+        cmd: ChangeObserver,
+        region_epoch: RegionEpoch,
+        cb: Callback,
+        can_apply: bool,
+    ) {
+        if can_apply {
+            self.ctx.apply_msgs.msgs.push(ApplyMsg::Change {
+                cmd,
+                region_epoch,
+                cb,
+            });
+            return;
+        }
+
+        let region_id = self.region_id();
+        fail_point!("raft_on_capture_change");
+        let mut msg =
+            new_read_index_request(region_id, region_epoch.clone(), self.fsm.peer.peer.clone());
+        // Allow to capture change even is in flashback state.
+        // TODO: add a test case for this kind of situation.
+        if self.region().is_in_flashback {
+            let mut flags = WriteBatchFlags::from_bits_check(msg.get_header().get_flags());
+            flags.insert(WriteBatchFlags::FLASHBACK);
+            msg.mut_header().set_flags(flags.bits());
+        }
+        let raft_router = self.ctx.global.router.clone();
+        self.propose_raft_command(
+            msg,
+            Callback::Read(Box::new(move |resp| {
+                // Return the error
+                if resp.response.get_header().has_error() {
+                    cb.invoke_read(resp);
+                    return;
+                }
+                raft_router.significant_send(
+                    region_id,
+                    SignificantMsg::CaptureChange {
+                        cmd,
+                        region_epoch,
+                        callback: cb,
+                        can_apply: true,
+                    },
+                );
+            })),
+            None,
+        );
+    }
+
     fn on_significant_msg(&mut self, msg: SignificantMsg) {
         match msg {
             SignificantMsg::StoreUnreachable { store_id } => {
@@ -405,6 +467,15 @@ impl<'a> PeerMsgHandler<'a> {
                         self.fsm.peer.raft_group.report_unreachable(peer_id);
                     }
                 }
+            }
+            SignificantMsg::CaptureChange {
+                cmd,
+                region_epoch,
+                callback,
+                can_apply,
+            } => self.on_capture_change(cmd, region_epoch, callback, can_apply),
+            SignificantMsg::LeaderCallback(cb) => {
+                self.on_leader_callback(cb);
             }
         }
     }

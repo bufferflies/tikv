@@ -188,7 +188,7 @@ impl CfTableCore {
         false
     }
 
-    pub(crate) fn data_max_ts(&self) -> u64 {
+    pub fn data_max_ts(&self) -> u64 {
         // Ignore LOCK_CF, as `ts` in LOCK_CF is not a TSO.
         // TODO: in async_commit, LOCK_CF may contains data, need handle it later.
         cmp::max(

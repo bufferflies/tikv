@@ -5682,9 +5682,9 @@ mod memtrace {
         ER: RaftEngine,
     {
         pub fn proposal_size(&self) -> usize {
-            let mut heap_size = self.pending_reads.heap_size();
+            let mut heap_size = self.pending_reads.approximate_heap_size();
             for prop in &self.proposals.queue {
-                heap_size += prop.heap_size();
+                heap_size += prop.approximate_heap_size();
             }
             heap_size
         }

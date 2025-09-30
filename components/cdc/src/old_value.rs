@@ -1,21 +1,14 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::ops::{Bound, Deref};
-
-use engine_traits::{ReadOptions, CF_DEFAULT, CF_WRITE};
 use getset::CopyGetters;
-use tikv::storage::{
-    mvcc::near_load_data_by_write, Cursor, CursorBuilder, ScanMode, Snapshot as EngineSnapshot,
-    Statistics,
-};
-use tikv_kv::Iterator;
+use kvengine::WRITE_CF;
+use tikv::storage::Statistics;
 use tikv_util::{
     config::ReadableSize,
     lru::{LruCache, SizePolicy},
     time::Instant,
-    Either,
 };
-use txn_types::{Key, MutationType, OldValue, TimeStamp, Value, WriteRef, WriteType};
+use txn_types::{Key, MutationType, OldValue, TimeStamp, Value};
 
 use crate::{metrics::*, Result};
 
@@ -106,8 +99,8 @@ impl OldValueCache {
 
 /// Fetch old value for `key`. If it can't be found in `old_value_cache`, seek
 /// and retrieve it with `query_ts` from `snapshot`.
-pub fn get_old_value<S: EngineSnapshot>(
-    snapshot: &S,
+pub fn get_old_value(
+    snapshot: &kvengine::SnapAccess,
     key: Key,
     query_ts: TimeStamp,
     old_value_cache: &mut OldValueCache,
@@ -135,8 +128,12 @@ pub fn get_old_value<S: EngineSnapshot>(
                     OldValue::None => Ok(None),
                     OldValue::Value { value } => Ok(Some(value)),
                     OldValue::ValueTimeStamp { start_ts } => {
-                        let prev_key = key.truncate_ts().unwrap().append_ts(start_ts);
-                        let value = get_value_default(snapshot, &prev_key, statistics);
+                        let value = get_value_from_kvengine(
+                            snapshot,
+                            key,
+                            start_ts.into_inner() - 1,
+                            statistics,
+                        );
                         Ok(value)
                     }
                     // Unspecified and SeekWrite should not be added into cache.
@@ -149,126 +146,17 @@ pub fn get_old_value<S: EngineSnapshot>(
 
     // Cannot get old value from cache, seek for it in engine.
     old_value_cache.miss_count += 1;
-    let key = key.truncate_ts().unwrap().append_ts(query_ts);
-    let mut cursor = new_write_cursor_on_key(snapshot, &key);
-    let value = near_seek_old_value(&key, &mut cursor, Either::Left(snapshot), statistics)?;
+    let value = get_value_from_kvengine(snapshot, key, query_ts.into_inner() - 1, statistics);
     if value.is_none() {
         old_value_cache.miss_none_count += 1;
     }
     Ok(value)
 }
 
-pub fn new_old_value_cursor<S: EngineSnapshot>(snapshot: &S, cf: &'static str) -> Cursor<S::Iter> {
-    let lower = snapshot.lower_bound().map(Key::from_encoded_slice);
-    let upper = snapshot.upper_bound().map(Key::from_encoded_slice);
-    CursorBuilder::new(snapshot, cf)
-        .fill_cache(false)
-        .scan_mode(ScanMode::Mixed)
-        .range(lower, upper)
-        .build()
-        .unwrap()
-}
-
-/// Gets the latest value to the key with an older or equal version.
-///
-/// The key passed in should be a key with a timestamp. This function will
-/// returns the latest value of the entry if the user key is the same to the
-/// given key and the timestamp is older than or equal to the timestamp in the
-/// given key.
-///
-/// `load_from_cf_data` indicates how to get value from `CF_DEFAULT`.
-pub fn near_seek_old_value<S: EngineSnapshot>(
-    key: &Key,
-    write_cursor: &mut Cursor<S::Iter>,
-    load_from_cf_data: Either<&S, &mut Cursor<S::Iter>>,
-    statistics: &mut Statistics,
-) -> Result<Option<Value>> {
-    let start = Instant::now();
-    tikv_util::defer!(
-        CDC_OLD_VALUE_DURATION_HISTOGRAM
-            .with_label_values(&["seek"])
-            .observe(start.saturating_elapsed().as_secs_f64())
-    );
-
-    let (user_key, seek_ts) = Key::split_on_ts_for(key.as_encoded()).unwrap();
-    if write_cursor.near_seek(key, &mut statistics.write)?
-        && Key::is_user_key_eq(write_cursor.key(&mut statistics.write), user_key)
-    {
-        let mut old_value = None;
-        while Key::is_user_key_eq(write_cursor.key(&mut statistics.write), user_key) {
-            let write = WriteRef::parse(write_cursor.value(&mut statistics.write)).unwrap();
-            old_value = match write.write_type {
-                WriteType::Put if write.check_gc_fence_as_latest_version(seek_ts) => {
-                    match write.short_value {
-                        Some(short_value) => Some(short_value.to_vec()),
-                        None => {
-                            let mut key = key.clone().truncate_ts().unwrap();
-                            match load_from_cf_data {
-                                Either::Left(snapshot) => {
-                                    key = key.append_ts(write.start_ts);
-                                    get_value_default(snapshot, &key, statistics)
-                                }
-                                Either::Right(cursor) => Some(near_load_data_by_write(
-                                    cursor,
-                                    &key,
-                                    write.start_ts,
-                                    statistics,
-                                )?),
-                            }
-                        }
-                    }
-                }
-                WriteType::Delete | WriteType::Put => None,
-                WriteType::Rollback | WriteType::Lock => {
-                    if !write_cursor.next(&mut statistics.write) {
-                        None
-                    } else {
-                        continue;
-                    }
-                }
-            };
-            break;
-        }
-        Ok(old_value)
-    } else {
-        Ok(None)
-    }
-}
-
-pub struct OldValueCursors<I: Iterator> {
-    pub write: Cursor<I>,
-    pub default: Cursor<I>,
-}
-
-impl<I: Iterator> OldValueCursors<I> {
-    pub fn new(write: Cursor<I>, default: Cursor<I>) -> Self {
-        OldValueCursors { write, default }
-    }
-}
-
-// Create a write cursor for fetching an old value for `key`.
-fn new_write_cursor_on_key<S: EngineSnapshot>(snapshot: &S, key: &Key) -> Cursor<S::Iter> {
-    let ts = Key::decode_ts_from(key.as_encoded()).unwrap();
-    let upper = {
-        let user_key = key.clone().truncate_ts().unwrap();
-        Some(user_key.append_ts(TimeStamp::zero()))
-    };
-
-    CursorBuilder::new(snapshot, CF_WRITE)
-        .fill_cache(false)
-        .scan_mode(ScanMode::Mixed)
-        // Set the range explicitly to avoid region boundaries are used incorrectly.
-        .range(Some(key.clone()), upper)
-        // Use bloom filter to speed up seeking on a given prefix.
-        .prefix_seek(true)
-        .hint_max_ts(Some(Bound::Included(ts)))
-        .build()
-        .unwrap()
-}
-
-fn get_value_default<S: EngineSnapshot>(
-    snapshot: &S,
-    key: &Key,
+fn get_value_from_kvengine(
+    snapshot: &kvengine::SnapAccess,
+    key: Key,
+    ts: u64,
     statistics: &mut Statistics,
 ) -> Option<Value> {
     let start = Instant::now();
@@ -277,44 +165,40 @@ fn get_value_default<S: EngineSnapshot>(
             .with_label_values(&["get"])
             .observe(start.saturating_elapsed().as_secs_f64())
     );
-
     statistics.data.get += 1;
-    let mut opts = ReadOptions::new();
-    opts.set_fill_cache(false);
-    snapshot
-        .get_cf_opt(opts, CF_DEFAULT, key)
-        .unwrap()
-        .map(|v| v.deref().to_vec())
+
+    let item = snapshot.get(WRITE_CF, &key.into_raw().unwrap(), ts);
+    let val = item.get_value();
+    if val.is_empty() {
+        None
+    } else {
+        Some(val.to_vec())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use engine_rocks::{ReadPerfInstant, RocksEngine};
-    use engine_traits::{KvEngine, MiscExt};
+    use cloud_server::mock_kv_engine::TestKvEngine;
     use kvproto::kvrpcpb::PrewriteRequestPessimisticAction::*;
-    use tikv::{
-        config::DbConfig,
-        storage::{kv::TestEngineBuilder, txn::tests::*},
-    };
+    use tikv::storage::txn::tests::*;
 
     use super::*;
+    use crate::endpoint::tests::api_v2_key;
 
-    fn must_get_eq(
-        kv_engine: &RocksEngine,
-        key: &Key,
-        ts: u64,
-        value: Option<Value>,
-    ) -> Statistics {
-        let key = key.clone().append_ts(ts.into());
-        let snapshot = Arc::new(kv_engine.snapshot());
-        let mut cursor = new_write_cursor_on_key(&snapshot, &key);
-        let load_default = Either::Left(&snapshot);
-        let mut stats = Statistics::default();
-        let v = near_seek_old_value(&key, &mut cursor, load_default, &mut stats).unwrap();
-        assert_eq!(v, value);
-        stats
+    #[track_caller]
+    fn must_get_eq(kv_engine: &kvengine::Engine, key: &Key, ts: u64, value: Option<Value>) {
+        let raw_key = key.clone().into_raw().unwrap();
+        let snapshot = kv_engine.get_shard(1).unwrap().new_snap_access();
+
+        let item = snapshot.get(WRITE_CF, &raw_key, ts - 1);
+        match value {
+            Some(v) => {
+                assert_eq!(&*v, item.get_value());
+            }
+            None => {
+                assert!(item.get_value().is_empty());
+            }
+        }
     }
 
     #[test]
@@ -381,10 +265,11 @@ mod tests {
 
     #[test]
     fn test_old_value_reader() {
-        let mut engine = TestEngineBuilder::new().build().unwrap();
-        let kv_engine = engine.get_rocksdb();
-        let k = b"k";
-        let key = Key::from_raw(k);
+        let mut engine = TestKvEngine::new().unwrap();
+        let kv_engine = engine.engine.clone();
+        let raw_key = api_v2_key(b"k");
+        let k = raw_key.as_ref();
+        let key: Key = Key::from_raw(k);
 
         must_prewrite_put(&mut engine, k, b"v1", k, 1);
         must_get_eq(&kv_engine, &key, 2, None);
@@ -422,79 +307,92 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "next gen does not support gc delete kv. old key can only be removed via compaction"]
     fn test_old_value_reader_check_gc_fence() {
-        let mut engine = TestEngineBuilder::new().build().unwrap();
-        let kv_engine = engine.get_rocksdb();
+        let mut engine = TestKvEngine::new().unwrap();
+        let kv_engine = engine.engine.clone();
 
         // PUT,      Read
         //  `--------------^
-        must_prewrite_put(&mut engine, b"k1", b"v1", b"k1", 10);
-        must_commit(&mut engine, b"k1", 10, 20);
-        must_cleanup_with_gc_fence(&mut engine, b"k1", 20, 0, 50, true);
+        let k1 = api_v2_key(b"k1");
+        must_prewrite_put(&mut engine, &k1, b"v1", &k1, 10);
+        must_commit(&mut engine, &k1, 10, 20);
+        must_get_eq(&kv_engine, &Key::from_raw(&k1), 40, Some(b"v1".to_vec()));
+        must_cleanup_with_gc_fence(&mut engine, &k1, 20, 0, 50, true);
+        must_get_eq(&kv_engine, &Key::from_raw(&k1), 40, Some(b"v1".to_vec()));
 
         // PUT,      Read
         //  `---------^
-        must_prewrite_put(&mut engine, b"k2", b"v2", b"k2", 11);
-        must_commit(&mut engine, b"k2", 11, 20);
-        must_cleanup_with_gc_fence(&mut engine, b"k2", 20, 0, 40, true);
+        let k2 = api_v2_key(b"k2");
+        must_prewrite_put(&mut engine, &k2, b"v2", &k2, 11);
+        must_commit(&mut engine, &k2, 11, 20);
+        must_cleanup_with_gc_fence(&mut engine, &k2, 20, 0, 40, true);
 
         // PUT,      Read
         //  `-----^
-        must_prewrite_put(&mut engine, b"k3", b"v3", b"k3", 12);
-        must_commit(&mut engine, b"k3", 12, 20);
-        must_cleanup_with_gc_fence(&mut engine, b"k3", 20, 0, 30, true);
+        let k3 = api_v2_key(b"k3");
+        must_prewrite_put(&mut engine, &k3, b"v3", &k3, 12);
+        must_commit(&mut engine, &k3, 12, 20);
+        must_cleanup_with_gc_fence(&mut engine, &k3, 20, 0, 30, true);
 
         // PUT,   PUT,       Read
         //  `-----^ `----^
-        must_prewrite_put(&mut engine, b"k4", b"v4", b"k4", 13);
-        must_commit(&mut engine, b"k4", 13, 14);
-        must_prewrite_put(&mut engine, b"k4", b"v4x", b"k4", 15);
-        must_commit(&mut engine, b"k4", 15, 20);
-        must_cleanup_with_gc_fence(&mut engine, b"k4", 14, 0, 20, false);
-        must_cleanup_with_gc_fence(&mut engine, b"k4", 20, 0, 30, true);
+        let k4 = api_v2_key(b"k4");
+        must_prewrite_put(&mut engine, &k4, b"v4", &k4, 13);
+        must_commit(&mut engine, &k4, 13, 14);
+        must_prewrite_put(&mut engine, &k4, b"v4x", &k4, 15);
+        must_commit(&mut engine, &k4, 15, 20);
+        must_cleanup_with_gc_fence(&mut engine, &k4, 14, 0, 20, false);
+        must_cleanup_with_gc_fence(&mut engine, &k4, 20, 0, 30, true);
 
         // PUT,   DEL,       Read
         //  `-----^ `----^
-        must_prewrite_put(&mut engine, b"k5", b"v5", b"k5", 13);
-        must_commit(&mut engine, b"k5", 13, 14);
-        must_prewrite_delete(&mut engine, b"k5", b"v5", 15);
-        must_commit(&mut engine, b"k5", 15, 20);
-        must_cleanup_with_gc_fence(&mut engine, b"k5", 14, 0, 20, false);
-        must_cleanup_with_gc_fence(&mut engine, b"k5", 20, 0, 30, true);
+        let k5 = api_v2_key(b"k5");
+        must_prewrite_put(&mut engine, &k5, b"v5", &k5, 13);
+        must_commit(&mut engine, &k5, 13, 14);
+        must_prewrite_delete(&mut engine, &k5, b"v5", 15);
+        must_commit(&mut engine, &k5, 15, 20);
+        must_cleanup_with_gc_fence(&mut engine, &k5, 14, 0, 20, false);
+        must_cleanup_with_gc_fence(&mut engine, &k5, 20, 0, 30, true);
 
         // PUT, LOCK, LOCK,   Read
         //  `------------------------^
-        must_prewrite_put(&mut engine, b"k6", b"v6", b"k6", 16);
-        must_commit(&mut engine, b"k6", 16, 20);
-        must_prewrite_lock(&mut engine, b"k6", b"k6", 25);
-        must_commit(&mut engine, b"k6", 25, 26);
-        must_prewrite_lock(&mut engine, b"k6", b"k6", 28);
-        must_commit(&mut engine, b"k6", 28, 29);
-        must_cleanup_with_gc_fence(&mut engine, b"k6", 20, 0, 50, true);
+        let k6 = api_v2_key(b"k6");
+        must_prewrite_put(&mut engine, &k6, b"v6", &k6, 16);
+        must_commit(&mut engine, &k6, 16, 20);
+        must_prewrite_lock(&mut engine, &k6, &k6, 25);
+        must_commit(&mut engine, &k6, 25, 26);
+        must_prewrite_lock(&mut engine, &k6, &k6, 28);
+        must_commit(&mut engine, &k6, 28, 29);
+        must_cleanup_with_gc_fence(&mut engine, &k6, 20, 0, 50, true);
 
         // PUT, LOCK,   LOCK,   Read
         //  `---------^
-        must_prewrite_put(&mut engine, b"k7", b"v7", b"k7", 16);
-        must_commit(&mut engine, b"k7", 16, 20);
-        must_prewrite_lock(&mut engine, b"k7", b"k7", 25);
-        must_commit(&mut engine, b"k7", 25, 26);
-        must_cleanup_with_gc_fence(&mut engine, b"k7", 20, 0, 27, true);
-        must_prewrite_lock(&mut engine, b"k7", b"k7", 28);
-        must_commit(&mut engine, b"k7", 28, 29);
+        let k7 = api_v2_key(b"k7");
+        must_prewrite_put(&mut engine, &k7, b"v7", &k7, 16);
+        must_commit(&mut engine, &k7, 16, 20);
+        must_prewrite_lock(&mut engine, &k7, &k7, 25);
+        must_commit(&mut engine, &k7, 25, 26);
+        // gc_fence should >= commit_ts + 2
+        must_cleanup_with_gc_fence(&mut engine, &k7, 20, 0, 28, true);
+        must_prewrite_lock(&mut engine, &k7, &k7, 29);
+        must_commit(&mut engine, &k7, 29, 30);
 
         // PUT,  Read
         //  * (GC fence ts is 0)
-        must_prewrite_put(&mut engine, b"k8", b"v8", b"k8", 17);
-        must_commit(&mut engine, b"k8", 17, 30);
-        must_cleanup_with_gc_fence(&mut engine, b"k8", 30, 0, 0, true);
+        let k8 = api_v2_key(b"k8");
+        must_prewrite_put(&mut engine, &k8, b"v8", &k8, 17);
+        must_commit(&mut engine, &k8, 17, 30);
+        must_cleanup_with_gc_fence(&mut engine, &k8, 30, 0, 0, true);
 
         // PUT, LOCK,     Read
         // `-----------^
-        must_prewrite_put(&mut engine, b"k9", b"v9", b"k9", 18);
-        must_commit(&mut engine, b"k9", 18, 20);
-        must_prewrite_lock(&mut engine, b"k9", b"k9", 25);
-        must_commit(&mut engine, b"k9", 25, 26);
-        must_cleanup_with_gc_fence(&mut engine, b"k9", 20, 0, 27, true);
+        let k9 = api_v2_key(b"k9");
+        must_prewrite_put(&mut engine, &k9, b"v9", &k9, 18);
+        must_commit(&mut engine, &k9, 18, 20);
+        must_prewrite_lock(&mut engine, &k9, &k9, 25);
+        must_commit(&mut engine, &k9, 25, 26);
+        must_cleanup_with_gc_fence(&mut engine, &k9, 20, 0, 28, true);
 
         let expected_results = vec![
             (b"k1", Some(b"v1")),
@@ -509,110 +407,45 @@ mod tests {
         ];
 
         for (k, v) in expected_results {
-            must_get_eq(&kv_engine, &Key::from_raw(k), 40, v.map(|v| v.to_vec()));
+            let enc_key = api_v2_key(k);
+            must_get_eq(
+                &kv_engine,
+                &Key::from_raw(&enc_key),
+                40,
+                v.map(|v| v.to_vec()),
+            );
         }
     }
 
     #[test]
-    fn test_old_value_reuse_cursor() {
-        let mut engine = TestEngineBuilder::new().build().unwrap();
-        let kv_engine = engine.get_rocksdb();
-        let value = || vec![b'v'; 1024];
+    fn test_old_value_capacity_not_exceed_quota() {
+        let mut cache = OldValueCache::new(ReadableSize(1000));
+        fn short_val() -> OldValue {
+            OldValue::Value {
+                value: b"s".to_vec(),
+            }
+        }
+        fn long_val() -> OldValue {
+            OldValue::Value {
+                value: vec![b'l'; 1024],
+            }
+        }
+        fn enc(i: i32) -> Key {
+            Key::from_encoded(i32::to_ne_bytes(i).to_vec())
+        }
 
         for i in 0..100 {
-            let key = format!("key-{:0>3}", i).into_bytes();
-            must_prewrite_put(&mut engine, &key, &value(), &key, 100);
-            must_commit(&mut engine, &key, 100, 101);
-            must_prewrite_put(&mut engine, &key, &value(), &key, 200);
-            must_commit(&mut engine, &key, 200, 201);
+            cache.insert(enc(i), (short_val(), None));
         }
-
-        let snapshot = Arc::new(kv_engine.snapshot());
-        let mut cursor = new_old_value_cursor(&snapshot, CF_WRITE);
-        let mut default_cursor = new_old_value_cursor(&snapshot, CF_DEFAULT);
-        let mut load_default = |use_default_cursor: bool| {
-            if use_default_cursor {
-                let x = unsafe { std::mem::transmute::<_, &'static mut _>(&mut default_cursor) };
-                Either::Right(x)
-            } else {
-                Either::Left(&snapshot)
-            }
-        };
-
-        for &use_default_cursor in &[true, false] {
-            let mut stats = Default::default();
-            for i in 0..30 {
-                let raw_key = format!("key-{:0>3}", i).into_bytes();
-                let key = Key::from_raw(&raw_key).append_ts(150.into());
-                let ld = load_default(use_default_cursor);
-                let v = near_seek_old_value(&key, &mut cursor, ld, &mut stats).unwrap();
-                assert!(v.map_or(false, |x| x == value()));
-            }
-            assert_eq!(stats.write.seek, 1);
-            assert_eq!(stats.write.next, 58);
-            if use_default_cursor {
-                assert_eq!(stats.data.seek, 1);
-                assert_eq!(stats.data.next, 58);
-                assert_eq!(stats.data.get, 0);
-            } else {
-                assert_eq!(stats.data.seek, 0);
-                assert_eq!(stats.data.next, 0);
-                assert_eq!(stats.data.get, 30);
-            }
-
-            for i in 60..100 {
-                let raw_key = format!("key-{:0>3}", i).into_bytes();
-                let key = Key::from_raw(&raw_key).append_ts(150.into());
-                let ld = load_default(use_default_cursor);
-                let v = near_seek_old_value(&key, &mut cursor, ld, &mut stats).unwrap();
-                assert!(v.map_or(false, |x| x == value()));
-            }
-            assert_eq!(stats.write.seek, 2);
-            assert_eq!(stats.write.next, 144);
-            if use_default_cursor {
-                assert_eq!(stats.data.seek, 2);
-                assert_eq!(stats.data.next, 144);
-                assert_eq!(stats.data.get, 0);
-            } else {
-                assert_eq!(stats.data.seek, 0);
-                assert_eq!(stats.data.next, 0);
-                assert_eq!(stats.data.get, 70);
-            }
+        for i in 100..200 {
+            // access the previous key for making it not be evicted
+            cache.cache.get(&enc(i - 1));
+            cache.insert(enc(i), (long_val(), None));
         }
-    }
-
-    #[test]
-    fn test_get_old_value_with_prefix_seek() {
-        let mut cfg = DbConfig::default();
-        cfg.writecf.disable_auto_compactions = true;
-        cfg.writecf.pin_l0_filter_and_index_blocks = false;
-        let mut engine = TestEngineBuilder::new().build_with_cfg(&cfg).unwrap();
-        let kv_engine = engine.get_rocksdb();
-
-        // Key must start with `z` to pass `TsFilter`'s check.
-        for i in 0..4 {
-            let key = format!("zkey-{:0>3}", i).into_bytes();
-            must_prewrite_put(&mut engine, &key, b"value", &key, 100);
-            must_commit(&mut engine, &key, 100, 101);
-            kv_engine.flush_cf(CF_WRITE, true).unwrap();
-        }
-
-        let key = format!("zkey-{:0>3}", 0).into_bytes();
-        let snapshot = Arc::new(kv_engine.snapshot());
-        let perf_instant = ReadPerfInstant::new();
-        let value = get_old_value(
-            &snapshot,
-            Key::from_raw(&key).append_ts(100.into()),
-            102.into(),
-            &mut OldValueCache::new(ReadableSize(0)),
-            &mut Statistics::default(),
-        )
-        .unwrap();
-        assert_eq!(value.unwrap(), b"value");
-
-        // block read count should be 1 instead of 4 because some of them
-        // are filtered by `prefix_seek`.
-        let perf_delta = perf_instant.delta();
-        assert_eq!(perf_delta.block_read_count, 1);
+        assert!(
+            cache.cache.size() <= 1000,
+            "but it is {}",
+            cache.cache.size()
+        );
     }
 }

@@ -171,7 +171,7 @@ pub trait TxnEntryScanner: Send {
 }
 
 /// A transaction entry in underlying storage.
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Clone)]
 pub enum TxnEntry {
     Prewrite {
         default: KvPair,
@@ -184,6 +184,34 @@ pub enum TxnEntry {
         old_value: OldValue,
     },
     // TOOD: Add more entry if needed.
+}
+
+impl std::fmt::Debug for TxnEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TxnEntry::Prewrite {
+                default,
+                lock,
+                old_value,
+                ..
+            } => f
+                .debug_struct("Prewrite")
+                .field("default", &log_wrappers::Value::key(&default.0))
+                .field("lock", &log_wrappers::Value::key(&lock.0))
+                .field("old_value", &old_value)
+                .finish(),
+            TxnEntry::Commit {
+                default,
+                write,
+                old_value,
+            } => f
+                .debug_struct("Commit")
+                .field("default", &log_wrappers::Value::key(&default.0))
+                .field("write", &log_wrappers::Value::key(&write.0))
+                .field("old_value", &old_value)
+                .finish(),
+        }
+    }
 }
 
 impl TxnEntry {

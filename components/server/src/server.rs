@@ -34,7 +34,6 @@ use backup_stream::{
     observer::BackupStreamObserver,
 };
 use causal_ts::CausalTsProviderImpl;
-use cdc::{CdcConfigManager, MemoryQuota};
 use concurrency_manager::{ConcurrencyManager, LIMIT_VALID_TIME_MULTIPLIER};
 use encryption_export::{data_key_manager_from_config, DataKeyManager};
 use engine_rocks::{
@@ -56,10 +55,9 @@ use futures::executor::block_on;
 use grpcio::{EnvBuilder, Environment};
 use grpcio_health::HealthService;
 use kvproto::{
-    brpb::create_backup, cdcpb::create_change_data, deadlock::create_deadlock,
-    debugpb::create_debug, import_sstpb::create_import_sst, kvrpcpb::ApiVersion,
-    logbackuppb::create_log_backup, recoverdatapb::create_recover_data,
-    resource_usage_agent::create_resource_metering_pub_sub,
+    brpb::create_backup, deadlock::create_deadlock, debugpb::create_debug,
+    import_sstpb::create_import_sst, kvrpcpb::ApiVersion, logbackuppb::create_log_backup,
+    recoverdatapb::create_recover_data, resource_usage_agent::create_resource_metering_pub_sub,
 };
 use pd_client::{PdClient, RpcClient};
 use raft_log_engine::RaftLogEngine;
@@ -254,8 +252,8 @@ struct Servers<EK: KvEngine, ER: RaftEngine> {
     server: LocalServer<EK, ER>,
     node: Node<RpcClient, EK, ER>,
     importer: Arc<SstImporter>,
-    cdc_scheduler: tikv_util::worker::Scheduler<cdc::Task>,
-    cdc_memory_quota: MemoryQuota,
+    // cdc_scheduler: tikv_util::worker::Scheduler<cdc::Task>,
+    // cdc_memory_quota: MemoryQuota,
     rsmeter_pubsub_service: resource_metering::PubSubService,
     backup_stream_scheduler: Option<tikv_util::worker::Scheduler<backup_stream::Task>>,
 }
@@ -361,7 +359,7 @@ where
         let mut causal_ts_provider = None;
         if let ApiVersion::V2 = F::TAG {
             let tso = block_on(causal_ts::BatchTsoProvider::new_opt(
-                pd_client.clone(),
+                pd_client.clone() as Arc<dyn PdClient>,
                 config.causal_ts.renew_interval.0,
                 config.causal_ts.alloc_ahead_buffer.0,
                 config.causal_ts.renew_batch_min_size,
@@ -705,15 +703,16 @@ where
         cfg_controller.register(tikv::config::Module::Log, Box::new(LogConfigManager));
 
         // Create cdc.
-        let mut cdc_worker = Box::new(LazyWorker::new("cdc"));
-        let cdc_scheduler = cdc_worker.scheduler();
-        let txn_extra_scheduler = cdc::CdcTxnExtraScheduler::new(cdc_scheduler.clone());
+        // let mut cdc_worker = Box::new(LazyWorker::new("cdc"));
+        // let cdc_scheduler = cdc_worker.scheduler();
+        // let txn_extra_scheduler =
+        // cdc::CdcTxnExtraScheduler::new(cdc_scheduler.clone());
 
-        self.engines
-            .as_mut()
-            .unwrap()
-            .engine
-            .set_txn_extra_scheduler(Arc::new(txn_extra_scheduler));
+        // self.engines
+        //     .as_mut()
+        //     .unwrap()
+        //     .engine
+        //     .set_txn_extra_scheduler(Arc::new(txn_extra_scheduler));
 
         let lock_mgr = LockManager::new(&self.config.pessimistic_txn);
         cfg_controller.register(
@@ -892,31 +891,31 @@ where
         }
 
         // Register cdc.
-        let cdc_ob = cdc::CdcObserver::new(cdc_scheduler.clone());
-        cdc_ob.register_to(self.coprocessor_host.as_mut().unwrap());
-        // Register cdc config manager.
-        cfg_controller.register(
-            tikv::config::Module::Cdc,
-            Box::new(CdcConfigManager(cdc_worker.scheduler())),
-        );
+        // let cdc_ob = cdc::CdcObserver::new(cdc_scheduler.clone(),
+        // cdc_memory_quota.clone()); cdc_ob.register_to(self.coprocessor_host.
+        // as_mut().unwrap()); // Register cdc config manager.
+        // cfg_controller.register(
+        //     tikv::config::Module::Cdc,
+        //     Box::new(CdcConfigManager(cdc_worker.scheduler())),
+        // );
 
         // Create resolved ts worker
-        let rts_worker = if self.config.resolved_ts.enable {
-            let worker = Box::new(LazyWorker::new("resolved-ts"));
-            // Register the resolved ts observer
-            let resolved_ts_ob = resolved_ts::Observer::new(worker.scheduler());
-            resolved_ts_ob.register_to(self.coprocessor_host.as_mut().unwrap());
-            // Register config manager for resolved ts worker
-            cfg_controller.register(
-                tikv::config::Module::ResolvedTs,
-                Box::new(resolved_ts::ResolvedTsConfigManager::new(
-                    worker.scheduler(),
-                )),
-            );
-            Some(worker)
-        } else {
-            None
-        };
+        // let rts_worker = if self.config.resolved_ts.enable {
+        //     let worker = Box::new(LazyWorker::new("resolved-ts"));
+        //     // Register the resolved ts observer
+        //     let resolved_ts_ob = resolved_ts::Observer::new(worker.scheduler());
+        //     resolved_ts_ob.register_to(self.coprocessor_host.as_mut().unwrap());
+        //     // Register config manager for resolved ts worker
+        //     cfg_controller.register(
+        //         tikv::config::Module::ResolvedTs,
+        //         Box::new(resolved_ts::ResolvedTsConfigManager::new(
+        //             worker.scheduler(),
+        //         )),
+        //     );
+        //     Some(worker)
+        // } else {
+        //     None
+        // };
 
         let check_leader_runner = CheckLeaderRunner::new(
             engines.store_meta.clone(),
@@ -1142,41 +1141,41 @@ where
         }
 
         // Start CDC.
-        let cdc_memory_quota = MemoryQuota::new(self.config.cdc.sink_memory_quota.0 as _);
-        let cdc_endpoint = cdc::Endpoint::new(
-            self.config.server.cluster_id,
-            &self.config.cdc,
-            self.config.storage.api_version(),
-            self.pd_client.clone(),
-            cdc_scheduler.clone(),
-            self.router.clone(),
-            self.engines.as_ref().unwrap().engines.kv.clone(),
-            cdc_ob,
-            engines.store_meta.clone(),
-            self.concurrency_manager.clone(),
-            server.env(),
-            self.security_mgr.clone(),
-            cdc_memory_quota.clone(),
-            self.causal_ts_provider.clone(),
-        );
-        cdc_worker.start_with_timer(cdc_endpoint);
-        self.to_stop.push(cdc_worker);
+        // let cdc_memory_quota = MemoryQuota::new(self.config.cdc.sink_memory_quota.0
+        // as _); let cdc_endpoint = cdc::Endpoint::new(
+        //     self.config.server.cluster_id,
+        //     &self.config.cdc,
+        //     self.config.storage.api_version(),
+        //     self.pd_client.clone(),
+        //     cdc_scheduler.clone(),
+        //     self.router.clone(),
+        //     self.engines.as_ref().unwrap().engines.kv.clone(),
+        //     cdc_ob,
+        //     engines.store_meta.clone(),
+        //     self.concurrency_manager.clone(),
+        //     server.env(),
+        //     self.security_mgr.clone(),
+        //     cdc_memory_quota.clone(),
+        //     self.causal_ts_provider.clone(),
+        // );
+        // cdc_worker.start_with_timer(cdc_endpoint);
+        // self.to_stop.push(cdc_worker);
 
         // Start resolved ts
-        if let Some(mut rts_worker) = rts_worker {
-            let rts_endpoint = resolved_ts::Endpoint::new(
-                &self.config.resolved_ts,
-                rts_worker.scheduler(),
-                self.router.clone(),
-                engines.store_meta.clone(),
-                self.pd_client.clone(),
-                self.concurrency_manager.clone(),
-                server.env(),
-                self.security_mgr.clone(),
-            );
-            rts_worker.start_with_timer(rts_endpoint);
-            self.to_stop.push(rts_worker);
-        }
+        // if let Some(mut rts_worker) = rts_worker {
+        //     let rts_endpoint = resolved_ts::Endpoint::new(
+        //         &self.config.resolved_ts,
+        //         rts_worker.scheduler(),
+        //         self.router.clone(),
+        //         engines.store_meta.clone(),
+        //         self.pd_client.clone(),
+        //         self.concurrency_manager.clone(),
+        //         server.env(),
+        //         self.security_mgr.clone(),
+        //     );
+        //     rts_worker.start_with_timer(rts_endpoint);
+        //     self.to_stop.push(rts_worker);
+        // }
 
         cfg_controller.register(
             tikv::config::Module::Raftstore,
@@ -1191,8 +1190,8 @@ where
             server,
             node,
             importer,
-            cdc_scheduler,
-            cdc_memory_quota,
+            // cdc_scheduler,
+            // cdc_memory_quota,
             rsmeter_pubsub_service,
             backup_stream_scheduler,
         });
@@ -1318,17 +1317,17 @@ where
         );
         backup_worker.start(backup_endpoint);
 
-        let cdc_service = cdc::Service::new(
-            servers.cdc_scheduler.clone(),
-            servers.cdc_memory_quota.clone(),
-        );
-        if servers
-            .server
-            .register_service(create_change_data(cdc_service))
-            .is_some()
-        {
-            fatal!("failed to register cdc service");
-        }
+        // let cdc_service = cdc::Service::new(
+        //     servers.cdc_scheduler.clone(),
+        //     servers.cdc_memory_quota.clone(),
+        // );
+        // if servers
+        //     .server
+        //     .register_service(create_change_data(cdc_service))
+        //     .is_some()
+        // {
+        //     fatal!("failed to register cdc service");
+        // }
         if servers
             .server
             .register_service(create_resource_metering_pub_sub(

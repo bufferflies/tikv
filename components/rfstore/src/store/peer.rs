@@ -12,6 +12,7 @@ use bitflags::bitflags;
 use bytes::{Buf, BufMut};
 use cloud_encryption::EncryptionKey;
 use collections::{HashMap, HashSet};
+use crossbeam::atomic::AtomicCell;
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
@@ -54,7 +55,7 @@ use raftstore::{
             admin_cmd_epoch_lookup, is_epoch_stale, is_initial_msg, AdminCmdEpochState,
             ChangePeerI, ConfChangeKind, Lease, LeaseState,
         },
-        TxnExt,
+        RegionReadProgress, TxnExt,
     },
 };
 use rfengine::KV_ENGINE_META_KEY;
@@ -78,6 +79,7 @@ const SHRINK_CACHE_CAPACITY: usize = 64;
 const MAX_COMMITTED_SIZE_PER_READY: u64 = 16 * 1024 * 1024;
 pub(crate) const SPLIT_FLAG_ENCRYPTION_METAS: u64 = 0x02;
 pub(crate) const PENDING_CONF_CHANGE_ERR_MSG: &str = "pending conf change";
+const REGION_READ_PROGRESS_CAP: usize = 128;
 
 /// The returned states of the peer after checking whether it is stale
 #[derive(Debug, PartialEq, Eq)]
@@ -90,6 +92,12 @@ pub(crate) enum StaleState {
 pub(crate) fn notify_stale_req(term: u64, cb: Callback, reason: &str) {
     info!("notify stale req reason: {}", reason);
     let resp = cmd_resp::err_resp(Error::StaleCommand, term);
+    cb.invoke_with_response(resp);
+}
+
+pub fn notify_stale_req_with_msg(term: u64, msg: String, cb: Callback) {
+    let mut resp = cmd_resp::err_resp(Error::StaleCommand, term);
+    resp.mut_header().mut_error().set_message(msg);
     cb.invoke_with_response(resp);
 }
 
@@ -517,6 +525,11 @@ pub(crate) struct Peer {
     pub check_stale_peers: Vec<metapb::Peer>,
     pub(crate) encryption_key: Option<EncryptionKey>,
     pub(crate) encryption_buf: Vec<u8>,
+
+    // TODO: finished the implementation of read_progress
+    pub read_progress: Arc<RegionReadProgress>,
+    pub txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
+
     pub commit_log: LocalHistogram,
     pub keyspace_name: String,
     pub last_flush_metrics_time: tikv_util::time::Instant,
@@ -530,7 +543,8 @@ impl Peer {
         region: &metapb::Region,
         peer: metapb::Peer,
     ) -> Result<Peer> {
-        if peer.get_id() == raft::INVALID_ID {
+        let peer_id = peer.get_id();
+        if peer_id == raft::INVALID_ID {
             return Err(box_err!("invalid peer id"));
         }
 
@@ -622,6 +636,13 @@ impl Peer {
             check_stale_peers: vec![],
             encryption_key,
             encryption_buf: vec![],
+            read_progress: Arc::new(RegionReadProgress::new(
+                region,
+                applied_index,
+                REGION_READ_PROGRESS_CAP,
+                peer_id,
+            )),
+            txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::Noop)),
             commit_log,
             last_flush_metrics_time: tikv_util::time::Instant::now_coarse(),
             keyspace_name,
@@ -787,6 +808,7 @@ impl Peer {
     pub fn set_region(
         &mut self,
         host: &coprocessor::CoprocessorHost<kvengine::Engine>,
+        reader: &mut ReadDelegate,
         region: metapb::Region,
         reason: RegionChangeReason,
     ) {
@@ -801,7 +823,15 @@ impl Peer {
         ) {
             self.mut_store().preprocessed_region = None;
         }
-        self.mut_store().set_region(region);
+        self.mut_store().set_region(region.clone());
+        let progress = ReadProgress::region(region);
+        // Always update read delegate's region to avoid stale region info after a
+        // follower becoming a leader.
+        self.maybe_update_read_progress(reader, progress);
+
+        // Update leader info
+        self.read_progress
+            .update_leader_info(self.leader_id(), self.term(), self.region());
 
         if !self.pending_remove {
             host.on_region_changed(
@@ -1393,6 +1423,7 @@ impl Peer {
             }
 
             self.notify_role_changed(&ctx.global.pd_scheduler, ss.raft_state);
+            self.on_leader_changed(ss.leader_id, self.term());
             // TODO: it may possible that only the `leader_id` change and the role
             // didn't change
             ctx.global.coprocessor_host.on_role_change(
@@ -1409,8 +1440,25 @@ impl Peer {
                 .snapshot_not_ready_peers
                 .borrow_mut()
                 .clear();
+        } else if let Some(hs) = ready.hs() {
+            if hs.get_term() != self.get_store().raft_state.term {
+                self.on_leader_changed(self.leader_id(), hs.get_term());
+            }
         }
         self.lead_transferee = self.raft_group.raft.lead_transferee.unwrap_or_default();
+    }
+
+    fn on_leader_changed(&mut self, leader_id: u64, term: u64) {
+        debug!(
+            "update leader info";
+            "region_id" => self.region_id,
+            "leader_id" => leader_id,
+            "term" => term,
+            "peer_id" => self.peer_id(),
+        );
+
+        self.read_progress
+            .update_leader_info(leader_id, term, self.region());
     }
 
     pub fn insert_peer_cache(&mut self, peer: metapb::Peer) {
@@ -3760,8 +3808,10 @@ impl Peer {
         let mut resp = ctx.execute(&req, &Arc::new(region), read_index, None);
         if let Some(snap) = resp.snapshot.as_mut() {
             snap.txn_ext = Some(self.txn_ext.clone());
+            snap.txn_extra_op = self.txn_extra_op.load();
             snap.bucket_meta = self.buckets.as_ref().map(|b| b.meta.clone());
         }
+        resp.txn_extra_op = self.txn_extra_op.load();
         cmd_resp::bind_term(&mut resp.response, self.term());
         resp
     }
@@ -3896,7 +3946,7 @@ impl ReadExecutor for RaftContext {
     fn get_snapshot(&self, region_id: u64, region_ver: u64) -> Result<RegionSnapshot> {
         if let Some(snap) = self.global.engines.kv.get_snap_access(region_id) {
             if snap.get_version() == region_ver {
-                return Ok(RegionSnapshot::from_snapshot(snap));
+                return Ok(RegionSnapshot::from_snapshot(snap, None));
             }
         }
         Err(Error::StaleCommand)

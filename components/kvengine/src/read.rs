@@ -39,7 +39,7 @@ use crate::{
             SchemaFile, HANDLE_COL_ID,
         },
         memtable::{CfTable, Hint, SkipList, WriteBatch},
-        sstable::SsTable,
+        sstable::{L0Table, SsTable},
         table,
         vector_index::VectorItemsReader,
         AsyncMergeIterator, BoundedDataSet, ConstraintChecker, DataBound, InnerKey,
@@ -458,6 +458,30 @@ impl SnapAccessCore {
         }
     }
 
+    pub fn new_delta_iterator(&self, reversed: bool, since_ts: u64) -> Iterator {
+        let blob_prefetcher = Some(BlobPrefetcher::new(
+            self.data.blob_tbl_map.clone(),
+            self.blob_table_prefetch_size,
+            self.encryption_key.clone(),
+        ));
+        let data = self.data.clone();
+        let mut key = BytesMut::new();
+        key.extend_from_slice(data.keyspace_prefix());
+        Iterator {
+            all_versions: true,
+            reversed,
+            read_ts: self.get_read_ts(WRITE_CF, None),
+            key,
+            val: table::Value::new(),
+            inner: self.new_delta_write_iterator(since_ts),
+            blob_prefetcher,
+            data,
+            range: None,
+            next_time: ENGINE_SEEK_DURATION.next.local(),
+            seek_time: ENGINE_SEEK_DURATION.seek.local(),
+        }
+    }
+
     fn get_read_ts(&self, cf: usize, read_ts: Option<u64>) -> u64 {
         if let Some(ts) = read_ts {
             ts
@@ -754,6 +778,30 @@ impl SnapAccessCore {
             iters.push(Box::new(ConcatIterator::new(lh.clone(), false, true)));
         }
         Box::new(AsyncMergeIterator::new(iters, false, false))
+    }
+
+    pub fn iter_tables(&self, cf: usize, mut f: impl FnMut(TableRef<'_>)) {
+        self.check_sync(cf);
+
+        for mem_tbl in &self.data.mem_tbls {
+            if !mem_tbl.get_cf(cf).is_empty() {
+                f(TableRef::Memtable(mem_tbl));
+            }
+        }
+        for l0 in &self.data.l0_tbls {
+            if l0.get_cf(cf).is_some() {
+                f(TableRef::L0(l0))
+            }
+        }
+        let scf = self.data.get_cf(cf);
+        for lh in scf.levels.as_slice() {
+            if lh.tables.len() == 0 {
+                continue;
+            }
+            for tbl in &*lh.tables {
+                f(TableRef::SsTable(tbl))
+            }
+        }
     }
 
     pub fn get_write_sequence(&self) -> u64 {
@@ -1866,6 +1914,12 @@ impl Iterator {
             self.inner.key() >= self.data.inner_end()
         }
     }
+}
+
+pub enum TableRef<'a> {
+    Memtable(&'a CfTable),
+    L0(&'a L0Table),
+    SsTable(&'a SsTable),
 }
 
 /// To check that the key already exists or not.

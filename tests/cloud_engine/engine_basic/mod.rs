@@ -332,7 +332,7 @@ fn test_apply_observer() {
         client.put_kv(start..start + 10, i_to_key, i_to_val);
     }
     let recoverer = rfstore::store::RecoverHandler::new(rfengine.clone());
-    let mut apply_ctx = ApplyContext::new(kvengine.clone(), None);
+    let mut apply_ctx = ApplyContext::new(kvengine.clone(), None, None);
 
     let (tx, rx) = tikv_util::mpsc::unbounded();
     let runtime = cluster.get_dfs().unwrap().get_runtime().handle().clone();

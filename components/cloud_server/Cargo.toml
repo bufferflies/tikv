@@ -22,6 +22,9 @@ test-engines-rocksdb = [
 test-engines-panic = [
   "tikv/test-engines-panic",
 ]
+testexport = [
+  "rfstore/testexport"
+]
 
 nortcheck = ["engine_rocks/nortcheck"]
 
@@ -32,7 +35,8 @@ backtrace = "0.3"
 backup = { path = "../backup", default-features = false }
 builtin_dfs = { path = "../builtin_dfs" }
 bytes = "1.0"
-cdc = { path = "../cdc", default-features = false }
+causal_ts = { workspace = true }
+cdc = { workspace = true }
 chrono = "0.4"
 clap = "2.32"
 cloud_encryption = { workspace = true }

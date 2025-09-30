@@ -31,7 +31,10 @@ use std::{
     error,
     num::NonZeroU64,
     ptr, result,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -50,6 +53,7 @@ use kvproto::{
     kvrpcpb::{Context, DiskFullOpt, ExtraOp as TxnExtraOp, KeyRange},
     raft_cmdpb,
 };
+use lazy_static::lazy_static;
 use pd_client::BucketMeta;
 use raftstore::store::{PessimisticLockPair, TxnExt};
 use thiserror::Error;
@@ -69,6 +73,43 @@ pub use self::{
         StatisticsSummary, RAW_VALUE_TOMBSTONE,
     },
 };
+
+// Global probe for old_value testing: enables capture + collects results for
+// inspection
+pub static PROBE_OLD_VALUES_IN_TEST: AtomicBool = AtomicBool::new(false);
+
+lazy_static! {
+    static ref OLD_VALUES_PROBE_CACHE: Arc<Mutex<HashMap<Vec<u8>, Option<Vec<u8>>>>> =
+        Arc::new(Mutex::new(HashMap::default()));
+}
+
+// Probe utilities for tests
+pub fn get_captured_old_value(key: &[u8]) -> Option<Option<Vec<u8>>> {
+    OLD_VALUES_PROBE_CACHE.lock().unwrap().get(key).cloned()
+}
+
+pub fn clear_old_values_probe_cache() {
+    OLD_VALUES_PROBE_CACHE.lock().unwrap().clear();
+}
+
+pub fn populate_old_values_probe_cache(
+    old_values: &txn_types::OldValues,
+    _mutation_keys: &[Vec<u8>],
+) {
+    if !PROBE_OLD_VALUES_IN_TEST.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let mut cache = OLD_VALUES_PROBE_CACHE.lock().unwrap();
+
+    // Populate from actual captured old_values
+    for (key, (old_value, _mutation_type)) in old_values.iter() {
+        if let Ok(raw_key) = key.to_raw() {
+            let old_value_bytes = old_value.clone().finalized();
+            cache.insert(raw_key, old_value_bytes);
+        }
+    }
+}
 
 pub const SEEK_BOUND: u64 = 8;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -227,6 +268,12 @@ pub struct WriteData {
     pub disk_full_opt: DiskFullOpt,
     pub txn_file: Option<TxnFileRef>,
     pub backup_ts_checked: Option<TrackedBackupTs>,
+}
+
+impl From<Vec<Modify>> for WriteData {
+    fn from(modifies: Vec<Modify>) -> Self {
+        Self::from_modifies(modifies)
+    }
 }
 
 impl WriteData {
@@ -532,6 +579,9 @@ pub trait SnapshotExt {
     }
 
     fn get_txn_extra_op(&self) -> TxnExtraOp {
+        if crate::PROBE_OLD_VALUES_IN_TEST.load(Ordering::Relaxed) {
+            return TxnExtraOp::ReadOldValue;
+        }
         TxnExtraOp::Noop
     }
 

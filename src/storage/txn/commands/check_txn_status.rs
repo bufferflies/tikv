@@ -247,7 +247,9 @@ pub mod tests {
         } else {
             unreachable!();
         }
-        write(engine, &ctx, result.to_be_write.modifies);
+        let mut data = tikv_kv::WriteData::from_modifies(result.to_be_write.modifies);
+        data.extra.req_type = txn_types::ReqType::CheckTxnStatus;
+        write(engine, &ctx, data);
     }
 
     pub fn must_err<E: Engine>(

@@ -41,7 +41,12 @@ impl<'a> SnapshotExt for RegionSnapshotExt<'a> {
     }
 
     fn get_txn_extra_op(&self) -> TxnExtraOp {
-        self.snapshot.txn_extra_op
+        // Check if old_value probe is enabled for testing
+        if crate::PROBE_OLD_VALUES_IN_TEST.load(std::sync::atomic::Ordering::Relaxed) {
+            TxnExtraOp::ReadOldValue
+        } else {
+            self.snapshot.txn_extra_op
+        }
     }
 
     fn get_txn_ext(&self) -> Option<&Arc<TxnExt>> {

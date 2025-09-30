@@ -27,7 +27,7 @@ use kvproto::{
 use log_wrappers::hex_encode;
 use rfstore::{
     router::RaftStoreRouter,
-    store::{Callback, CasualMessage, PeerTag},
+    store::{Callback, CasualMessage, CheckLeaderTask, PeerTag},
     Error as RaftStoreError,
 };
 use tikv::{
@@ -49,6 +49,7 @@ use tikv_util::{
     future::{paired_future_callback, poll_future_notify},
     mpsc::future::{unbounded, BatchReceiver, Sender, WakePolicy},
     time::Instant,
+    worker::Scheduler,
 };
 use txn_types::{self, Key};
 
@@ -85,6 +86,9 @@ pub struct Service<T: RaftStoreRouter, L: LockManager, F: KvFormat> {
     grpc_thread_load: Arc<ThreadLoadPool>,
 
     proxy: Proxy,
+
+    // For handling `CheckLeader` request.
+    check_leader_scheduler: Scheduler<CheckLeaderTask>,
 }
 
 impl<T: RaftStoreRouter + Clone + 'static, L: LockManager + Clone, F: KvFormat + Clone> Clone
@@ -100,6 +104,7 @@ impl<T: RaftStoreRouter + Clone + 'static, L: LockManager + Clone, F: KvFormat +
             enable_req_batch: self.enable_req_batch,
             grpc_thread_load: self.grpc_thread_load.clone(),
             proxy: self.proxy.clone(),
+            check_leader_scheduler: self.check_leader_scheduler.clone(),
         }
     }
 }
@@ -115,6 +120,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Service<T, L, F>
         grpc_thread_load: Arc<ThreadLoadPool>,
         enable_req_batch: bool,
         proxy: Proxy,
+        check_leader_scheduler: Scheduler<CheckLeaderTask>,
     ) -> Self {
         Service {
             store_id,
@@ -125,6 +131,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Service<T, L, F>
             enable_req_batch,
             grpc_thread_load,
             proxy,
+            check_leader_scheduler,
         }
     }
 }
@@ -851,11 +858,46 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
 
     fn check_leader(
         &mut self,
-        _ctx: RpcContext<'_>,
-        _request: CheckLeaderRequest,
-        _sink: UnarySink<CheckLeaderResponse>,
+        ctx: RpcContext<'_>,
+        mut request: CheckLeaderRequest,
+        sink: UnarySink<CheckLeaderResponse>,
     ) {
-        unimplemented!()
+        let begin_instant = Instant::now();
+        let addr = ctx.peer();
+        let ts = request.get_ts();
+        let leaders = request.take_regions().into();
+        let (cb, resp) = paired_future_callback();
+        let check_leader_scheduler = self.check_leader_scheduler.clone();
+        let task = async move {
+            check_leader_scheduler
+                .schedule(CheckLeaderTask::CheckLeader { leaders, cb })
+                .map_err(|e| Error::Other(format!("{}", e).into()))?;
+            let regions = resp.await?;
+            GRPC_MSG_HISTOGRAM_STATIC
+                .check_leader
+                .default
+                .observe(begin_instant.saturating_elapsed().as_secs_f64());
+            let mut resp = CheckLeaderResponse::default();
+            resp.set_ts(ts);
+            resp.set_regions(regions);
+            if let Err(e) = sink.success(resp).await {
+                // CheckLeader has a built-in fast-success mechanism, so `RemoteStopped`
+                // can be treated as a general situation.
+                if let GrpcError::RemoteStopped = e {
+                    return ServerResult::Ok(());
+                }
+                return Err(Error::from(e));
+            }
+            ServerResult::Ok(())
+        }
+        .map_err(move |e| {
+            // CheckLeader only needs quorum responses, remote may drops
+            // requests early.
+            info!("call CheckLeader failed"; "err" => ?e, "address" => addr);
+        })
+        .map(|_| ());
+
+        ctx.spawn(task);
     }
 
     fn get_store_safe_ts(

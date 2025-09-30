@@ -303,7 +303,9 @@ mod tests {
         }
         assert_eq!(lock_info_index, result.lock_info.len());
 
-        write(engine, &ctx, result.to_be_write.modifies);
+        let mut data = tikv_kv::WriteData::from_modifies(result.to_be_write.modifies);
+        data.extra.req_type = txn_types::ReqType::PessimisticLock;
+        write(engine, &ctx, data);
         res
     }
 

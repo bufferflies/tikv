@@ -15,19 +15,24 @@ use std::{
 use api_version::{api_v2::is_whole_keyspace_range, ApiV2};
 use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
+use engine_traits::{CF_LOCK, CF_WRITE};
 use fail::fail_point;
 use kvengine::{
-    encode_extra_txn_status_key, encryption_key_from_shard_properties, mvcc, table::InnerKey,
-    util::PropertiesHelper, ChangeSet, Engine, SnapAccess, UserMeta, WriteBatch, ENCRYPTION_KEY,
-    ENCRYPTION_META_KEY, EXTRA_CF, LOCK_CF, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
+    encode_extra_txn_status_key, encryption_key_from_shard_properties, mvcc,
+    table::{memtable::WriteBatchEntry, InnerKey},
+    util::PropertiesHelper,
+    ChangeSet, Engine, SnapAccess, UserMeta, WriteBatch, ENCRYPTION_KEY, ENCRYPTION_META_KEY,
+    EXTRA_CF, LOCK_CF, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF, WRITE_CF,
 };
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use kvproto::{
+    kvrpcpb::ExtraOp as TxnExtraOp,
     metapb,
     metapb::{PeerRole, Region},
     raft_cmdpb::{
         AdminCmdType, AdminRequest, AdminResponse, BatchSplitRequest, BatchSplitResponse,
-        ChangePeerRequest, RaftCmdRequest, RaftCmdResponse, RaftRequestHeader, RaftResponseHeader,
+        ChangePeerRequest, CmdType, DeleteRequest, PutRequest, RaftCmdRequest, RaftCmdResponse,
+        RaftRequestHeader, RaftResponseHeader, Request,
     },
 };
 use log_wrappers::Value;
@@ -39,11 +44,14 @@ use raft::{
     StateRole,
 };
 use raft_proto::eraftpb;
-use raftstore::store::{
-    fsm::metrics::*,
-    metrics::*,
-    util,
-    util::{ChangePeerI, ConfChangeKind},
+use raftstore::{
+    coprocessor::{Cmd, CmdBatch, CmdObserveInfo, CoprocessorHost, ObserveHandle},
+    store::{
+        fsm::{metrics::*, ChangeObserver, ObserverType},
+        metrics::*,
+        util,
+        util::{ChangePeerI, ConfChangeKind},
+    },
 };
 use rand::Rng;
 use tikv_alloc::TraceEvent;
@@ -57,7 +65,7 @@ use tikv_util::{
     warn,
 };
 use time::Timespec;
-use txn_types::LockType;
+use txn_types::{Key, LockType, Write, WriteType};
 
 use self::memory::MEMTRACE_APPLYS;
 use super::*;
@@ -170,17 +178,32 @@ pub struct NewSplitPeer {
 #[allow(clippy::large_enum_variant)]
 pub enum ExecResult {
     ChangePeer(ChangePeer),
-    SplitRegion { regions: Vec<Region> },
-    DeleteRange { ranges: Vec<Range> },
+    SplitRegion {
+        regions: Vec<Region>,
+    },
+    DeleteRange {
+        ranges: Vec<Range>,
+    },
     UnsafeDestroy,
-    PrepareMerge { region: Region },
-    CommitMerge { region: Region, source: Region },
-    RollbackMerge { region: Region, commit: u64 },
-    RestoreShard { cs: kvenginepb::ChangeSet },
+    PrepareMerge {
+        region: Region,
+    },
+    CommitMerge {
+        index: u64,
+        region: Region,
+        source: Region,
+    },
+    RollbackMerge {
+        region: Region,
+        commit: u64,
+    },
+    RestoreShard {
+        cs: kvenginepb::ChangeSet,
+    },
 }
 
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum ApplyResult {
+pub enum ApplyResult {
     None,
     /// Additional result that needs to be sent back to raftstore.
     Res(ExecResult),
@@ -295,6 +318,8 @@ pub struct Applier {
     )>,
 
     trace: ApplyMemoryTrace,
+    /// Info about cmd observer.
+    observe_info: CmdObserveInfo,
 
     apply_log_histogram: LocalHistogram,
 
@@ -354,6 +379,55 @@ impl Applier {
         applier.encryption_key = reg.encryption_key;
         applier.term = reg.term;
         applier
+    }
+
+    pub fn new_for_test() -> Self {
+        let mut region = metapb::Region::default();
+        region.id = 1;
+        let keyspace_name = "test".to_string();
+        let apply_log_histogram = STORE_APPLY_LOG_HISTOGRAM
+            .with_label_values(&[&keyspace_name])
+            .local();
+        let apply_histogram = APPLY_TIME_HISTOGRAM
+            .with_label_values(&[&keyspace_name])
+            .local();
+        let store_time_histogram = STORE_TIME_HISTOGRAM
+            .with_label_values(&[&keyspace_name])
+            .local();
+        Self {
+            peer: metapb::Peer::default(),
+            term: 1,
+            region,
+            apply_state: RaftApplyState {
+                applied_index: 5,
+                applied_index_term: 1,
+            },
+            encryption_key: None,
+            decryption_buf: vec![],
+            shard_pending_active: None,
+            trace: ApplyMemoryTrace::default(),
+            stopped: false,
+            pending_remove: false,
+            pending_cmds: PendingCmdQueue::default(),
+            lock_cache: HashMap::default(),
+            snap: None,
+            metrics: ApplyMetrics::default(),
+            pending_split: HashMap::default(),
+            commit_merge_source_tables: HashMap::default(),
+            paused_apply_queue: PausedApplyQueue::default(),
+            scheduled_change_sets: VecDeque::new(),
+            prepared_change_sets: HashMap::new(),
+            role: raft::StateRole::Follower,
+            mem_table_state: None,
+            last_property_term: 0,
+            buckets: None,
+            observe_info: CmdObserveInfo::default(),
+            apply_log_histogram,
+            apply_histogram,
+            store_time_histogram,
+            last_meterics_flush_time: Instant::now_coarse(),
+            keyspace_name,
+        }
     }
 
     pub fn is_paused(&self) -> bool {
@@ -447,6 +521,7 @@ impl Applier {
             mem_table_state: None,
             last_property_term: 0,
             buckets: None,
+            observe_info: CmdObserveInfo::default(),
             apply_log_histogram,
             apply_histogram,
             store_time_histogram,
@@ -734,12 +809,12 @@ impl Applier {
         }
     }
 
-    pub(crate) fn exec_custom_log(
+    pub fn exec_custom_log(
         &mut self,
         ctx: &mut ApplyContext,
         cl: &CustomRaftLog<'_>,
         cs: Option<kvenginepb::ChangeSet>,
-    ) -> Result<(RaftCmdResponse, ApplyResult)> {
+    ) -> Result<(RaftCmdResponse, ApplyResult, Vec<Request>)> {
         let mut observer = ctx.observer.take();
         let mut wb_ref = ctx.get_engine_wb(self.region.get_id());
         let wb = &mut wb_ref;
@@ -839,6 +914,17 @@ impl Applier {
         if let Some(observer) = &mut observer {
             observer.on_apply(self.region_id(), log_index, wb);
         }
+        let mut kv_requests = vec![];
+        if self.observe_info.cdc_id.is_observing() {
+            let shard = ctx.engine.get_shard(self.region_id()).unwrap_or_else(|| {
+                panic!(
+                    "shard for region <{:?}> not found right after writting",
+                    self.region
+                )
+            });
+            let reqs = wb_to_requests(wb, shard.keyspace_id);
+            kv_requests = reqs;
+        }
         drop(wb_ref);
         ctx.observer = observer;
         let mem_states = self.mut_mem_table_state(engine);
@@ -854,7 +940,7 @@ impl Applier {
         let mut resp = RaftCmdResponse::default();
         let header = RaftResponseHeader::default();
         resp.set_header(header);
-        Ok((resp, ApplyResult::None))
+        Ok((resp, ApplyResult::None, kv_requests))
     }
 
     fn record_apply_metry(&mut self, dur: Duration) {
@@ -903,36 +989,45 @@ impl Applier {
     fn apply_raft_log(
         &mut self,
         ctx: &mut ApplyContext,
-        req: &RaftCmdRequest,
-    ) -> (RaftCmdResponse, ApplyResult) {
-        if let Err(err) = check_region_epoch(req, &self.region, true) {
+        mut req: RaftCmdRequest,
+        index: u64,
+        term: u64,
+    ) -> (Cmd, ApplyResult) {
+        if let Err(err) = check_region_epoch(&req, &self.region, true) {
             let mut check_in_region_worker = false;
-            if let Some(custom) = rlog::get_custom_log(req) {
+            if let Some(custom) = rlog::get_custom_log(&req) {
                 if custom.get_type() == rlog::CustomRaftLogType::EngineMeta {
                     check_in_region_worker = true;
                 }
             }
             if !check_in_region_worker {
-                return (err_resp(err, ctx.exec_log_term), ApplyResult::None);
+                return (
+                    Cmd::new(index, term, req, err_resp(err, ctx.exec_log_term)),
+                    ApplyResult::None,
+                );
             }
         }
-        if req.has_admin_request() {
-            return match self.exec_admin_cmd(ctx, req) {
-                Ok((resp, result)) => (resp, result),
-                Err(e) => (err_resp(e, ctx.exec_log_term), ApplyResult::None),
-            };
-        }
-        let custom = rlog::get_custom_log(req).unwrap();
-        match self.exec_custom_log(ctx, &custom, None) {
+        let res = if req.has_admin_request() {
+            self.exec_admin_cmd(ctx, &req)
+        } else {
+            let custom = rlog::get_custom_log(&req).unwrap();
+            self.exec_custom_log(ctx, &custom, None)
+                .map(|(resp, res, requests)| {
+                    req.set_requests(requests.into());
+                    (resp, res)
+                })
+        };
+        let (resp, result) = match res {
             Ok((resp, result)) => (resp, result),
             Err(e) => (err_resp(e, ctx.exec_log_term), ApplyResult::None),
-        }
+        };
+        (Cmd::new(index, term, req, resp), result)
     }
 
     fn handle_apply_result(
         &mut self,
         ctx: &mut ApplyContext,
-        mut resp: RaftCmdResponse,
+        mut cmd: Cmd,
         result: &ApplyResult,
         is_conf_change: bool,
     ) {
@@ -969,11 +1064,17 @@ impl Applier {
         }
         // TODO: if we have exec_result, maybe we should return this callback too. Outer
         // store will call it after handing exec result.
-        bind_term(&mut resp, ctx.exec_log_term);
-        if let Some(cmd_cb) =
-            self.find_callback(ctx.exec_log_index, ctx.exec_log_term, is_conf_change)
-        {
-            cmd_cb.invoke_with_response(resp);
+        bind_term(&mut cmd.response, ctx.exec_log_term);
+        let cmd_cb = self.find_callback(ctx.exec_log_index, ctx.exec_log_term, is_conf_change);
+        let response = cmd.response.clone();
+
+        if ctx.coprocessor_host.is_some() {
+            debug_assert_eq!(ctx.cmd_batch.len(), 1);
+            ctx.cmd_batch[0].push(&self.observe_info, self.region_id(), cmd);
+        }
+
+        if let Some(cmd_cb) = cmd_cb {
+            cmd_cb.invoke_with_response(response);
         }
     }
 
@@ -1037,7 +1138,7 @@ impl Applier {
             assert!(index > 0);
             // if pending remove, apply should be aborted already.
             assert!(!self.pending_remove);
-            let (resp, result) = self.apply_raft_log(ctx, &cmd);
+            let (resp, result) = self.apply_raft_log(ctx, cmd, index, term);
             self.handle_apply_result(ctx, resp, &result, false);
             return result;
         }
@@ -1153,8 +1254,9 @@ impl Applier {
         // ApplyResult::Yield
         // });
         let index = entry.get_index();
+        let term = entry.get_term();
         let (cmd, conf_change) = parse_conf_change_cmd(entry, &self.tag());
-        let (resp, result) = self.apply_raft_log(ctx, &cmd);
+        let (resp, result) = self.apply_raft_log(ctx, cmd, index, term);
         self.handle_apply_result(ctx, resp, &result, true);
         match result {
             ApplyResult::None => {
@@ -1316,7 +1418,11 @@ impl Applier {
             .observe(duration_to_sec(star_time.saturating_elapsed()));
         Ok((
             AdminResponse::default(),
-            ApplyResult::Res(ExecResult::CommitMerge { region, source }),
+            ApplyResult::Res(ExecResult::CommitMerge {
+                index: ctx.exec_log_index,
+                region,
+                source,
+            }),
         ))
     }
 
@@ -1359,6 +1465,10 @@ impl Applier {
         if committed_entries_drainer.len() == 0 {
             return;
         }
+        if ctx.coprocessor_host.is_some() {
+            ctx.cmd_batch
+                .push(CmdBatch::new(&self.observe_info, self.region_id()));
+        }
 
         // If we send multiple ConfChange commands, only first one will be proposed
         // correctly, others will be saved as a normal entry with no data, so we
@@ -1391,6 +1501,13 @@ impl Applier {
                 ApplyResult::Res(res) => {
                     results.push_back(res);
                 }
+            }
+        }
+
+        if let Some(host) = &ctx.coprocessor_host {
+            let batches = std::mem::take(&mut ctx.cmd_batch);
+            if !batches.is_empty() {
+                host.on_flush_applied_cmd_batch(batches[0].level, batches, &ctx.engine);
             }
         }
         ctx.finish_for(self, results);
@@ -1902,6 +2019,80 @@ impl Applier {
         self.apply_prepared_change_set(ctx);
     }
 
+    fn handle_change(
+        &mut self,
+        ctx: &mut ApplyContext,
+        cmd: ChangeObserver,
+        region_epoch: metapb::RegionEpoch,
+        cb: Callback,
+    ) {
+        let ChangeObserver { region_id, ty } = cmd;
+
+        let is_stale_cmd = match ty {
+            ObserverType::Cdc(ObserveHandle { id, .. }) => self.observe_info.cdc_id.id > id,
+            ObserverType::Rts(ObserveHandle { id, .. }) => self.observe_info.rts_id.id > id,
+            ObserverType::Pitr(ObserveHandle { id, .. }) => self.observe_info.pitr_id.id > id,
+        };
+        if is_stale_cmd {
+            notify_stale_req_with_msg(
+                self.term,
+                format!(
+                    "stale observe id {:?}, current id: {:?}",
+                    ty.handle().id,
+                    self.observe_info.pitr_id.id
+                ),
+                cb,
+            );
+            return;
+        }
+
+        assert_eq!(self.region_id(), region_id);
+        let resp = match compare_region_epoch(
+            &region_epoch,
+            &self.region,
+            false, // check_conf_ver
+            true,  // check_ver
+            true,  // include_region
+        )
+        .and_then(|_| {
+            ctx.engine
+                .get_shard(region_id)
+                .map(|s| s.new_snap_access())
+                .ok_or(Error::KvEngineError(kvengine::Error::ShardNotFound))
+        }) {
+            Ok(s) => ReadResponse {
+                response: Default::default(),
+                snapshot: Some(RegionSnapshot::from_snapshot(
+                    s,
+                    Some(Arc::new(self.region.clone())),
+                )),
+                txn_extra_op: TxnExtraOp::Noop,
+            },
+            Err(e) => {
+                // Return error if epoch not match
+                cb.invoke_read(ReadResponse {
+                    response: cmd_resp::new_error(e),
+                    snapshot: None,
+                    txn_extra_op: TxnExtraOp::Noop,
+                });
+                return;
+            }
+        };
+
+        match ty {
+            ObserverType::Cdc(id) => {
+                self.observe_info.cdc_id = id;
+            }
+            ObserverType::Rts(id) => {
+                self.observe_info.rts_id = id;
+            }
+            ObserverType::Pitr(id) => {
+                self.observe_info.pitr_id = id;
+            }
+        }
+        cb.invoke_read(resp);
+    }
+
     pub(crate) fn handle_msg(&mut self, ctx: &mut ApplyContext, msg: ApplyMsg) {
         if self.stopped {
             info!("{} skip apply msg {:?}", self.tag(), msg);
@@ -1964,6 +2155,13 @@ impl Applier {
             }
             ApplyMsg::ResumeTxnFile(commit_index) => {
                 self.handle_resume_txn_file(ctx, commit_index);
+            }
+            ApplyMsg::Change {
+                cmd,
+                region_epoch,
+                cb,
+            } => {
+                self.handle_change(ctx, cmd, region_epoch, cb);
             }
         }
     }
@@ -2030,7 +2228,7 @@ impl Applier {
     }
 
     pub(crate) fn update_memory_trace(&mut self, event: &mut TraceEvent) {
-        let pending_cmds = self.pending_cmds.heap_size();
+        let pending_cmds = self.pending_cmds.approximate_heap_size();
         let task = ApplyMemoryTrace { pending_cmds };
 
         if let Some(e) = self.trace.reset(task) {
@@ -2497,17 +2695,23 @@ pub trait ApplyObserver: Send {
 pub struct ApplyContext {
     pub(crate) engine: kvengine::Engine,
     pub(crate) router: Option<RaftRouter>, // None in recover mode.
-    pub(crate) exec_log_index: u64,
+    pub exec_log_index: u64,
     pub(crate) exec_log_term: u64,
     // NOTE: `wb` must be `reset` before use.
     // Use `RefCell` to work around the borrow check.
     wb: RefCell<WriteBatch>,
     pub(crate) apply_wait: LocalHistogram,
     pub(crate) observer: Option<Box<dyn ApplyObserver>>,
+    pub(crate) coprocessor_host: Option<CoprocessorHost<kvengine::Engine>>,
+    pub(crate) cmd_batch: Vec<CmdBatch>,
 }
 
 impl ApplyContext {
-    pub fn new(engine: kvengine::Engine, router: Option<RaftRouter>) -> Self {
+    pub fn new(
+        engine: kvengine::Engine,
+        router: Option<RaftRouter>,
+        coprocessor_host: Option<CoprocessorHost<kvengine::Engine>>,
+    ) -> Self {
         Self {
             engine,
             router,
@@ -2516,6 +2720,8 @@ impl ApplyContext {
             wb: RefCell::new(WriteBatch::default()),
             apply_wait: APPLY_TASK_WAIT_TIME_HISTOGRAM.local(),
             observer: None,
+            coprocessor_host,
+            cmd_batch: vec![],
         }
     }
 
@@ -2707,10 +2913,175 @@ mod memtrace {
     }
 
     impl HeapSize for PendingCmdQueue {
-        fn heap_size(&self) -> usize {
+        fn approximate_heap_size(&self) -> usize {
             self.normals.capacity() * mem::size_of::<PendingCmd>()
         }
     }
+}
+
+fn to_request(
+    cf: usize,
+    entry: &WriteBatchEntry,
+    buf: &[u8],
+    requests: &mut Vec<Request>,
+    keyspace_id: u32,
+) {
+    let mut key = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
+    key.extend_from_slice(entry.key(buf));
+    let key = match cf {
+        WRITE_CF => Key::from_raw(&key)
+            .append_ts(entry.version.into())
+            .into_encoded(),
+        LOCK_CF => Key::from_raw(&key).into_encoded(),
+        EXTRA_CF => {
+            // Maybe remove it after we figured out why.
+            if entry.key(buf).len() < 8 {
+                warn!("there is a key in CF_EXTRA without ts, will skip it."; 
+                    "key" => %log_wrappers::Value::key(&key), 
+                    "raw_key" => log_wrappers::Value::key(entry.key(buf)));
+                return;
+            }
+
+            Key::from_raw(Key::truncate_ts_for(&key).unwrap_or_else(|err| {
+                panic!(
+                    "CF_EXTRA has a key {} without ts: {}",
+                    log_wrappers::Value::key(&key),
+                    err
+                )
+            }))
+            .into_encoded()
+        }
+        _ => unreachable!(),
+    };
+    let val = entry.value(buf);
+    let is_delete = val.is_empty();
+
+    match (is_delete, cf) {
+        (true, WRITE_CF) => {
+            let mut req = Request::default();
+            let mut del_put_req = PutRequest::default();
+            let user_meta = entry.user_meta(buf);
+            let user_meta = UserMeta::from_slice(user_meta);
+            let write = Write::new(WriteType::Delete, user_meta.start_ts.into(), None);
+            del_put_req.set_cf(CF_WRITE.to_string());
+            del_put_req.set_key(key);
+            del_put_req.set_value(write.as_ref().to_bytes());
+            req.set_put(del_put_req);
+            req.set_cmd_type(CmdType::Put);
+            requests.push(req);
+        }
+        (false, WRITE_CF) => {
+            let mut req = Request::default();
+            let mut put_req = PutRequest::default();
+            let user_meta = entry.user_meta(buf);
+            let user_meta = UserMeta::from_slice(user_meta);
+            let has_default = entry.val_len >= u8::MAX as u32;
+            if has_default {
+                let mut key = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
+                key.extend_from_slice(entry.key(buf));
+                let mut default_req = Request::default();
+                let mut default_put_req = PutRequest::default();
+                let default_key = Key::from_raw(&key).append_ts(user_meta.start_ts.into());
+
+                default_put_req.set_key(default_key.into_encoded());
+                default_put_req.set_value(entry.value(buf).to_vec());
+                default_req.set_cmd_type(CmdType::Put);
+                default_req.set_put(default_put_req);
+                requests.push(default_req);
+            }
+            let write = Write::new(
+                txn_types::WriteType::Put,
+                user_meta.start_ts.into(),
+                (!has_default).then(|| entry.value(buf).to_vec()),
+            );
+            put_req.set_cf(CF_WRITE.to_string());
+            put_req.set_key(key);
+            put_req.set_value(write.as_ref().to_bytes());
+            req.set_cmd_type(CmdType::Put);
+            req.set_put(put_req);
+            requests.push(req);
+        }
+        (false, LOCK_CF) => {
+            let mut req = Request::default();
+            let mut put_req = PutRequest::default();
+            put_req.set_cf(CF_LOCK.to_string());
+            put_req.set_key(key);
+            put_req.set_value(val.to_vec());
+            req.set_cmd_type(CmdType::Put);
+            req.set_put(put_req);
+            requests.push(req);
+        }
+        (true, LOCK_CF) => {
+            let mut req = Request::default();
+            let mut del_req = DeleteRequest::default();
+            del_req.set_cf(CF_LOCK.to_string());
+            del_req.set_key(key);
+            req.set_cmd_type(CmdType::Delete);
+            req.set_delete(del_req);
+            requests.push(req);
+        }
+        (false, EXTRA_CF) => {
+            let mut req = Request::default();
+            // From `CloudReader::get_extras`.
+            let um = UserMeta::from_slice(entry.user_meta(buf));
+            let (ts, write_type) = if um.commit_ts == 0 {
+                (um.start_ts, WriteType::Rollback)
+            } else {
+                (um.commit_ts, WriteType::Lock)
+            };
+            let mut put_req = PutRequest::new();
+            let write = Write::new(write_type, um.start_ts.into(), None);
+            let key_with_ts = Key::from_encoded(key).append_ts(ts.into()).into_encoded();
+            put_req.set_cf(CF_WRITE.to_string());
+            put_req.set_key(key_with_ts);
+            put_req.set_value(write.as_ref().to_bytes());
+            req.set_put(put_req);
+            req.set_cmd_type(CmdType::Put);
+            requests.push(req);
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn wb_to_requests(wb: &WriteBatch, keyspace_id: u32) -> Vec<Request> {
+    let write_cf = wb.get_cf(WRITE_CF);
+    let lock_cf = wb.get_cf(LOCK_CF);
+    let extra_cf = wb.get_cf(EXTRA_CF);
+    let mut requests = Vec::with_capacity(write_cf.len() + lock_cf.len());
+    write_cf.iterate(|entry, buf| {
+        if is_index_key(entry.key(buf)) {
+            // Skip index keys as CDC does not need them.
+            return;
+        }
+        to_request(WRITE_CF, entry, buf, &mut requests, keyspace_id);
+    });
+    lock_cf.iterate(|entry, buf| {
+        let entry_key = entry.key(buf);
+        if is_index_key(entry_key) {
+            // Skip index keys as CDC does not need them.
+            return;
+        }
+        to_request(LOCK_CF, entry, buf, &mut requests, keyspace_id);
+    });
+    extra_cf.iterate(|entry, buf| {
+        let entry_key = entry.key(buf);
+        if is_index_key(entry_key) {
+            // Skip index keys as CDC does not need them.
+            return;
+        }
+        to_request(EXTRA_CF, entry, buf, &mut requests, keyspace_id);
+    });
+    requests
+}
+
+pub(crate) fn is_index_key(key: &[u8]) -> bool {
+    use tidb_query_datatype::codec::table::{INDEX_PREFIX_SEP, PREFIX_LEN, TABLE_PREFIX};
+
+    if key.len() < PREFIX_LEN {
+        return false;
+    }
+    let trimmed_key = &key[..PREFIX_LEN];
+    trimmed_key.starts_with(TABLE_PREFIX) && trimmed_key.ends_with(INDEX_PREFIX_SEP)
 }
 
 #[cfg(test)]

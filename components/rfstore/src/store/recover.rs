@@ -285,7 +285,7 @@ impl kvengine::RecoverHandler for RecoverHandler {
         shard: &Arc<Shard>,
         meta: &ShardMeta,
     ) -> kvengine::Result<()> {
-        let mut ctx = ApplyContext::new(engine.clone(), None);
+        let mut ctx = ApplyContext::new(engine.clone(), None, None);
         self.recover_with_apply_ctx(&mut ctx, shard, meta)
     }
 }
@@ -522,7 +522,7 @@ pub fn apply_custom_log_in_recover(
 ) -> crate::errors::Result<()> {
     let custom = CustomRaftLog::new_from_data(custom_req.get_data());
     let applied_index = shard.get_write_sequence();
-    let mut ctx = ApplyContext::new(engine.clone(), None);
+    let mut ctx = ApplyContext::new(engine.clone(), None, None);
     let applied_index_term = shard.get_property(TERM_KEY).unwrap().get_u64_le();
     let apply_state = RaftApplyState::new(applied_index, applied_index_term);
 

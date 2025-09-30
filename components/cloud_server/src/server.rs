@@ -24,7 +24,7 @@ use kvproto::tikvpb::*;
 use openssl::error::ErrorStack as OpenSslError;
 use pd_client::Error as PdError;
 use protobuf::ProtobufError;
-use rfstore::{router::RaftStoreRouter, Error as RaftServerError};
+use rfstore::{router::RaftStoreRouter, store::CheckLeaderTask, Error as RaftServerError};
 use security::SecurityManager;
 use thiserror::Error;
 use tikv::{
@@ -47,6 +47,7 @@ use tikv_util::{
     config::VersionTrack,
     sys::{get_global_memory_usage, record_global_memory_usage, thread::ThreadBuildWrapper},
     timer::GLOBAL_TIMER_HANDLE,
+    worker::Scheduler,
     Either,
 };
 use tokio::runtime::{Builder as RuntimeBuilder, Handle as RuntimeHandle, Runtime};
@@ -163,6 +164,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         env: Arc<Environment>,
         read_pool: ReadPool,
         debug_thread_pool: Arc<Runtime>,
+        check_leader_scheduler: Scheduler<CheckLeaderTask>,
     ) -> Result<Self> {
         // A helper thread (or pool) for transport layer.
         let stats_pool = if cfg.value().stats_concurrency > 0 {
@@ -191,6 +193,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             Arc::clone(&grpc_thread_load),
             cfg.value().enable_request_batch,
             proxy,
+            check_leader_scheduler,
         );
 
         let addr = SocketAddr::from_str(&cfg.value().addr)?;

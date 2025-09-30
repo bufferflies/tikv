@@ -137,7 +137,7 @@ impl Tikv for CopService {
             )
             .await
             .map_err(|e| tikv::coprocessor::Error::Other(format!("{:?}", e)))?;
-            let snapshot = rfstore::store::RegionSnapshot::from_snapshot(snap_access);
+            let snapshot = rfstore::store::RegionSnapshot::from_snapshot(snap_access, None);
 
             let process_start = Instant::now_coarse();
             let result = parse_request_and_handle_remote_cop(

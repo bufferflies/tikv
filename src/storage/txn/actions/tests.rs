@@ -9,6 +9,7 @@ use kvproto::kvrpcpb::{
 };
 use prewrite::{prewrite, CommitKind, TransactionKind, TransactionProperties};
 use tikv_kv::SnapContext;
+use txn_types::ReqType;
 
 use super::*;
 use crate::storage::{
@@ -165,7 +166,9 @@ pub fn must_prewrite_put_impl_with_should_not_exist<E: Engine>(
         pessimistic_action,
     )
     .unwrap();
-    write(engine, &ctx, txn.into_modifies());
+    let mut data = WriteData::from_modifies(txn.into_modifies());
+    data.extra.req_type = ReqType::Prewrite;
+    write(engine, &ctx, data);
 }
 
 pub fn must_prewrite_put<E: Engine>(
@@ -706,9 +709,10 @@ fn must_prewrite_delete_impl<E: Engine>(
     )
     .unwrap();
 
-    engine
-        .write(&ctx, WriteData::from_modifies(txn.into_modifies()))
-        .unwrap();
+    let mut data = WriteData::from_modifies(txn.into_modifies());
+    data.extra.req_type = txn_types::ReqType::Prewrite;
+
+    engine.write(&ctx, data).unwrap();
 }
 
 pub fn must_prewrite_delete<E: Engine>(
@@ -784,9 +788,10 @@ fn must_prewrite_lock_impl<E: Engine>(
     )
     .unwrap();
 
-    engine
-        .write(&ctx, WriteData::from_modifies(txn.into_modifies()))
-        .unwrap();
+    let mut data = WriteData::from_modifies(txn.into_modifies());
+    data.extra.req_type = txn_types::ReqType::Prewrite;
+
+    engine.write(&ctx, data).unwrap();
 }
 
 pub fn must_prewrite_lock<E: Engine>(
@@ -852,7 +857,9 @@ pub fn must_rollback<E: Engine>(
         protect_rollback,
     )
     .unwrap();
-    write(engine, &ctx, txn.into_modifies());
+    let mut data = WriteData::from_modifies(txn.into_modifies());
+    data.extra.req_type = ReqType::Rollback;
+    write(engine, &ctx, data);
 }
 
 pub fn must_rollback_err<E: Engine>(engine: &mut E, key: &[u8], start_ts: impl Into<TimeStamp>) {

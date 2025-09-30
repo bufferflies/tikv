@@ -2533,8 +2533,17 @@ pub struct CdcConfig {
     // TODO(hi-rustin): Consider resizing the thread pool based on `incremental_scan_threads`.
     #[online_config(skip)]
     pub incremental_scan_threads: usize,
+    // The number of scan tasks that is allowed to run concurrently.
     pub incremental_scan_concurrency: usize,
+    // The number of scan tasks that is allowed to be created. In other words,
+    // there will be at most `incremental_scan_concurrency_limit - incremental_scan_concurrency`
+    // number of scan tasks that is waitting to run.
+    pub incremental_scan_concurrency_limit: usize,
+    /// Limit scan speed based on disk I/O traffic.
     pub incremental_scan_speed_limit: ReadableSize,
+    /// Limit scan speed based on memory accesing traffic.
+    #[doc(hidden)]
+    pub incremental_fetch_speed_limit: ReadableSize,
     /// `TsFilter` can increase speed and decrease resource usage when
     /// incremental content is much less than total content. However in
     /// other cases, `TsFilter` can make performance worse because it needs
@@ -2553,34 +2562,32 @@ pub struct CdcConfig {
 
     pub sink_memory_quota: ReadableSize,
     pub old_value_cache_memory_quota: ReadableSize,
-
-    // Deprecated! preserved for compatibility check.
-    #[online_config(skip)]
-    #[doc(hidden)]
-    #[serde(skip_serializing)]
-    pub old_value_cache_size: usize,
 }
 
 impl Default for CdcConfig {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
-            min_ts_interval: ReadableDuration::millis(200),
-            hibernate_regions_compatible: true,
+            min_ts_interval: ReadableDuration::secs(1),
+            // TODO: currently, we use resolve_by_raft by default,
+            // we may switch to check_leader if it's performance is better.
+            hibernate_regions_compatible: false,
             // 4 threads for incremental scan.
             incremental_scan_threads: 4,
             // At most 6 concurrent running tasks.
             incremental_scan_concurrency: 6,
+            // At most 10000 tasks can exist simultaneously.
+            incremental_scan_concurrency_limit: 10000,
             // TiCDC requires a SSD, the typical write speed of SSD
             // is more than 500MB/s, so 128MB/s is enough.
             incremental_scan_speed_limit: ReadableSize::mb(128),
+            incremental_fetch_speed_limit: ReadableSize::mb(512),
             incremental_scan_ts_filter_ratio: 0.2,
             tso_worker_threads: 1,
             // 512MB memory for CDC sink.
             sink_memory_quota: ReadableSize::mb(512),
             // 512MB memory for old value cache.
             old_value_cache_memory_quota: ReadableSize::mb(512),
-            // Deprecated! preserved for compatibility check.
-            old_value_cache_size: 0,
         }
     }
 }
@@ -2610,6 +2617,14 @@ impl CdcConfig {
             );
             self.incremental_scan_concurrency = self.incremental_scan_threads
         }
+        if self.incremental_scan_concurrency_limit < self.incremental_scan_concurrency {
+            warn!(
+                "cdc.incremental-scan-concurrency-limit must be larger than cdc.incremental-scan-concurrency,
+                change it to {}",
+                self.incremental_scan_concurrency
+            );
+            self.incremental_scan_concurrency_limit = self.incremental_scan_concurrency
+        }
         if self.incremental_scan_ts_filter_ratio < 0.0
             || self.incremental_scan_ts_filter_ratio > 1.0
         {
@@ -2620,6 +2635,7 @@ impl CdcConfig {
             );
             self.incremental_scan_ts_filter_ratio = default_cfg.incremental_scan_ts_filter_ratio;
         }
+
         Ok(())
     }
 }
@@ -2633,6 +2649,8 @@ pub struct ResolvedTsConfig {
     pub advance_ts_interval: ReadableDuration,
     #[online_config(skip)]
     pub scan_lock_pool_size: usize,
+    pub memory_quota: ReadableSize,
+    pub incremental_scan_concurrency: usize,
 }
 
 impl ResolvedTsConfig {
@@ -2653,6 +2671,8 @@ impl Default for ResolvedTsConfig {
             enable: true,
             advance_ts_interval: ReadableDuration::secs(1),
             scan_lock_pool_size: 2,
+            memory_quota: ReadableSize::mb(256),
+            incremental_scan_concurrency: 6,
         }
     }
 }
@@ -3206,13 +3226,6 @@ impl TikvConfig {
                 duration_to_sec(expect_keepalive)
             )
             .into());
-        }
-
-        if self.raft_store.hibernate_regions && !self.cdc.hibernate_regions_compatible {
-            warn!(
-                "raftstore.hibernate-regions was enabled but cdc.hibernate-regions-compatible \
-                was disabled, hibernate regions may be broken up if you want to deploy a cdc cluster"
-            );
         }
 
         if self.backup_stream.temp_path.is_empty() {

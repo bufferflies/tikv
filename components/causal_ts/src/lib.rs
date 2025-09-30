@@ -10,6 +10,7 @@ pub use config::*;
 mod errors;
 pub use errors::*;
 mod tso;
+use pd_client::PdClient;
 pub use tso::*;
 mod metrics;
 use async_trait::async_trait;
@@ -34,7 +35,7 @@ pub trait CausalTsProvider: Send + Sync {
 
 #[enum_dispatch(CausalTsProvider)]
 pub enum CausalTsProviderImpl {
-    BatchTsoProvider(BatchTsoProvider<pd_client::RpcClient>),
+    BatchTsoProvider(BatchTsoProvider<dyn PdClient>),
     #[cfg(any(test, feature = "testexport"))]
     BatchTsoProviderTest(BatchTsoProvider<TestPdClient>),
     TestProvider(tests::TestProvider),

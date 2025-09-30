@@ -460,11 +460,10 @@ pub mod tests {
             true,
         );
         if res.is_ok() {
-            let modifies = txn.into_modifies();
-            if !modifies.is_empty() {
-                engine
-                    .write(&ctx, WriteData::from_modifies(modifies))
-                    .unwrap();
+            let mut data = WriteData::from_modifies(txn.into_modifies());
+            data.extra.req_type = txn_types::ReqType::PessimisticLock;
+            if !data.modifies.is_empty() {
+                engine.write(&ctx, data).unwrap();
             }
         }
         res.map(|r| r.0)
@@ -530,9 +529,9 @@ pub mod tests {
         .unwrap();
         let modifies = txn.into_modifies();
         if !modifies.is_empty() {
-            engine
-                .write(&ctx, WriteData::from_modifies(modifies))
-                .unwrap();
+            let mut data = WriteData::from_modifies(modifies);
+            data.extra.req_type = txn_types::ReqType::PessimisticLock;
+            engine.write(&ctx, data).unwrap();
         }
         // TODO: Adapt to new interface
         match res.0 {

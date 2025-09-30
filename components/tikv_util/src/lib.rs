@@ -5,6 +5,7 @@
 #![feature(box_patterns)]
 #![feature(vec_into_raw_parts)]
 #![feature(alloc_error_hook)]
+#![feature(let_chains)]
 #[cfg(test)]
 extern crate test;
 

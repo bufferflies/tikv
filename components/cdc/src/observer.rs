@@ -3,13 +3,12 @@
 use std::sync::{Arc, RwLock};
 
 use collections::HashMap;
-use engine_traits::KvEngine;
 use fail::fail_point;
-use kvproto::metapb::{Peer, Region};
+use kvproto::metapb::Region;
 use raft::StateRole;
-use raftstore::{coprocessor::*, store::RegionSnapshot, Error as RaftStoreError};
+use raftstore::{coprocessor::*, Error as RaftStoreError};
 use tikv::storage::Statistics;
-use tikv_util::{error, warn, worker::Scheduler};
+use tikv_util::{error, memory::MemoryQuota, warn, worker::Scheduler};
 
 use crate::{
     endpoint::{Deregister, Task},
@@ -25,6 +24,7 @@ use crate::{
 #[derive(Clone)]
 pub struct CdcObserver {
     sched: Scheduler<Task>,
+    memory_quota: Arc<MemoryQuota>,
     // A shared registry for managing observed regions.
     // TODO: it may become a bottleneck, find a better way to manage the registry.
     observe_regions: Arc<RwLock<HashMap<u64, ObserveId>>>,
@@ -35,14 +35,15 @@ impl CdcObserver {
     ///
     /// Events are strong ordered, so `sched` must be implemented as
     /// a FIFO queue.
-    pub fn new(sched: Scheduler<Task>) -> CdcObserver {
+    pub fn new(sched: Scheduler<Task>, memory_quota: Arc<MemoryQuota>) -> CdcObserver {
         CdcObserver {
             sched,
+            memory_quota,
             observe_regions: Arc::default(),
         }
     }
 
-    pub fn register_to(&self, coprocessor_host: &mut CoprocessorHost<impl KvEngine>) {
+    pub fn register_to(&self, coprocessor_host: &mut CoprocessorHost<kvengine::Engine>) {
         // use 0 as the priority of the cmd observer. CDC should have a higher priority
         // than the `resolved-ts`'s cmd observer
         coprocessor_host
@@ -56,7 +57,7 @@ impl CdcObserver {
             .register_region_change_observer(100, BoxRegionChangeObserver::new(self.clone()));
     }
 
-    /// Subscribe an region, the observer will sink events of the region into
+    /// Subscribe a region, the observer will sink events of the region into
     /// its scheduler.
     ///
     /// Return previous ObserveId if there is one.
@@ -93,14 +94,14 @@ impl CdcObserver {
 
 impl Coprocessor for CdcObserver {}
 
-impl<E: KvEngine> CmdObserver<E> for CdcObserver {
+impl CmdObserver<kvengine::Engine> for CdcObserver {
     // `CdcObserver::on_flush_applied_cmd_batch` should only invoke if `cmd_batches`
     // is not empty
     fn on_flush_applied_cmd_batch(
         &self,
         max_level: ObserveLevel,
         cmd_batches: &mut Vec<CmdBatch>,
-        engine: &E,
+        engine: &kvengine::Engine,
     ) {
         assert!(!cmd_batches.is_empty());
         fail_point!("before_cdc_flush_apply");
@@ -116,18 +117,20 @@ impl<E: KvEngine> CmdObserver<E> for CdcObserver {
         if cmd_batches.is_empty() {
             return;
         }
-        let mut region = Region::default();
-        region.mut_peers().push(Peer::default());
+        let region_id = cmd_batches[0].region_id;
+        // TODO: support comd batch for multiple regions.
+        assert!(cmd_batches.iter().all(|b| b.region_id == region_id));
         // Create a snapshot here for preventing the old value was GC-ed.
-        // TODO: only need it after enabling old value, may add a flag to indicate
-        // whether to get it.
-        let snapshot = RegionSnapshot::from_snapshot(Arc::new(engine.snapshot()), Arc::new(region));
+        let snapshot = engine.get_shard(region_id).unwrap().new_snap_access();
         let get_old_value = move |key,
                                   query_ts,
                                   old_value_cache: &mut OldValueCache,
                                   statistics: &mut Statistics| {
             old_value::get_old_value(&snapshot, key, query_ts, old_value_cache, statistics)
         };
+
+        let size = cmd_batches.iter().map(|b| b.size()).sum();
+        self.memory_quota.alloc_force(size);
         if let Err(e) = self.sched.schedule(Task::MultiBatch {
             multi: cmd_batches,
             old_value_cb: Box::new(get_old_value),
@@ -177,20 +180,26 @@ impl RegionChangeObserver for CdcObserver {
         event: RegionChangeEvent,
         _: StateRole,
     ) {
-        if let RegionChangeEvent::Destroy = event {
-            let region_id = ctx.region().get_id();
-            if let Some(observe_id) = self.is_subscribed(region_id) {
-                // Unregister all downstreams.
-                let store_err = RaftStoreError::RegionNotFound(region_id);
-                let deregister = Deregister::Delegate {
-                    region_id,
-                    observe_id,
-                    err: CdcError::request(store_err.into()),
-                };
-                if let Err(e) = self.sched.schedule(Task::Deregister(deregister)) {
-                    error!("cdc schedule cdc task failed"; "error" => ?e);
+        match event {
+            RegionChangeEvent::Destroy
+            | RegionChangeEvent::Update(
+                RegionChangeReason::Split | RegionChangeReason::CommitMerge,
+            ) => {
+                let region_id = ctx.region().get_id();
+                if let Some(observe_id) = self.is_subscribed(region_id) {
+                    // Unregister all downstreams.
+                    let store_err = RaftStoreError::RegionNotFound(region_id);
+                    let deregister = Deregister::Delegate {
+                        region_id,
+                        observe_id,
+                        err: CdcError::request(store_err.into()),
+                    };
+                    if let Err(e) = self.sched.schedule(Task::Deregister(deregister)) {
+                        error!("cdc schedule cdc task failed"; "error" => ?e);
+                    }
                 }
             }
+            _ => {}
         }
     }
 }
@@ -199,33 +208,37 @@ impl RegionChangeObserver for CdcObserver {
 mod tests {
     use std::time::Duration;
 
-    use engine_rocks::RocksEngine;
+    use kvengine::test_engine::new_test_engine_api_v2;
     use kvproto::metapb::Region;
     use raftstore::coprocessor::RoleChange;
-    use tikv::storage::kv::TestEngineBuilder;
-    use tikv_util::store::new_peer;
+    use tikv_util::{store::new_peer, worker::dummy_scheduler};
+    use txn_types::{ReqType, TxnExtra, TxnExtraScheduler};
 
     use super::*;
+    use crate::CdcTxnExtraScheduler;
 
     #[test]
     fn test_register_and_deregister() {
         let (scheduler, mut rx) = tikv_util::worker::dummy_scheduler();
-        let observer = CdcObserver::new(scheduler);
+        let memory_quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let observer = CdcObserver::new(scheduler, memory_quota.clone());
         let observe_info = CmdObserveInfo::from_handle(
             ObserveHandle::new(),
             ObserveHandle::new(),
             ObserveHandle::new(),
         );
-        let engine = TestEngineBuilder::new().build().unwrap().get_rocksdb();
+        let (engine, _) = new_test_engine_api_v2();
 
-        let mut cb = CmdBatch::new(&observe_info, 0);
-        cb.push(&observe_info, 0, Cmd::default());
-        <CdcObserver as CmdObserver<RocksEngine>>::on_flush_applied_cmd_batch(
+        let mut cb = CmdBatch::new(&observe_info, 1);
+        cb.push(&observe_info, 1, Cmd::default());
+        let size = cb.size();
+        <CdcObserver as CmdObserver<kvengine::Engine>>::on_flush_applied_cmd_batch(
             &observer,
             cb.level,
             &mut vec![cb],
-            &engine,
+            &engine.engine,
         );
+        assert_eq!(memory_quota.in_use(), size);
         match rx.recv_timeout(Duration::from_millis(10)).unwrap().unwrap() {
             Task::MultiBatch { multi, .. } => {
                 assert_eq!(multi.len(), 1);
@@ -237,13 +250,13 @@ mod tests {
         // Stop observing cmd
         observe_info.cdc_id.stop_observing();
         observe_info.pitr_id.stop_observing();
-        let mut cb = CmdBatch::new(&observe_info, 0);
-        cb.push(&observe_info, 0, Cmd::default());
-        <CdcObserver as CmdObserver<RocksEngine>>::on_flush_applied_cmd_batch(
+        let mut cb = CmdBatch::new(&observe_info, 1);
+        cb.push(&observe_info, 1, Cmd::default());
+        <CdcObserver as CmdObserver<kvengine::Engine>>::on_flush_applied_cmd_batch(
             &observer,
             cb.level,
             &mut vec![cb],
-            &engine,
+            &engine.engine,
         );
         match rx.recv_timeout(Duration::from_millis(10)) {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -336,5 +349,52 @@ mod tests {
         let mut ctx = ObserverContext::new(&region);
         observer.on_role_change(&mut ctx, &RoleChange::new(StateRole::Follower));
         rx.recv_timeout(Duration::from_millis(10)).unwrap_err();
+    }
+
+    #[test]
+    fn test_txn_extra_dropped_since_exceed_memory_quota() {
+        let memory_quota = Arc::new(MemoryQuota::new(10));
+        let (task_sched, mut task_rx) = dummy_scheduler();
+        let observer = CdcObserver::new(task_sched.clone(), memory_quota.clone());
+        let txn_extra_scheduler =
+            CdcTxnExtraScheduler::new(task_sched.clone(), memory_quota.clone());
+
+        let observe_info = CmdObserveInfo::from_handle(
+            ObserveHandle::new(),
+            ObserveHandle::new(),
+            ObserveHandle::new(),
+        );
+        let mut cb = CmdBatch::new(&observe_info, 1);
+        cb.push(&observe_info, 1, Cmd::default());
+
+        let (engine, _) = new_test_engine_api_v2();
+        <CdcObserver as CmdObserver<kvengine::Engine>>::on_flush_applied_cmd_batch(
+            &observer,
+            cb.level,
+            &mut vec![cb],
+            &engine.engine,
+        );
+
+        txn_extra_scheduler.schedule(TxnExtra {
+            old_values: Default::default(),
+            one_pc: false,
+            req_type: ReqType::Prewrite,
+            for_flashback: false,
+        });
+
+        match task_rx
+            .recv_timeout(Duration::from_millis(10))
+            .unwrap()
+            .unwrap()
+        {
+            Task::MultiBatch { multi, .. } => {
+                assert_eq!(multi.len(), 1);
+                assert_eq!(multi[0].len(), 1);
+            }
+            _ => panic!("unexpected task"),
+        };
+
+        let err = task_rx.recv_timeout(Duration::from_millis(10)).unwrap_err();
+        assert_eq!(err, std::sync::mpsc::RecvTimeoutError::Timeout);
     }
 }

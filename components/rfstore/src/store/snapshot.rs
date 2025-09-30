@@ -14,6 +14,8 @@ use tikv_util::{metrics::CRITICAL_ERROR, panic_when_unexpected_key_or_data, set_
 #[derive(Debug)]
 pub struct RegionSnapshot {
     pub snap: SnapAccess,
+    // TODO: should we remove the Option?
+    pub region: Option<Arc<Region>>,
     // `None` means the snapshot does not provide peer related transaction extensions.
     pub txn_ext: Option<Arc<TxnExt>>,
     pub term: Option<NonZeroU64>,
@@ -24,12 +26,13 @@ pub struct RegionSnapshot {
 impl RegionSnapshot {
     pub fn from_raw(db: &kvengine::Engine, region: &Region) -> RegionSnapshot {
         let snap = db.get_snap_access(region.get_id()).unwrap();
-        RegionSnapshot::from_snapshot(snap)
+        RegionSnapshot::from_snapshot(snap, Some(Arc::new(region.clone())))
     }
 
-    pub fn from_snapshot(snap: SnapAccess) -> RegionSnapshot {
+    pub fn from_snapshot(snap: SnapAccess, region: Option<Arc<Region>>) -> RegionSnapshot {
         RegionSnapshot {
             snap,
+            region,
             txn_ext: None,
             term: None,
             txn_extra_op: TxnExtraOp::Noop,
@@ -51,12 +54,18 @@ impl RegionSnapshot {
     pub fn is_sync(&self) -> bool {
         self.snap.is_sync()
     }
+
+    #[inline]
+    pub fn get_applied_index(&self) -> u64 {
+        self.snap.get_write_sequence()
+    }
 }
 
 impl Clone for RegionSnapshot {
     fn clone(&self) -> Self {
         RegionSnapshot {
             snap: self.snap.clone(),
+            region: self.region.clone(),
             txn_ext: self.txn_ext.clone(),
             term: self.term,
             txn_extra_op: self.txn_extra_op,

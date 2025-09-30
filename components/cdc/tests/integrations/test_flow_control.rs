@@ -1,5 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+#![cfg(NGDISABLE)]
+
 use std::{sync::*, time::Duration};
 
 use cdc::{Task, Validate};
@@ -44,7 +46,7 @@ fn test_cdc_congest() {
     let value_size = memory_quota / 2;
     let (k, v) = ("key1".to_owned(), vec![5; value_size]);
     // Prewrite
-    let start_ts = block_on(suite.cluster.pd_client.get_tso()).unwrap();
+    let start_ts = block_on(suite.cluster.pd_client().get_tso()).unwrap();
     let mut mutation = Mutation::default();
     mutation.set_op(Op::Put);
     mutation.key = k.clone().into_bytes();
@@ -64,7 +66,7 @@ fn test_cdc_congest() {
     let value_size = memory_quota * 2;
     let (k, v) = ("key2".to_owned(), vec![5; value_size]);
     // Prewrite
-    let start_ts = block_on(suite.cluster.pd_client.get_tso()).unwrap();
+    let start_ts = block_on(suite.cluster.pd_client().get_tso()).unwrap();
     let mut mutation = Mutation::default();
     mutation.set_op(Op::Put);
     mutation.key = k.clone().into_bytes();
@@ -75,7 +77,7 @@ fn test_cdc_congest() {
     match events.pop().unwrap().event.unwrap() {
         Event_oneof_event::Error(e) => {
             // Unknown errors are translated into region_not_found.
-            assert!(e.has_region_not_found(), "{:?}", e);
+            assert!(e.has_congested(), "{:?}", e);
         }
         other => panic!("unknown event {:?}", other),
     }

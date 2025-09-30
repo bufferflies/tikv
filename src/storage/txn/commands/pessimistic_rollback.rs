@@ -174,7 +174,9 @@ pub mod tests {
             txn_status_cache: &TxnStatusCache::new_for_test(),
         };
         let result = command.process_write(snapshot, write_context).unwrap();
-        write(engine, &ctx, result.to_be_write.modifies);
+        let mut data = tikv_kv::WriteData::from_modifies(result.to_be_write.modifies);
+        data.extra.req_type = txn_types::ReqType::PessimisticRollback;
+        write(engine, &ctx, data);
     }
 
     #[test]

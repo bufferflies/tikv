@@ -204,7 +204,7 @@ fn update_merged_engine(
         update_merged_engine_for_store(&security_mgr, merged_engine, &store, dfs.get_runtime());
     }
     let router = merged_engine.get_router();
-    let mut apply_ctx = ApplyContext::new(merged_engine.get_kv(), Some(router));
+    let mut apply_ctx = ApplyContext::new(merged_engine.get_kv(), Some(router), None);
     merged_engine.sync_merged(&mut apply_ctx).unwrap();
 }
 

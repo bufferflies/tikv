@@ -13,7 +13,7 @@ use api_version::ApiV2;
 pub use apply_observer::{CdcApplyObserver, RegionEvents};
 use async_trait::async_trait;
 use bytes::Bytes;
-use cdc::{Conn, ConnId, MemoryQuota};
+use cdc::{Conn, ConnId};
 pub use error::{Error, Result};
 use futures::{future, SinkExt, TryFutureExt, TryStreamExt};
 use grpcio::{DuplexSink, RequestStream, RpcContext, RpcStatus, RpcStatusCode, UnarySink};
@@ -39,7 +39,7 @@ use resolved_ts::Resolver;
 pub use scheduler::*;
 use serde_derive::{Deserialize, Serialize};
 use tikv::tikv_build_version;
-use tikv_util::{config::ReadableDuration, error, info, warn};
+use tikv_util::{config::ReadableDuration, error, info, memory::MemoryQuota, warn};
 use txn_types::TimeStamp;
 pub use worker::ReplicationWorker;
 
@@ -195,7 +195,7 @@ pub enum CdcMsg {
 struct ReplicationService {
     kv: kvengine::Engine,
     scheduler: tikv_util::mpsc::Sender<CdcMsg>,
-    memory_quota: MemoryQuota,
+    memory_quota: Arc<MemoryQuota>,
 }
 
 impl ReplicationService {
@@ -203,7 +203,7 @@ impl ReplicationService {
         Self {
             kv,
             scheduler,
-            memory_quota: MemoryQuota::new(1024 * 1024 * 1024),
+            memory_quota: Arc::new(MemoryQuota::new(1024 * 1024 * 1024)),
         }
     }
 
@@ -236,11 +236,11 @@ impl ChangeData for ReplicationService {
         stream: RequestStream<ChangeDataRequest>,
         mut sink: DuplexSink<ChangeDataEvent>,
     ) {
+        let conn_id = ConnId::new();
         let (event_sink, mut event_drain) =
-            cdc::channel(CDC_CHANNEL_CAPACITY, self.memory_quota.clone());
+            cdc::channel(conn_id, CDC_CHANNEL_CAPACITY, self.memory_quota.clone());
         let peer = ctx.peer();
-        let conn = Conn::new(event_sink, peer);
-        let conn_id = conn.get_id();
+        let conn = Conn::new(conn_id, event_sink, peer);
 
         if let Err(status) = self.scheduler.send(CdcMsg::OpenConn(conn)).map_err(|e| {
             RpcStatus::with_message(RpcStatusCode::INVALID_ARGUMENT, format!("{:?}", e))
@@ -289,7 +289,7 @@ impl ChangeData for ReplicationService {
         let scheduler = self.scheduler.clone();
 
         ctx.spawn(async move {
-            let res = event_drain.forward(&mut sink).await;
+            let res = event_drain.forward(&mut sink, None).await;
             // Unregister this downstream only.
             if let Err(e) = scheduler.send(CdcMsg::Deregister(conn_id)) {
                 error!("cdc deregister failed"; "error" => ?e);

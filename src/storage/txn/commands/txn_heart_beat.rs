@@ -160,7 +160,9 @@ pub mod tests {
             txn_status: TxnStatus::Uncommitted { lock, .. },
         } = result.pr
         {
-            write(engine, &ctx, result.to_be_write.modifies);
+            let mut data = WriteData::from_modifies(result.to_be_write.modifies);
+            data.extra.req_type = ReqType::Heartbeat;
+            write(engine, &ctx, data);
             assert_eq!(lock.ttl, expect_ttl);
         } else {
             unreachable!();

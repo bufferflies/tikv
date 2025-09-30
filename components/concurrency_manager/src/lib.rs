@@ -133,6 +133,20 @@ impl ConcurrencyManager {
         )
     }
 
+    /// This is ONLY used in tests, please do not use it elsewhere.
+    /// To create a new concurrency manager, please use `new_with_config`
+    /// instead.
+    pub fn new_for_test(latest_ts: TimeStamp) -> Self {
+        Self::new_with_config(
+            latest_ts,
+            DEFAULT_LIMIT_VALID_DURATION,
+            ActionOnInvalidMaxTs::Panic,
+            None,
+            DEFAULT_LIMIT_VALID_DURATION + Duration::from_secs(1),
+            false,
+        )
+    }
+
     pub fn new_with_config(
         latest_ts: TimeStamp,
         limit_valid_duration: Duration,
@@ -470,6 +484,23 @@ impl ConcurrencyManager {
             }
         });
         min_lock_ts
+    }
+
+    pub fn global_min_lock(&self) -> Option<(TimeStamp, Key)> {
+        let mut min_lock: Option<(TimeStamp, Key)> = None;
+        // TODO: The iteration looks not so efficient. It's better to be optimized.
+        self.lock_table.for_each_kv(|key, handle| {
+            if let Some(curr_ts) = handle.with_lock(|lock| lock.as_ref().map(|l| l.ts)) {
+                if min_lock
+                    .as_ref()
+                    .map(|(ts, _)| ts > &curr_ts)
+                    .unwrap_or(true)
+                {
+                    min_lock = Some((curr_ts, key.clone()));
+                }
+            }
+        });
+        min_lock
     }
 
     pub fn set_action_on_invalid_max_ts_update(&self, action: ActionOnInvalidMaxTs) {

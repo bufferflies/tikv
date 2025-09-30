@@ -41,6 +41,7 @@ use native_br::common::{
     collect_wal_chunks_with_retry, get_latest_backup_meta, ChunkData, CollectWalChunksContext,
 };
 use pd_client::{PdClient, RegionStat, RpcClient};
+use resolved_ts::TsSource;
 use rfengine::{assemble_wal_chunks, RfEngine, TRUNCATE_ALL_INDEX};
 use rfstore::store::ApplyContext;
 use security::{HttpClient, SecurityConfig, SecurityManager};
@@ -219,8 +220,11 @@ impl ReplicationWorker {
                 Self::report_regions_loop(keyspace_id, raft, kv, rep_pd_cli, interval).await;
             });
         }
-        let mut apply_ctx =
-            ApplyContext::new(merged_engine.get_kv(), Some(merged_engine.get_router()));
+        let mut apply_ctx = ApplyContext::new(
+            merged_engine.get_kv(),
+            Some(merged_engine.get_router()),
+            None,
+        );
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let apply_observer =
             CdcApplyObserver::new(merged_engine.get_kv(), tx.clone(), runtime.handle().clone());
@@ -512,7 +516,7 @@ impl ReplicationWorker {
         };
         let resolver = task_ctx.get_resolver();
         for (lock_key, lock_ts) in tracked_locks {
-            resolver.track_lock(lock_ts, lock_key, None);
+            _ = resolver.track_lock(lock_ts, lock_key, None);
         }
         let Some(conn) = self.conns.get(&conn_id) else {
             warn!("handle_register_result: conn not found"; "conn_id" => ?conn_id);
@@ -574,7 +578,8 @@ impl ReplicationWorker {
 
     fn send_resolved_ts(&mut self) -> Result<()> {
         for task in self.keyspaces.values_mut() {
-            task.get_resolver().resolve(self.last_update_time);
+            task.get_resolver()
+                .resolve(self.last_update_time, TsSource::ReplicationWorker);
         }
         for (&region_id, region_request) in &mut self.region_requests {
             if let Some(task_ctx) = self.keyspaces.get_mut(&region_request.keyspace_id) {
@@ -1017,7 +1022,7 @@ impl ReplicationWorker {
                 if start_ts == 0 {
                     resolver.untrack_lock(&track_key, None);
                 } else {
-                    resolver.track_lock(start_ts.into(), track_key, None);
+                    _ = resolver.track_lock(start_ts.into(), track_key, None);
                 }
             }
         }

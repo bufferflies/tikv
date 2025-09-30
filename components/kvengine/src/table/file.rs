@@ -228,7 +228,7 @@ impl InMemFile {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testexport"))]
     pub async fn new_async(id: u64, data: Bytes) -> Self {
         let size = data.len() as u64;
         Self {

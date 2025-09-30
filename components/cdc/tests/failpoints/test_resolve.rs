@@ -1,4 +1,5 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
+
 use std::time::Duration;
 
 use api_version::{test_kv_format_impl, KvFormat};
@@ -10,11 +11,11 @@ use raft::eraftpb::ConfChangeType;
 use test_raftstore::*;
 use tikv_util::config::*;
 
-use crate::{new_event_feed, TestSuite, TestSuiteBuilder};
+use crate::{new_event_feed, CloudTestSuiteBuilder, TestSuite, TestSuiteBuilder};
 
 #[test]
 fn test_stale_resolver() {
-    test_kv_format_impl!(test_stale_resolver_impl<ApiV1 ApiV2>);
+    test_kv_format_impl!(test_stale_resolver_impl<ApiV2>);
 }
 
 fn test_stale_resolver_impl<F: KvFormat>() {
@@ -132,9 +133,9 @@ fn test_stale_resolver_impl<F: KvFormat>() {
 // callback that is used to advance resolved ts).
 #[test]
 fn test_region_error() {
-    let mut cluster = new_server_cluster(1, 1);
-    cluster.cfg.cdc.min_ts_interval = ReadableDuration::millis(100);
-    let mut suite = TestSuiteBuilder::new().cluster(cluster).build();
+    let mut suite = CloudTestSuiteBuilder::new()
+        .cfg_fun(|_, cfg| cfg.cdc.min_ts_interval = ReadableDuration::millis(100))
+        .build();
 
     let multi_batch_fp = "cdc_before_handle_multi_batch";
     fail::cfg(multi_batch_fp, "return").unwrap();
@@ -185,10 +186,13 @@ fn test_region_error() {
 
 #[test]
 fn test_joint_confchange() {
-    let mut cluster = new_server_cluster(1, 3);
-    cluster.cfg.cdc.min_ts_interval = ReadableDuration::millis(100);
-    cluster.cfg.cdc.hibernate_regions_compatible = true;
-    let mut suite = TestSuiteBuilder::new().cluster(cluster).build();
+    let mut suite = CloudTestSuiteBuilder::new()
+        .num_nodes(3)
+        .cfg_fun(|_, cfg| {
+            cfg.cdc.min_ts_interval = ReadableDuration::millis(100);
+            cfg.cdc.hibernate_regions_compatible = true;
+        })
+        .build();
 
     let receive_resolved_ts = |receive_event: &(dyn Fn(bool) -> ChangeDataEvent + Send)| {
         let mut last_resolved_ts = 0;

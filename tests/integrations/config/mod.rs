@@ -62,6 +62,7 @@ fn read_file_in_project_dir(path: &str) -> String {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_serde_custom_tikv_config() {
     let mut value = TikvConfig::default();
     value.log_rotation_timespan = ReadableDuration::days(1);
@@ -814,11 +815,12 @@ fn test_serde_custom_tikv_config() {
     };
     value.cdc = CdcConfig {
         min_ts_interval: ReadableDuration::secs(4),
-        old_value_cache_size: 0,
         hibernate_regions_compatible: false,
         incremental_scan_threads: 3,
         incremental_scan_concurrency: 4,
+        incremental_scan_concurrency_limit: 8,
         incremental_scan_speed_limit: ReadableSize(7),
+        incremental_fetch_speed_limit: ReadableSize(8),
         incremental_scan_ts_filter_ratio: 0.7,
         tso_worker_threads: 2,
         old_value_cache_memory_quota: ReadableSize::mb(14),
@@ -828,6 +830,7 @@ fn test_serde_custom_tikv_config() {
         enable: true,
         advance_ts_interval: ReadableDuration::secs(5),
         scan_lock_pool_size: 1,
+        ..Default::default()
     };
     value.causal_ts = CausalTsConfig {
         renew_interval: ReadableDuration::millis(100),

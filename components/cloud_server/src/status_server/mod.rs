@@ -676,7 +676,7 @@ impl StatusServer {
                 let snap_access = shard.new_snap_access();
                 let outer_ranges = vec![(shard.outer_start.clone(), shard.outer_end.clone())];
                 let start_ts = u64::from_str(query_pairs.get("start_ts").unwrap()).unwrap();
-                let region_snapshot = RegionSnapshot::from_snapshot(snap_access.clone());
+                let region_snapshot = RegionSnapshot::from_snapshot(snap_access.clone(), None);
                 let cloud_store =
                     CloudStore::new(region_snapshot, start_ts, TsSet::default(), true);
                 // Check if the shard contains locks belongs to the ranges. If there is any

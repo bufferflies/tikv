@@ -11,6 +11,7 @@ pub(super) mod txn;
 use std::{error, io};
 
 use error_code::{self, ErrorCode, ErrorCodeExt};
+use kvengine::WRITE_CF;
 use kvproto::kvrpcpb::{self, Assertion, IsolationLevel};
 use thiserror::Error;
 use tikv_util::{metrics::CRITICAL_ERROR, panic_when_unexpected_key_or_data, set_panic_mark};
@@ -443,13 +444,12 @@ pub mod tests {
     use txn_types::Key;
 
     use super::*;
-    use crate::storage::kv::{Engine, Modify, ScanMode, SnapContext, Snapshot, WriteData};
+    use crate::storage::kv::{Engine, ScanMode, SnapContext, Snapshot, WriteData};
 
-    pub fn write<E: Engine>(engine: &E, ctx: &Context, modifies: Vec<Modify>) {
-        if !modifies.is_empty() {
-            engine
-                .write(ctx, WriteData::from_modifies(modifies))
-                .unwrap();
+    pub fn write<E: Engine>(engine: &E, ctx: &Context, data: impl Into<WriteData>) {
+        let data = data.into();
+        if !data.modifies.is_empty() {
+            engine.write(ctx, data).unwrap();
         }
     }
 
@@ -642,8 +642,14 @@ pub mod tests {
         tp: WriteType,
     ) -> Write {
         let snapshot = engine.snapshot(Default::default()).unwrap();
-        let k = Key::from_raw(key).append_ts(commit_ts.into());
-        let v = snapshot.get_cf(CF_WRITE, &k).unwrap().unwrap();
+        let v = if let Some(snap) = snapshot.get_kvengine_snap() {
+            let item = snap.core.get(WRITE_CF, key, commit_ts.into().into_inner());
+            item.get_value().to_vec()
+        } else {
+            let k = Key::from_raw(key).append_ts(commit_ts.into());
+            snapshot.get_cf(CF_WRITE, &k).unwrap().unwrap()
+        };
+
         let write = WriteRef::parse(&v).unwrap();
         assert_eq!(write.start_ts, start_ts.into());
         assert_eq!(write.write_type, tp);
@@ -656,21 +662,45 @@ pub mod tests {
         commit_ts: impl Into<TimeStamp>,
     ) -> Write {
         let snapshot = engine.snapshot(Default::default()).unwrap();
-        let k = Key::from_raw(key).append_ts(commit_ts.into());
-        let v = snapshot.get_cf(CF_WRITE, &k).unwrap().unwrap();
-        let write = WriteRef::parse(&v).unwrap();
-        write.to_owned()
+        if let Some(snap) = snapshot.get_kvengine_snap() {
+            let item = snap.core.get(WRITE_CF, key, commit_ts.into().into_inner());
+            let meta = kvengine::UserMeta::from_slice(item.user_meta());
+            let (_ts, write) = parse_write(&meta, item.get_value());
+            write
+        } else {
+            let k = Key::from_raw(key).append_ts(commit_ts.into());
+            let v = snapshot.get_cf(CF_WRITE, &k).unwrap().unwrap();
+            let write = WriteRef::parse(&v).unwrap();
+            write.to_owned()
+        }
     }
 
+    #[track_caller]
     pub fn must_not_have_write<E: Engine>(
         engine: &mut E,
         key: &[u8],
         commit_ts: impl Into<TimeStamp>,
     ) {
         let snapshot = engine.snapshot(Default::default()).unwrap();
-        let k = Key::from_raw(key).append_ts(commit_ts.into());
-        let v = snapshot.get_cf(CF_WRITE, &k).unwrap();
-        assert!(v.is_none());
+        if let Some(snap) = snapshot.get_kvengine_snap() {
+            let ts = commit_ts.into().into_inner();
+            let item: kvengine::read::Item<'_> = snap.core.get(WRITE_CF, key, ts);
+            // kvengine's get return the value whose commit_ts <= target ts.
+            if !item.get_value().is_empty() {
+                let meta = kvengine::UserMeta::from_slice(item.user_meta());
+                assert!(
+                    meta.commit_ts < ts,
+                    "commit ts: {}, item ts: {}, value: {:?}",
+                    ts,
+                    meta.commit_ts,
+                    item.get_value()
+                );
+            }
+        } else {
+            let k = Key::from_raw(key).append_ts(commit_ts.into());
+            let v = snapshot.get_cf(CF_WRITE, &k).unwrap();
+            assert!(v.is_none());
+        }
     }
 
     pub fn must_seek_write_none<E: Engine>(engine: &mut E, key: &[u8], ts: impl Into<TimeStamp>) {

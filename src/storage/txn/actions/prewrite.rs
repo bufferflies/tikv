@@ -1175,7 +1175,9 @@ pub mod tests {
             "{:?}",
             old_value
         );
-        write(engine, &ctx, txn.into_modifies());
+        let mut data = tikv_kv::WriteData::from_modifies(txn.into_modifies());
+        data.extra.req_type = txn_types::ReqType::Prewrite;
+        write(engine, &ctx, data);
         Ok(())
     }
 

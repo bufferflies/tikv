@@ -26,6 +26,8 @@ pub mod service;
 pub mod signal_handler;
 pub use raftkv::*;
 mod memory;
+#[cfg(feature = "testexport")]
+pub mod mock_kv_engine;
 mod raft_client;
 mod resolve;
 pub mod status_server;

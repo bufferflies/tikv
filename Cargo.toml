@@ -70,7 +70,7 @@ concurrency_manager = { workspace = true }
 coprocessor_plugin_api = { workspace = true }
 crc32fast = "1.2"
 crc64fast = "0.1"
-crossbeam = "0.8"
+crossbeam = { workspace = true }
 dashmap = "5"
 encryption_export = { workspace = true }
 engine_panic = { workspace = true }
@@ -149,8 +149,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"
 serde_ignored = "0.1"
 serde_json = { version = "1.0", features = ["preserve_order"] }
-slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
-slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
+slog = { workspace = true }
+slog-global = { workspace = true }
 smallvec = "1.4"
 sst_importer = { workspace = true }
 strum = { version = "0.20", features = ["derive"] }
@@ -332,6 +332,7 @@ collections = { path = "components/collections" }
 concurrency_manager = { path = "components/concurrency_manager" }
 coprocessor_plugin_api = { path = "components/coprocessor_plugin_api" }
 crc32c = "=0.6.8"
+crossbeam = "0.8"
 encryption = { path = "components/encryption" }
 encryption_export = { path = "components/encryption/export" }
 engine_panic = { path = "components/engine_panic" }
@@ -377,6 +378,8 @@ rusoto_s3 = { git = "https://github.com/tikv/rusoto", branch = "cse" }
 schema = { path = "components/schema" }
 security = { path = "components/security" }
 server = { path = "components/server" }
+slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
+slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 snap_recovery = { path = "components/snap_recovery" }
 sst_importer = { path = "components/sst_importer" }
 test_backup = { path = "components/test_backup" }

@@ -144,8 +144,8 @@ pub mod tests {
     use kvproto::kvrpcpb::Context;
     #[cfg(test)]
     use kvproto::kvrpcpb::PrewriteRequestPessimisticAction::*;
-    use tikv_kv::SnapContext;
-    use txn_types::TimeStamp;
+    use tikv_kv::{SnapContext, WriteData};
+    use txn_types::{ReqType, TimeStamp};
 
     use super::*;
     #[cfg(test)]
@@ -200,7 +200,9 @@ pub mod tests {
         let mut txn = MvccTxn::new(start_ts, cm);
         let mut reader = SnapshotReader::new(start_ts, snapshot, true);
         commit(&mut txn, &mut reader, Key::from_raw(key), commit_ts.into()).unwrap();
-        write(engine, &ctx, txn.into_modifies());
+        let mut data = WriteData::from_modifies(txn.into_modifies());
+        data.extra.req_type = ReqType::Commit;
+        write(engine, &ctx, data);
     }
 
     pub fn must_err<E: Engine>(

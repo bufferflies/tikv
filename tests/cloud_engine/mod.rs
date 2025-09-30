@@ -24,6 +24,7 @@ use tokio::runtime::Runtime;
 mod backup;
 mod columnar;
 mod delete_range;
+mod delta_scanner;
 mod engine_basic;
 mod gc;
 mod ia_file;

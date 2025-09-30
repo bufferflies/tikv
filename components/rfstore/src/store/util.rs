@@ -17,7 +17,10 @@ use cloud_encryption::EncryptionKey;
 use futures::executor::block_on;
 use futures_util::compat::Future01CompatExt;
 use kvenginepb::EncryptionMeta;
-use kvproto::{metapb, raft_cmdpb::RaftCmdRequest};
+use kvproto::{
+    metapb::{self},
+    raft_cmdpb::RaftCmdRequest,
+};
 use protobuf::Message;
 use raft_proto::eraftpb;
 use slog::{Key, Record, Serializer};
@@ -116,6 +119,14 @@ pub fn compare_region_epoch(
     }
 
     Ok(())
+}
+
+pub fn is_region_epoch_equal(
+    from_epoch: &metapb::RegionEpoch,
+    current_epoch: &metapb::RegionEpoch,
+) -> bool {
+    from_epoch.get_conf_ver() == current_epoch.get_conf_ver()
+        && from_epoch.get_version() == current_epoch.get_version()
 }
 
 #[inline]

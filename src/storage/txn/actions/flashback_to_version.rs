@@ -236,8 +236,8 @@ pub fn get_first_user_key(
 pub mod tests {
     use concurrency_manager::ConcurrencyManager;
     use kvproto::kvrpcpb::{Context, PrewriteRequestPessimisticAction::DoPessimisticCheck};
-    use tikv_kv::ScanMode;
-    use txn_types::{TimeStamp, SHORT_VALUE_MAX_LEN};
+    use tikv_kv::{ScanMode, WriteData};
+    use txn_types::{ReqType, TimeStamp, SHORT_VALUE_MAX_LEN};
 
     use super::*;
     use crate::storage::{
@@ -268,7 +268,9 @@ pub mod tests {
         let mut txn = MvccTxn::new(start_ts.into(), cm);
         rollback_locks(&mut txn, snapshot, key_locks).unwrap();
         let rows = txn.modifies.len();
-        write(engine, &ctx, txn.into_modifies());
+        let mut data = WriteData::from_modifies(txn.into_modifies());
+        data.extra.req_type = ReqType::Rollback;
+        write(engine, &ctx, data);
         rows
     }
 
@@ -294,7 +296,10 @@ pub mod tests {
         };
         prewrite_flashback_key(&mut txn, &mut reader, &prewrite_key, version, start_ts).unwrap();
         let rows = txn.modifies.len();
-        write(engine, &ctx, txn.into_modifies());
+        let mut data = tikv_kv::WriteData::from_modifies(txn.into_modifies());
+        // TODO: hwo to handle flashback.
+        data.extra.req_type = txn_types::ReqType::Prewrite;
+        write(engine, &ctx, data);
         rows
     }
 
@@ -326,7 +331,10 @@ pub mod tests {
         flashback_to_version_write(&mut txn, &mut reader, keys, version, start_ts, commit_ts)
             .unwrap();
         let rows = txn.modifies.len();
-        write(engine, &ctx, txn.into_modifies());
+        let mut data = tikv_kv::WriteData::from_modifies(txn.into_modifies());
+        // TODO: hwo to handle flashback.
+        data.extra.req_type = txn_types::ReqType::Noop;
+        write(engine, &ctx, data);
         rows
     }
 
@@ -348,7 +356,10 @@ pub mod tests {
                 .unwrap();
         commit_flashback_key(&mut txn, &mut reader, &key_to_lock, start_ts, commit_ts).unwrap();
         let rows = txn.modifies.len();
-        write(engine, &ctx, txn.into_modifies());
+        let mut data = tikv_kv::WriteData::from_modifies(txn.into_modifies());
+        // TODO: hwo to handle flashback.
+        data.extra.req_type = txn_types::ReqType::Noop;
+        write(engine, &ctx, data);
         rows
     }
 

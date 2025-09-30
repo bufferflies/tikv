@@ -12,12 +12,15 @@ use crossbeam::channel::RecvTimeoutError;
 use fail::fail_point;
 use kvproto::{errorpb, raft_cmdpb::RaftCmdResponse};
 use memory::MEMTRACE_APPLY_INFLIGHT;
-use raftstore::store::{
-    metrics::{
-        STORE_WRITE_MIN_WRITE_PAUSE_DURATION_HISTOGRAM, STORE_WRITE_RAFTDB_DURATION_HISTOGRAM,
-        STORE_WRITE_SEND_DURATION_HISTOGRAM, STORE_WRITE_TRIGGER_SIZE_HISTOGRAM,
+use raftstore::{
+    coprocessor::CoprocessorHost,
+    store::{
+        metrics::{
+            STORE_WRITE_MIN_WRITE_PAUSE_DURATION_HISTOGRAM, STORE_WRITE_RAFTDB_DURATION_HISTOGRAM,
+            STORE_WRITE_SEND_DURATION_HISTOGRAM, STORE_WRITE_TRIGGER_SIZE_HISTOGRAM,
+        },
+        util,
     },
-    util,
 };
 use rfengine::WriteBatch;
 use tikv_alloc::TraceEvent;
@@ -598,8 +601,9 @@ impl ApplyWorker {
         engine: kvengine::Engine,
         router: RaftRouter,
         receiver: Receiver<Option<ApplyBatch>>,
+        coprocessor_host: Option<CoprocessorHost<kvengine::Engine>>,
     ) -> Self {
-        let ctx = ApplyContext::new(engine, Some(router));
+        let ctx = ApplyContext::new(engine, Some(router), coprocessor_host);
         Self { ctx, receiver }
     }
 

@@ -15,7 +15,7 @@ use kvproto::{
 };
 use pd_client::{BucketMeta, BucketStat};
 use raft_proto::eraftpb;
-use raftstore::store::util::KeysInfoFormatter;
+use raftstore::store::{fsm::ChangeObserver, util::KeysInfoFormatter};
 use strum::{EnumCount, EnumVariantNames};
 use tikv_util::time::Instant;
 
@@ -128,6 +128,11 @@ pub(crate) enum ApplyMsg {
         encryption_key: Option<EncryptionKey>,
     },
     ResumeTxnFile(u64 /* commit index */),
+    Change {
+        cmd: ChangeObserver,
+        region_epoch: metapb::RegionEpoch,
+        cb: Callback,
+    },
 }
 
 impl ApplyMsg {
@@ -561,7 +566,17 @@ impl fmt::Debug for Callback {
 /// messages to Raft groups to update some important internal status.
 #[derive(Debug)]
 pub enum SignificantMsg {
-    StoreUnreachable { store_id: u64 },
+    StoreUnreachable {
+        store_id: u64,
+    },
+    /// Capture changes of a region.
+    CaptureChange {
+        cmd: ChangeObserver,
+        region_epoch: metapb::RegionEpoch,
+        callback: Callback,
+        can_apply: bool,
+    },
+    LeaderCallback(Callback),
 }
 
 /// Message that will be sent to a peer.

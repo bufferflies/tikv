@@ -5,8 +5,8 @@ use std::{sync::Arc, time::Duration};
 use dashmap::{mapref::one::RefMut, DashMap};
 use kvproto::metapb::Region;
 use raftstore::coprocessor::*;
-use resolved_ts::Resolver;
-use tikv_util::{info, warn};
+use resolved_ts::{Resolver, TsSource};
+use tikv_util::{info, memory::MemoryQuota, warn};
 use txn_types::TimeStamp;
 
 use crate::{debug, metrics::TRACK_REGION, utils};
@@ -266,7 +266,7 @@ impl TwoPhaseResolver {
         if !self.in_phase_one() {
             warn!("backup stream tracking lock as if in phase one"; "start_ts" => %start_ts, "key" => %utils::redact(&key))
         }
-        self.resolver.track_lock(start_ts, key, None)
+        _ = self.resolver.track_lock(start_ts, key, None);
     }
 
     pub fn track_lock(&mut self, start_ts: TimeStamp, key: Vec<u8>) {
@@ -274,7 +274,7 @@ impl TwoPhaseResolver {
             self.future_locks.push(FutureLock::Lock(key, start_ts));
             return;
         }
-        self.resolver.track_lock(start_ts, key, None)
+        _ = self.resolver.track_lock(start_ts, key, None);
     }
 
     pub fn untrack_lock(&mut self, key: &[u8]) {
@@ -288,7 +288,9 @@ impl TwoPhaseResolver {
 
     fn handle_future_lock(&mut self, lock: FutureLock) {
         match lock {
-            FutureLock::Lock(key, ts) => self.resolver.track_lock(ts, key, None),
+            FutureLock::Lock(key, ts) => {
+                _ = self.resolver.track_lock(ts, key, None);
+            }
             FutureLock::Unlock(key) => self.resolver.untrack_lock(&key, None),
         }
     }
@@ -298,7 +300,7 @@ impl TwoPhaseResolver {
             return min_ts.min(stable_ts);
         }
 
-        self.resolver.resolve(min_ts)
+        self.resolver.resolve(min_ts, TsSource::BackupStream)
     }
 
     pub fn resolved_ts(&self) -> TimeStamp {
@@ -310,8 +312,10 @@ impl TwoPhaseResolver {
     }
 
     pub fn new(region_id: u64, stable_ts: Option<TimeStamp>) -> Self {
+        // TODO: limit the memory usage of the resolver.
+        let memory_quota = Arc::new(MemoryQuota::new(usize::MAX));
         Self {
-            resolver: Resolver::new(region_id),
+            resolver: Resolver::new(region_id, memory_quota),
             future_locks: Default::default(),
             stable_ts,
         }
@@ -328,7 +332,7 @@ impl TwoPhaseResolver {
                 // advance the internal resolver.
                 // the start ts of initial scanning would be a safe ts for min ts
                 // -- because is used to be a resolved ts.
-                self.resolver.resolve(ts);
+                self.resolver.resolve(ts, TsSource::BackupStream);
             }
             None => {
                 warn!("BUG: a two-phase resolver is executing phase_one_done when not in phase one"; "resolver" => ?self)

@@ -6,6 +6,7 @@ mod check_txn_status;
 mod commit;
 mod helper;
 mod ia;
+mod old_value;
 mod optimistic_2pc;
 mod pessimistic;
 mod resolve_lock;

@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::bail;
 use bstr::ByteSlice;
+use causal_ts::CausalTsProviderImpl;
 use cloud_server::TikvServer;
 use cloud_worker::{local_gc::LocalGcConfig, native_br::NativeBrConfig, CloudWorker};
 use dashmap::DashMap;
@@ -105,6 +106,7 @@ pub struct ServerCluster {
     /// The ratio of memory capacity to use from the total memory.
     /// Used for reserve memory for other components (PD, TiDB, and TiFlash).
     memory_capacity_ratio: f64,
+    before_run_server: Option<Box<dyn FnMut(u16, &mut TikvServer)>>,
 }
 
 impl ServerCluster {
@@ -122,6 +124,7 @@ impl ServerCluster {
         update_conf: F,
         pd_wrapper: PdWrapper,
         memory_capacity_ratio: f64,
+        before_run_server: Option<Box<dyn FnMut(u16, &mut TikvServer)>>,
     ) -> ServerCluster
     where
         F: Fn(u16, &mut TikvConfig),
@@ -155,6 +158,7 @@ impl ServerCluster {
             schema_manager: None,
             stopped: false,
             memory_capacity_ratio,
+            before_run_server,
         };
         for node_id in nodes {
             cluster.start_node(node_id, &update_conf);
@@ -226,6 +230,9 @@ impl ServerCluster {
             pd_client,
             dfs.clone(),
         );
+        if let Some(ref mut hook) = self.before_run_server {
+            hook(node_id, &mut server)
+        }
         server.run();
         let store_id = server.get_store_id();
         if let std::collections::hash_map::Entry::Vacant(e) = self.channels.entry(store_id) {
@@ -1144,6 +1151,13 @@ impl ServerCluster {
 
         keyspace_id
     }
+
+    pub fn get_causal_ts_provider(&self, store_id: u64) -> Option<&Arc<CausalTsProviderImpl>> {
+        self.servers
+            .values()
+            .find(|s| s.get_store_id() == store_id)
+            .and_then(|s| s.get_causal_ts_provider())
+    }
 }
 
 impl Drop for ServerCluster {
@@ -1192,6 +1206,7 @@ pub struct ServerClusterBuilder<F> {
     memory_capacity_ratio: f64,
     pd_server_cnt: usize,
     tikv_worker_cnt: usize,
+    before_run_server: Option<Box<dyn FnMut(u16, &mut TikvServer)>>,
 }
 
 impl<F: Fn(u16, &mut TikvConfig)> ServerClusterBuilder<F> {
@@ -1203,6 +1218,7 @@ impl<F: Fn(u16, &mut TikvConfig)> ServerClusterBuilder<F> {
             memory_capacity_ratio: 1.0,
             pd_server_cnt: 0,
             tikv_worker_cnt: 0,
+            before_run_server: None,
         }
     }
 
@@ -1227,9 +1243,20 @@ impl<F: Fn(u16, &mut TikvConfig)> ServerClusterBuilder<F> {
         self
     }
 
+    pub fn before_run_server(mut self, hook: impl FnMut(u16, &mut TikvServer) + 'static) -> Self {
+        self.before_run_server = Some(Box::new(hook));
+        self
+    }
+
     pub fn build(mut self) -> ServerCluster {
         let pd = self.build_pd();
-        ServerCluster::new_opt(self.nodes, self.update_conf, pd, self.memory_capacity_ratio)
+        ServerCluster::new_opt(
+            self.nodes,
+            self.update_conf,
+            pd,
+            self.memory_capacity_ratio,
+            self.before_run_server,
+        )
     }
 
     pub fn build_ext(mut self) -> ServerClusterExt {
@@ -1239,8 +1266,13 @@ impl<F: Fn(u16, &mut TikvConfig)> ServerClusterBuilder<F> {
             (self.update_conf)(node_id, conf);
             conf.dfs = dfs_config.clone();
         };
-        let mut cluster =
-            ServerCluster::new_opt(self.nodes, update_conf, pd, self.memory_capacity_ratio);
+        let mut cluster = ServerCluster::new_opt(
+            self.nodes,
+            update_conf,
+            pd,
+            self.memory_capacity_ratio,
+            self.before_run_server.take(),
+        );
         if self.tikv_worker_cnt > 0 {
             cluster.start_tikv_workers(
                 alloc_node_id_vec(self.tikv_worker_cnt),

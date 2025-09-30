@@ -624,6 +624,7 @@ impl<K: PrewriteKind> Prewriter<K> {
             let need_min_commit_ts = secondaries.is_some() || self.try_one_pc;
             let prewrite_result =
                 prewrite(txn, reader, &props, m, secondaries, pessimistic_action).await;
+
             match prewrite_result {
                 Ok((ts, old_value)) if !(need_min_commit_ts && ts.is_zero()) => {
                     if need_min_commit_ts && final_min_commit_ts < ts {
@@ -725,6 +726,10 @@ impl<K: PrewriteKind> Prewriter<K> {
                     one_pc_commit_ts,
                 },
             };
+            // Probe hook for old_value testing
+            if tikv_kv::PROBE_OLD_VALUES_IN_TEST.load(std::sync::atomic::Ordering::Relaxed) {
+                tikv_kv::populate_old_values_probe_cache(&self.old_values, &[]);
+            }
             let extra = TxnExtra {
                 old_values: self.old_values,
                 // Set one_pc flag in TxnExtra to let CDC skip handling the resolver.

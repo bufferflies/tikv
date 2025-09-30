@@ -8,7 +8,7 @@ use std::{
     },
     sync::{
         atomic::{AtomicU64, Ordering::SeqCst},
-        Arc,
+        Arc, Mutex,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -35,8 +35,8 @@ use raftstore::{
     store::{
         local_metrics::RaftMetrics,
         metrics::RaftEventDurationType,
-        util,
-        util::{is_initial_msg, is_region_initialized},
+        util::{self, is_initial_msg, is_region_initialized},
+        RegionReadProgressRegistry,
     },
 };
 use rfengine::{REGION_META_KEY_BYTE, TRUNCATE_ALL_INDEX};
@@ -110,7 +110,7 @@ impl RaftBatchSystem {
         trans: Box<dyn Transport>,
         pd_client: Arc<dyn PdClient>,
         pd_worker: LazyWorker<PdTask>,
-        mut store_meta: StoreMeta,
+        store_meta: Arc<Mutex<StoreMeta>>,
         mut coprocessor_host: CoprocessorHost<kvengine::Engine>,
         importer: Arc<SstImporter>,
         concurrency_manager: ConcurrencyManager,
@@ -154,7 +154,7 @@ impl RaftBatchSystem {
             cfg,
             engines,
             store: meta,
-            readers: store_meta.readers.clone(),
+            readers: store_meta.lock().unwrap().readers.clone(),
             router: self.router.clone(),
             trans,
             pd_scheduler,
@@ -166,12 +166,11 @@ impl RaftBatchSystem {
             engine_total_bytes_written: Arc::new(AtomicU64::new(0)),
             engine_total_keys_written: Arc::new(AtomicU64::new(0)),
         };
-        let mut region_peers = self.load_peers(&ctx, &mut store_meta)?;
+        let mut region_peers = self.load_peers(&ctx, &mut store_meta.lock().unwrap())?;
+        let readers = store_meta.lock().unwrap().readers.clone();
         for peer_fsm in &region_peers {
             let peer = peer_fsm.get_peer();
-            store_meta
-                .readers
-                .insert(peer_fsm.region_id(), ReadDelegate::from_peer(peer));
+            readers.insert(peer_fsm.region_id(), ReadDelegate::from_peer(peer));
         }
         let mut region_ids = Vec::with_capacity(region_peers.len());
         let mut store_ctx = StoreContext::new(RaftContext::new(ctx.clone()), store_meta);
@@ -242,8 +241,12 @@ impl RaftBatchSystem {
                 format!("apply-follower-{}", i - apply_pool_size)
             };
             let props = tikv_util::thread_group::current_properties();
-            let mut aw =
-                ApplyWorker::new(ctx.engines.kv.clone(), ctx.router.clone(), apply_receiver);
+            let mut aw = ApplyWorker::new(
+                ctx.engines.kv.clone(),
+                ctx.router.clone(),
+                apply_receiver,
+                Some(ctx.coprocessor_host.clone()),
+            );
             let handle = std::thread::Builder::new()
                 .name(thread_name)
                 .spawn_wrapper(move || {
@@ -324,6 +327,9 @@ impl RaftBatchSystem {
                 peer.peer.pending_merge_state = Some(local_state.get_merge_state().to_owned());
             }
             store_meta.region_map.put(region.clone());
+            store_meta
+                .region_read_progress
+                .insert(region.id, peer.peer.read_progress.clone());
             ctx.coprocessor_host.on_region_changed(
                 region,
                 RegionChangeEvent::Create,
@@ -350,10 +356,31 @@ impl RaftBatchSystem {
     }
 }
 
+#[cfg(feature = "testexport")]
+impl RaftBatchSystem {
+    pub fn replace_peer_receiver(
+        &mut self,
+        f: impl FnOnce(Receiver<(u64, Box<PeerMsg>)>) -> Receiver<(u64, Box<PeerMsg>)>,
+    ) {
+        let peer_receiver = self.peer_receiver.take().unwrap();
+        self.peer_receiver = Some(f(peer_receiver));
+    }
+}
+
 pub struct StoreInfo {
     pub kv_engine: kvengine::Engine,
     pub rf_engine: rfengine::RfEngine,
     pub capacity: u64,
+}
+
+/// A trait that provide the meta information that can be accessed outside
+/// of raftstore.
+pub trait StoreRegionMeta: Send {
+    fn store_id(&self) -> u64;
+    fn reader(&self, region_id: u64) -> Option<ReadDelegate>;
+    fn region_read_progress(&self) -> &RegionReadProgressRegistry;
+    // fn search_region(&self, start_key: &[u8], end_key: &[u8], visitor: impl
+    // FnMut(&Region));
 }
 
 pub struct StoreMeta {
@@ -365,6 +392,9 @@ pub struct StoreMeta {
     pub cop_host: Option<CoprocessorHost<kvengine::Engine>>,
     /// region_id -> reader
     pub readers: Arc<dashmap::DashMap<u64, ReadDelegate>>,
+    // TODO: currently, the region_read_progress is not fully implemented.
+    /// region_id -> `RegionReadProgress`
+    pub region_read_progress: RegionReadProgressRegistry,
     /// `MsgRequestPreVote`, `MsgRequestVote` or `MsgAppend` messages from newly
     /// split Regions shouldn't be dropped if there is no such Region in
     /// this store now. So the messages are recorded temporarily and will be
@@ -381,6 +411,7 @@ impl StoreMeta {
             region_map: Default::default(),
             cop_host: None,
             readers: Arc::new(dashmap::DashMap::new()),
+            region_read_progress: RegionReadProgressRegistry::new(),
             pending_msgs: RingQueue::with_capacity(vote_capacity),
             black_list: None,
         }
@@ -395,14 +426,42 @@ impl StoreMeta {
     ) {
         let region_id = region.get_id();
         self.region_map.put(region.clone());
-        peer.set_region(self.cop_host.as_ref().unwrap(), region, reason);
         self.readers
             .insert(region_id, ReadDelegate::from_peer(peer));
+        peer.set_region(
+            self.cop_host.as_ref().unwrap(),
+            &mut self.readers.get_mut(&region.id).unwrap(),
+            region,
+            reason,
+        );
     }
 
-    pub(crate) fn destroy_region(&mut self, region: &Region) {
+    pub(crate) fn destroy_region(&mut self, region: &Region, merged_target: Option<&Region>) {
         self.region_map.remove(region.id);
         self.readers.remove(&region.id);
+        // if the region is destroyed due to merge, we remove the region_read_progress
+        // via  StoreMsgHandler::on_commit_merge_result to ensure the read ts
+        // can be properly handle(even though it's not used currently).
+        if merged_target.is_none() {
+            self.region_read_progress.remove(&region.id);
+        }
+    }
+}
+
+impl StoreRegionMeta for StoreMeta {
+    #[inline]
+    fn store_id(&self) -> u64 {
+        self.store_id.unwrap()
+    }
+
+    #[inline]
+    fn region_read_progress(&self) -> &RegionReadProgressRegistry {
+        &self.region_read_progress
+    }
+
+    #[inline]
+    fn reader(&self, region_id: u64) -> Option<ReadDelegate> {
+        self.readers.get(&region_id).map(|r| r.clone())
     }
 }
 
@@ -594,13 +653,13 @@ pub(crate) struct RaftContext {
 pub(crate) struct StoreContext {
     pub(crate) raft_ctx: RaftContext,
     pub(crate) peers: Vec<HashMap<u64, PeerStates>>,
-    pub(crate) store_meta: StoreMeta,
+    pub(crate) store_meta: Arc<Mutex<StoreMeta>>,
 }
 
 pub(crate) const PEER_SEGMENTS: usize = 128;
 
 impl StoreContext {
-    pub(crate) fn new(raft_ctx: RaftContext, store_meta: StoreMeta) -> StoreContext {
+    pub(crate) fn new(raft_ctx: RaftContext, store_meta: Arc<Mutex<StoreMeta>>) -> StoreContext {
         StoreContext {
             raft_ctx,
             peers: vec![HashMap::new(); PEER_SEGMENTS],
@@ -888,7 +947,7 @@ impl<'a> StoreMsgHandler<'a> {
         let mut stats = pdpb::StoreStats::default();
 
         stats.set_store_id(self.store.id);
-        stats.set_region_count(self.ctx.store_meta.region_map.len() as u32);
+        stats.set_region_count(self.ctx.store_meta.lock().unwrap().region_map.len() as u32);
 
         stats.set_start_time(self.store.start_time.unwrap().sec as u32);
 
@@ -977,7 +1036,7 @@ impl<'a> StoreMsgHandler<'a> {
             "unreachable_store_id" => store_id,
         );
         self.store.last_unreachable_report.insert(store_id, now);
-        for (id, region) in &self.ctx.store_meta.region_map.regions {
+        for (id, region) in &self.ctx.store_meta.lock().unwrap().region_map.regions {
             if region.get_peers().iter().any(|p| p.store_id == store_id) {
                 self.ctx.global.router.report_unreachable(*id, store_id);
             }
@@ -1125,7 +1184,7 @@ impl<'a> StoreMsgHandler<'a> {
 
     fn on_raft_message(&mut self, msg: RaftMessage) {
         let region_id = msg.get_region_id();
-        if let Some(black_list) = self.ctx.store_meta.black_list.as_ref() {
+        if let Some(black_list) = self.ctx.store_meta.lock().unwrap().black_list.as_ref() {
             if black_list.is_region_blocked(region_id) {
                 debug!("region {} blocked by black list", region_id);
                 return;
@@ -1190,22 +1249,16 @@ impl<'a> StoreMsgHandler<'a> {
             }
         };
         if is_first_request {
+            let mut store_meta = self.ctx.store_meta.lock().unwrap();
             // To void losing messages, either put it to pending_msg or force send.
-            if !self
-                .ctx
-                .store_meta
-                .region_map
-                .regions
-                .contains_key(&region_id)
-            {
+            if !store_meta.region_map.regions.contains_key(&region_id) {
                 // Save one pending message for a peer is enough, remove
                 // the previous pending message of this peer
-                self.ctx
-                    .store_meta
+                store_meta
                     .pending_msgs
                     .swap_remove_front(|m| m.get_to_peer() == msg.get_to_peer());
 
-                self.ctx.store_meta.pending_msgs.push(msg);
+                store_meta.pending_msgs.push(msg);
             } else {
                 let peer_msg = PeerMsg::RaftMessage(msg);
                 self.ctx.global.router.send(region_id, peer_msg);
@@ -1266,7 +1319,15 @@ impl<'a> StoreMsgHandler<'a> {
         msg: &RaftMessage,
         _is_local_first: bool,
     ) -> Result<bool> {
-        if self.ctx.store_meta.region_map.get(region_id).is_some() {
+        if self
+            .ctx
+            .store_meta
+            .lock()
+            .unwrap()
+            .region_map
+            .get(region_id)
+            .is_some()
+        {
             return Ok(true);
         }
         let target = msg.get_to_peer();
@@ -1288,10 +1349,16 @@ impl<'a> StoreMsgHandler<'a> {
 
         // Following snapshot may overlap, should insert into region_ranges after
         // snapshot is applied.
-        self.ctx
-            .store_meta
-            .region_map
-            .put(peer.get_peer().region().to_owned());
+        {
+            let mut store_meta = self.ctx.store_meta.lock().unwrap();
+            store_meta
+                .region_map
+                .put(peer.get_peer().region().to_owned());
+            store_meta
+                .region_read_progress
+                .insert(region_id, peer.peer.read_progress.clone());
+        }
+
         self.register(peer);
         self.ctx.global.router.send(region_id, PeerMsg::Start);
         Ok(true)
@@ -1325,9 +1392,11 @@ impl<'a> StoreMsgHandler<'a> {
         let derived_peer = self.get_peer(derived.get_id());
         let mut peer_fsm = derived_peer.peer_fsm.lock().unwrap();
         let region_id = derived.get_id();
-        self.ctx
-            .store_meta
-            .set_region(derived, &mut peer_fsm.peer, RegionChangeReason::Split);
+        self.ctx.store_meta.lock().unwrap().set_region(
+            derived,
+            &mut peer_fsm.peer,
+            RegionChangeReason::Split,
+        );
 
         let is_leader = peer_fsm.peer.is_leader();
         self.ctx
@@ -1441,12 +1510,15 @@ impl<'a> StoreMsgHandler<'a> {
                 RegionChangeEvent::Create,
                 new_peer.peer.get_role(),
             );
-            self.ctx.store_meta.region_map.put(new_region.clone());
-            let read_delegate = ReadDelegate::from_peer(new_peer.get_peer());
-            self.ctx
-                .store_meta
-                .readers
-                .insert(new_region_id, read_delegate);
+            {
+                let mut store_meta = self.ctx.store_meta.lock().unwrap();
+                store_meta.region_map.put(new_region.clone());
+                let read_delegate = ReadDelegate::from_peer(new_peer.get_peer());
+                store_meta.readers.insert(new_region_id, read_delegate);
+                store_meta
+                    .region_read_progress
+                    .insert(new_region_id, new_peer.peer.read_progress.clone());
+            }
 
             new_peers.push(new_peer);
             self.ctx.global.router.send(new_region_id, PeerMsg::Start);
@@ -1458,6 +1530,8 @@ impl<'a> StoreMsgHandler<'a> {
                 if let Some(msg) = self
                     .ctx
                     .store_meta
+                    .lock()
+                    .unwrap()
                     .pending_msgs
                     .swap_remove_front(|m| m.get_to_peer() == &meta_peer)
                 {
@@ -1604,7 +1678,14 @@ impl<'a> StoreMsgHandler<'a> {
     ) {
         self.ctx
             .store_meta
+            .lock()
+            .unwrap()
             .set_region(region.clone(), &mut peer_fsm.peer, reason);
+        peer_fsm.peer.read_progress.update_leader_info(
+            peer_fsm.peer.leader_id(),
+            peer_fsm.peer.term(),
+            peer_fsm.peer.region(),
+        );
         for peer in region.take_peers().into_iter() {
             if peer_fsm.peer.peer_id() == peer.get_id() {
                 peer_fsm.peer.peer = peer.clone();
@@ -1648,7 +1729,11 @@ impl<'a> StoreMsgHandler<'a> {
         }
 
         // Destroy read delegates.
-        self.ctx.store_meta.destroy_region(peer_fsm.peer.region());
+        self.ctx
+            .store_meta
+            .lock()
+            .unwrap()
+            .destroy_region(peer_fsm.peer.region(), merged_target.as_ref());
 
         // Trigger region change observer
         self.ctx.global.coprocessor_host.on_region_changed(
@@ -1690,8 +1775,10 @@ impl<'a> StoreMsgHandler<'a> {
         let peer = self.get_peer(region_id);
         let mut peer_fsm = peer.peer_fsm.lock().unwrap();
         let raft_ctx = &mut self.ctx.raft_ctx;
-        let store_meta = &mut self.ctx.store_meta;
-        peer_fsm.peer.handle_raft_ready(raft_ctx, Some(store_meta));
+        peer_fsm
+            .peer
+            .handle_raft_ready(raft_ctx, Some(&mut *self.ctx.store_meta.lock().unwrap()));
+
         self.maybe_apply(region_id)
     }
 
@@ -1704,6 +1791,8 @@ impl<'a> StoreMsgHandler<'a> {
         let regions = self
             .ctx
             .store_meta
+            .lock()
+            .unwrap()
             .region_map
             .scan_regions(start, end, 0, false)
             .into_iter()
@@ -1803,8 +1892,12 @@ impl<'a> StoreMsgHandler<'a> {
                     ExecResult::PrepareMerge { region } => {
                         self.on_prepare_merge_result(region);
                     }
-                    ExecResult::CommitMerge { region, source } => {
-                        self.on_commit_merge_result(region, source);
+                    ExecResult::CommitMerge {
+                        index,
+                        region,
+                        source,
+                    } => {
+                        self.on_commit_merge_result(index, region, source);
                     }
                     ExecResult::RollbackMerge { region, commit } => {
                         self.on_rollback_merge(region, commit);
@@ -1858,9 +1951,9 @@ impl<'a> StoreMsgHandler<'a> {
         };
         let mut peer_fsm = peer.peer_fsm.lock().unwrap();
         let raft_ctx = &mut self.ctx.raft_ctx;
-        let store_meta = &mut self.ctx.store_meta;
+        let mut store_meta = self.ctx.store_meta.lock().unwrap();
         let mut handler = PeerMsgHandler::new(&mut peer_fsm, raft_ctx);
-        handler.propose_raft_command(req, cb, Some(store_meta));
+        handler.propose_raft_command(req, cb, Some(&mut *store_meta));
     }
 
     fn on_prepare_merge_result(&mut self, region: Region) {
@@ -1876,7 +1969,7 @@ impl<'a> StoreMsgHandler<'a> {
             .engines
             .kv
             .set_shard_active(region.id, is_leader);
-        self.ctx.store_meta.set_region(
+        self.ctx.store_meta.lock().unwrap().set_region(
             region,
             &mut peer_fsm.peer,
             RegionChangeReason::PrepareMerge,
@@ -1897,13 +1990,13 @@ impl<'a> StoreMsgHandler<'a> {
             None => return,
         };
         let mut peer_fsm = peer.peer_fsm.lock().unwrap();
-        let store_meta = &mut self.ctx.store_meta;
+        let mut store_meta = self.ctx.store_meta.lock().unwrap();
         let ctx = &mut self.ctx.raft_ctx;
         let mut handler = PeerMsgHandler::new(&mut peer_fsm, ctx);
-        handler.on_check_merge(store_meta);
+        handler.on_check_merge(&mut store_meta);
     }
 
-    fn on_commit_merge_result(&mut self, region: Region, source: Region) {
+    fn on_commit_merge_result(&mut self, merge_index: u64, region: Region, source: Region) {
         let peer = match self.ctx.try_get_peer(region.id) {
             Some(peer) => peer,
             None => return,
@@ -1915,11 +2008,47 @@ impl<'a> StoreMsgHandler<'a> {
             .engines
             .kv
             .set_shard_active(region.id, is_leader);
-        self.ctx.store_meta.set_region(
+        self.ctx.store_meta.lock().unwrap().set_region(
             region.clone(),
             &mut peer_fsm.peer,
             RegionChangeReason::CommitMerge,
         );
+
+        // After the region commit merged, the region's key range is extended and the
+        // region's `safe_ts` should reset to `min(source_safe_ts, target_safe_ts)`
+
+        let source_read_progress = self
+            .ctx
+            .store_meta
+            .lock()
+            .unwrap()
+            .region_read_progress
+            .remove(&source.get_id());
+        if let Some(source_read_progress) = source_read_progress {
+            peer_fsm.peer.read_progress.merge_safe_ts(
+                source_read_progress.safe_ts(),
+                merge_index,
+                self.ctx
+                    .store_meta
+                    .lock()
+                    .unwrap()
+                    .cop_host
+                    .as_ref()
+                    .unwrap(),
+            );
+        } else {
+            // NOTE: this can happen if the source peer is destoryed via `on_stale_merge`
+            // path because the source receive the stale raft message from other
+            // peer(already destory) with merget_target when the apply
+            // commit merge is slow on this store.
+
+            // TODO: This may lead to incorrect saft_ts if source region is destory before
+            // this function is called. We must fix this if we are going to use
+            // `saft_ts`.
+            warn!("source peer read_progres is missing at on_commit_merge_result, skip handle merge_safe_ts";
+                    "source_peer_id" => source.get_id(), "peer_id" => peer_fsm.peer_id());
+        }
+
         let tag = peer_fsm.peer.tag();
         if is_leader {
             peer_fsm.peer.heartbeat_pd(self.ctx);
@@ -1956,7 +2085,7 @@ impl<'a> StoreMsgHandler<'a> {
         };
         let mut peer_fsm = peer.peer_fsm.lock().unwrap();
 
-        self.ctx.store_meta.set_region(
+        self.ctx.store_meta.lock().unwrap().set_region(
             region,
             &mut peer_fsm.peer,
             RegionChangeReason::RollbackMerge,
@@ -1976,7 +2105,14 @@ impl<'a> StoreMsgHandler<'a> {
         let region_id = cs.shard_id;
         let ver = cs.shard_ver;
 
-        let mut region = match self.ctx.store_meta.region_map.get(region_id) {
+        let mut region = match self
+            .ctx
+            .store_meta
+            .lock()
+            .unwrap()
+            .region_map
+            .get(region_id)
+        {
             Some(region) => region.clone(),
             None => return,
         };
@@ -1996,7 +2132,7 @@ impl<'a> StoreMsgHandler<'a> {
         );
 
         let is_leader = peer_fsm.peer.is_leader();
-        self.ctx.store_meta.set_region(
+        self.ctx.store_meta.lock().unwrap().set_region(
             region,
             &mut peer_fsm.peer,
             RegionChangeReason::RestoreShard,

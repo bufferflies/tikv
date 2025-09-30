@@ -1,6 +1,10 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{sync::mpsc, thread, time::Duration};
+use std::{
+    sync::{atomic::Ordering::Relaxed, mpsc},
+    thread,
+    time::Duration,
+};
 
 pub use kvproto::kvrpcpb::PrewriteRequestPessimisticAction as PessimisticAction;
 use kvproto::kvrpcpb::{Assertion, Op};
@@ -13,6 +17,25 @@ use txn_types::TimeStamp;
 
 use super::helper::*;
 use crate::{alloc_node_id_vec, i_to_key, i_to_val};
+
+/// RAII guard that sets txn_extra_op to ReadOldValue for test scope
+/// Automatically sets ExtraOp on creation and resets on drop
+pub struct ExtraOpGuard;
+
+impl ExtraOpGuard {
+    /// Set transaction extra_op to ReadOldValue for this scope and enable probe
+    pub fn to_read_old_value() -> Self {
+        tikv_kv::clear_old_values_probe_cache(); // Clear once at start of test
+        tikv_kv::PROBE_OLD_VALUES_IN_TEST.store(true, Relaxed);
+        Self
+    }
+}
+
+impl Drop for ExtraOpGuard {
+    fn drop(&mut self) {
+        tikv_kv::PROBE_OLD_VALUES_IN_TEST.store(false, Relaxed);
+    }
+}
 
 pub(crate) fn ts(ts: u64) -> TimeStamp {
     TimeStamp::compose(ts, 0)
@@ -89,6 +112,9 @@ pub(crate) enum TestOperation {
     },
     Concurrent {
         sequences: Vec<ConcurrentSequence>,
+    },
+    AssertOldValue {
+        expected_value: Option<Vec<u8>>,
     },
 }
 
@@ -416,6 +442,14 @@ macro_rules! sequence {
     };
 }
 
+macro_rules! assert_old_value {
+    ($expected:expr) => {
+        TestOperation::AssertOldValue {
+            expected_value: $expected.map(|v| v.to_vec()),
+        }
+    };
+}
+
 fn execute_operation(
     client: &mut ClusterClient,
     default_key: &[u8],
@@ -687,6 +721,20 @@ fn execute_single_operation(
                 Err(_) => ExpectedResult::Fail,
             }
         }
+        TestOperation::AssertOldValue { expected_value } => {
+            let captured = tikv_kv::get_captured_old_value(default_key);
+            let expected = expected_value.clone();
+
+            if captured == Some(expected.clone()) {
+                ExpectedResult::Success
+            } else {
+                info!(
+                    "Old value assertion failed for key {:?}: expected {:?}, got {:?}",
+                    default_key, expected, captured
+                );
+                ExpectedResult::Fail
+            }
+        }
         TestOperation::Concurrent { .. } => unreachable!(),
     }
 }
@@ -805,6 +853,7 @@ fn operation_has_custom_key(operation: &TestOperation) -> bool {
         | TestOperation::Commit { key, .. }
         | TestOperation::Rollback { key, .. }
         | TestOperation::CheckTxnStatus { key, .. } => key.is_some(),
+        TestOperation::AssertOldValue { .. } => false,
         TestOperation::Concurrent { sequences } => sequences
             .iter()
             .any(|seq| seq.operations.iter().any(operation_has_custom_key)),
@@ -821,6 +870,7 @@ fn operation_has_default_key(operation: &TestOperation) -> bool {
         | TestOperation::Commit { key, .. }
         | TestOperation::Rollback { key, .. }
         | TestOperation::CheckTxnStatus { key, .. } => key.is_none(),
+        TestOperation::AssertOldValue { .. } => true,
         TestOperation::Concurrent { sequences } => sequences
             .iter()
             .any(|seq| seq.operations.iter().any(operation_has_default_key)),
