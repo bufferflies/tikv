@@ -35,6 +35,7 @@ use crate::{
 const COLUMNAR_DB_NAME: &str = "columnar_db";
 const COLUMNAR_TABLE_NAME: &str = "columnar_table";
 const EMBEDDED_DOC_TABLE_NAME: &str = "embedded_documents";
+const DYNAMIC_TABLE_NAME: &str = "dynamic_columns_test";
 const WORKLOAD_CONCURRENCY: usize = 1;
 const COLUMNAR_REPLICAS_AVAILABLE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -279,6 +280,14 @@ pub(crate) async fn run_columnar_workload(
             tokio::time::sleep(Duration::from_secs(30)).await;
             trigger_manual_columnar_major_compaction(pd_client_copy.clone(), keyspace_id).await;
         }
+    }));
+
+    // Add independent dynamic column management workload
+    let pool_copy = pool.clone();
+    let running_copy = running.clone();
+    handles.push(tokio::spawn(async move {
+        let dynamic_workload = DynamicColumnWorkload::new(pool_copy, running_copy, keyspace_id);
+        dynamic_workload.run_workload().await;
     }));
 
     join_all(handles).await;
@@ -1112,4 +1121,563 @@ fn generate_complex_where_condition() -> String {
     }
 
     combined
+}
+
+/// Independent dynamic column management workload with simplified schema
+struct DynamicColumnWorkload {
+    pool: Pool<MySql>,
+    running: Running,
+    keyspace_id: u32,
+    current_dynamic_columns: Arc<Mutex<Vec<String>>>,
+    max_id: Arc<AtomicU64>,
+}
+
+impl DynamicColumnWorkload {
+    fn new(pool: Pool<MySql>, running: Running, keyspace_id: u32) -> Self {
+        Self {
+            pool,
+            running,
+            keyspace_id,
+            current_dynamic_columns: Arc::new(Mutex::new(Vec::new())),
+            max_id: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Initialize the dynamic test table with basic schema
+    async fn prepare_dynamic_table(&self) -> Result<()> {
+        let tag = format!("dynamic-table-{}", self.keyspace_id);
+
+        // Create table with simplified schema: only INT and VARCHAR columns
+        let sql = format!(
+            "CREATE TABLE IF NOT EXISTS `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                base_int_col INT DEFAULT 0,
+                base_varchar_col VARCHAR(100) DEFAULT 'default'
+            )"
+        );
+
+        info!("{} creating dynamic test table: {}", tag, sql);
+        sqlx::query(&sql)
+            .execute(&self.pool)
+            .await
+            .with_context(|| "Failed to create dynamic test table")?;
+
+        // Set tiflash replica for the new table
+        let replica_sql = format!(
+            "ALTER TABLE `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` SET tiflash replica 1"
+        );
+        info!("{} setting tiflash replica: {}", tag, replica_sql);
+        sqlx::query(&replica_sql)
+            .execute(&self.pool)
+            .await
+            .with_context(|| "Failed to set tiflash replica")?;
+
+        // Wait for replica to be available
+        wait_tiflash_or_columnar_replicas_available(
+            &tag,
+            &self.pool,
+            COLUMNAR_DB_NAME,
+            DYNAMIC_TABLE_NAME,
+            COLUMNAR_REPLICAS_AVAILABLE_TIMEOUT,
+        )
+        .await;
+
+        Ok(())
+    }
+
+    /// Generate a random column definition (only INT or VARCHAR)
+    fn generate_column_def(&self, column_name: &str) -> String {
+        let mut rng = rand::thread_rng();
+        // column_name has prefix "col_int_" or "col_varchar_", choose column type by
+        // prefix.
+        let column_type = if column_name.starts_with("col_int_") {
+            "INT"
+        } else {
+            "VARCHAR(50)"
+        };
+
+        let has_default = rng.gen_bool(0.5); // 50% chance to have default value
+
+        if has_default {
+            let default_value = match column_type {
+                "INT" => rng.gen_range(-100..100).to_string(),
+                "VARCHAR(50)" => format!("'{}'", random_str(&mut rng, 10, true)),
+                _ => unreachable!(),
+            };
+            format!(
+                "{} {} DEFAULT {} NOT NULL",
+                column_name, column_type, default_value
+            )
+        } else {
+            format!("{} {}", column_name, column_type)
+        }
+    }
+
+    /// Generate insert SQL for dynamic table
+    fn generate_insert_sqls(&self, count: usize, dynamic_columns: &[String]) -> Vec<String> {
+        let mut rng = rand::thread_rng();
+        let mut sqls = vec!["BEGIN".to_string()];
+
+        for _ in 0..count {
+            let base_int_value = rng.gen_range(-1000..1000);
+            let base_varchar_value = random_str(&mut rng, 20, true);
+
+            let mut column_names = vec!["base_int_col", "base_varchar_col"];
+            let mut column_values = vec![
+                base_int_value.to_string(),
+                format!("'{}'", base_varchar_value),
+            ];
+
+            // Add values for dynamic columns
+            for col_name in dynamic_columns {
+                column_names.push(col_name);
+                if col_name.contains("int") || col_name.starts_with("col_int_") {
+                    column_values.push(rng.gen_range(-100..100).to_string());
+                } else {
+                    column_values.push(format!("'{}'", random_str(&mut rng, 10, true)));
+                }
+            }
+
+            let sql = format!(
+                "INSERT INTO `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` ({}) VALUES ({})",
+                column_names.join(", "),
+                column_values.join(", ")
+            );
+            sqls.push(sql);
+        }
+
+        sqls.push("COMMIT".to_string());
+        sqls
+    }
+
+    /// Generate delete SQL for dynamic table
+    fn generate_delete_sqls(&self, count: usize) -> Vec<String> {
+        let mut rng = rand::thread_rng();
+        let max_id = self.max_id.load(Relaxed);
+        let mut sqls = vec![];
+
+        if max_id > 0 {
+            for _ in 0..count {
+                let id = rng.gen_range(1..=max_id);
+                let sql = format!(
+                    "DELETE FROM `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` WHERE id = {}",
+                    id
+                );
+                sqls.push(sql);
+            }
+        }
+
+        sqls
+    }
+
+    /// Add a new dynamic column
+    async fn add_column(&self, column_name: &str) -> Result<()> {
+        let tag = format!("dynamic-column-{}", self.keyspace_id);
+        let column_def = self.generate_column_def(column_name);
+        let sql = format!(
+            "ALTER TABLE `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` ADD COLUMN {}",
+            column_def
+        );
+
+        info!("{} adding column: {}", tag, sql);
+        sqlx::query(&sql)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("Failed to add column {}", column_name))?;
+
+        // Add to tracking list
+        let mut columns = self.current_dynamic_columns.lock().await;
+        columns.push(column_name.to_string());
+
+        Ok(())
+    }
+
+    /// Drop a dynamic column
+    async fn drop_column(&self, column_name: &str) -> Result<()> {
+        let tag = format!("dynamic-column-{}", self.keyspace_id);
+        let sql = format!(
+            "ALTER TABLE `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` DROP COLUMN {}",
+            column_name
+        );
+
+        info!("{} dropping column: {}", tag, sql);
+        sqlx::query(&sql)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("Failed to drop column {}", column_name))?;
+
+        // Remove from tracking list
+        let mut columns = self.current_dynamic_columns.lock().await;
+        columns.retain(|col| col != column_name);
+
+        Ok(())
+    }
+
+    /// Check if a column is NOT NULL
+    async fn is_column_not_null(&self, column_name: &str) -> Result<bool> {
+        let sql = format!(
+            "SELECT IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS 
+             WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' AND COLUMN_NAME = '{}'",
+            COLUMNAR_DB_NAME, DYNAMIC_TABLE_NAME, column_name
+        );
+
+        let row = sqlx::query(&sql).fetch_one(&self.pool).await?;
+        let is_nullable: String = row.get("IS_NULLABLE");
+        Ok(is_nullable == "NO")
+    }
+
+    /// Modify a column from NOT NULL to NULLABLE
+    async fn modify_column_to_nullable(&self, column_name: &str) -> Result<()> {
+        let tag = format!("dynamic-column-{}", self.keyspace_id);
+
+        // Determine column type based on name prefix
+        let column_type = if column_name.starts_with("col_int_") || column_name == "base_int_col" {
+            "INT"
+        } else {
+            "VARCHAR(50)"
+        };
+
+        let sql = format!(
+            "ALTER TABLE `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` MODIFY COLUMN {} {} NULL",
+            column_name, column_type
+        );
+
+        info!("{} modifying column to nullable: {}", tag, sql);
+        sqlx::query(&sql)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("Failed to modify column {} to nullable", column_name))?;
+
+        Ok(())
+    }
+
+    /// Execute insert/delete workload
+    async fn execute_insert_delete_workload(&self) -> Result<()> {
+        let tag = format!("dynamic-insert-delete-{}", self.keyspace_id);
+        let current_columns = {
+            let cols = self.current_dynamic_columns.lock().await;
+            cols.clone()
+        };
+
+        // Generate insert and delete SQLs
+        let insert_sqls = self.generate_insert_sqls(5, &current_columns);
+        let delete_sqls = self.generate_delete_sqls(2);
+
+        // Execute insert SQLs
+        for sql in &insert_sqls {
+            info!("{} executing insert: {}", tag, sql);
+            match sqlx::query(sql).execute(&self.pool).await {
+                Ok(_) => {
+                    if sql.starts_with("INSERT") {
+                        self.max_id.fetch_add(1, Relaxed);
+                    }
+                }
+                Err(err) => {
+                    error!("{} insert failed: {}", tag, err);
+                }
+            }
+        }
+
+        // Execute delete SQLs
+        for sql in &delete_sqls {
+            info!("{} executing delete: {}", tag, sql);
+            match sqlx::query(sql).execute(&self.pool).await {
+                Ok(_) => {}
+                Err(err) => {
+                    error!("{} delete failed: {}", tag, err);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Perform queries using dynamic columns
+    async fn query_with_dynamic_columns(&self) -> Result<()> {
+        let columns = self.current_dynamic_columns.lock().await;
+        let tag = format!("dynamic-column-query-{}", self.keyspace_id);
+
+        // Always query base columns
+        let mut query_columns = vec!["base_int_col", "base_varchar_col"];
+        query_columns.extend(columns.iter().map(|s| s.as_str()));
+
+        if query_columns.is_empty() {
+            return Ok(());
+        }
+
+        // Select a random column to query
+        let column_idx = rand::random::<usize>() % query_columns.len();
+        let column_name = query_columns[column_idx];
+
+        // Generate different types of queries
+        let query_types = if column_name.contains("int") || column_name == "base_int_col" {
+            // INT column queries
+            let value = rand::random::<i32>() % 100 - 50;
+            vec![
+                format!(
+                    "SELECT COUNT(*) FROM `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` WHERE {} > {}",
+                    column_name, value
+                ),
+                format!(
+                    "SELECT COUNT(*) FROM `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` WHERE {} < {}",
+                    column_name, value
+                ),
+                format!(
+                    "SELECT COUNT(*) FROM `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` WHERE {} = {}",
+                    column_name, value
+                ),
+                format!(
+                    "SELECT {} COUNT(*) FROM `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` WHERE {} BETWEEN {} AND {}",
+                    get_engine_hint(true, DYNAMIC_TABLE_NAME),
+                    column_name,
+                    value - 10,
+                    value + 10
+                ),
+            ]
+        } else {
+            // VARCHAR column queries
+            let value = random_str(&mut rand::thread_rng(), 5, true);
+            vec![
+                format!(
+                    "SELECT COUNT(*) FROM `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` WHERE {} LIKE '%{}%'",
+                    column_name, value
+                ),
+                format!(
+                    "SELECT COUNT(*) FROM `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` WHERE {} IS NOT NULL",
+                    column_name
+                ),
+                format!(
+                    "SELECT {} COUNT(*) FROM `{COLUMNAR_DB_NAME}`.`{DYNAMIC_TABLE_NAME}` WHERE {} != ''",
+                    get_engine_hint(true, DYNAMIC_TABLE_NAME),
+                    column_name
+                ),
+            ]
+        };
+
+        for sql in &query_types {
+            info!("{} executing query: {}", tag, sql);
+            match sqlx::query(sql).fetch_all(&self.pool).await {
+                Ok(rows) => {
+                    info!("{} query returned {} rows", tag, rows.len());
+                }
+                Err(err) => {
+                    error!("{} query failed: {}", tag, err);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Main workload entry point
+    async fn run_workload(&self) {
+        let tag = format!("dynamic-workload-{}", self.keyspace_id);
+        info!("{} starting independent dynamic column workload", tag);
+
+        // Step 1: Prepare the dynamic test table
+        if let Err(err) = self.prepare_dynamic_table().await {
+            error!("{} failed to prepare dynamic table: {}", tag, err);
+            return;
+        }
+
+        // Step 2: Start concurrent workloads
+        let mut handles = Vec::new();
+
+        // Insert/Delete workload
+        let self_clone = self.clone_for_workload();
+        handles.push(tokio::spawn(async move {
+            self_clone.run_insert_delete_workload().await;
+        }));
+
+        // Column management workload
+        let self_clone = self.clone_for_workload();
+        handles.push(tokio::spawn(async move {
+            self_clone.run_column_management_workload().await;
+        }));
+
+        // Query workload
+        let self_clone = self.clone_for_workload();
+        handles.push(tokio::spawn(async move {
+            self_clone.run_query_workload().await;
+        }));
+
+        // Wait for all workloads to complete
+        futures::future::join_all(handles).await;
+
+        info!("{} dynamic workload completed", tag);
+    }
+
+    /// Clone necessary fields for workload tasks
+    fn clone_for_workload(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            running: self.running.clone(),
+            keyspace_id: self.keyspace_id,
+            current_dynamic_columns: self.current_dynamic_columns.clone(),
+            max_id: self.max_id.clone(),
+        }
+    }
+
+    /// Insert/Delete workload loop
+    async fn run_insert_delete_workload(&self) {
+        let tag = format!("dynamic-insert-delete-{}", self.keyspace_id);
+        let start_time = Instant::now();
+
+        while self.running.get() {
+            if let Err(err) = self.execute_insert_delete_workload().await {
+                error!("{} insert/delete workload error: {}", tag, err);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        info!("{} insert/delete workload exit", tag; "dur" => ?start_time.saturating_elapsed());
+    }
+
+    /// Column management workload loop - randomly add, drop, or modify columns
+    async fn run_column_management_workload(&self) {
+        let tag = format!("dynamic-column-mgmt-{}", self.keyspace_id);
+        let start_time = Instant::now();
+        let mut column_counter = 0u32;
+
+        while self.running.get() {
+            let current_columns = {
+                let cols = self.current_dynamic_columns.lock().await;
+                cols.clone()
+            };
+
+            // Generate random number to decide operation type
+            let operation_chance = rand::random::<usize>() % 100;
+
+            if operation_chance < 10 && !current_columns.is_empty() {
+                // 10% chance: Check and modify the last column to nullable
+                let last_column = &current_columns[current_columns.len() - 1];
+
+                info!(
+                    "{} cycle {}: checking nullable status of last column {} (current columns: {})",
+                    tag,
+                    column_counter,
+                    last_column,
+                    current_columns.len()
+                );
+
+                match self.is_column_not_null(last_column).await {
+                    Ok(true) => {
+                        // Column is NOT NULL, modify it to nullable
+                        info!(
+                            "{} last column {} is NOT NULL, modifying to nullable",
+                            tag, last_column
+                        );
+                        match self.modify_column_to_nullable(last_column).await {
+                            Ok(_) => {
+                                info!(
+                                    "{} successfully modified column {} to nullable",
+                                    tag, last_column
+                                );
+                            }
+                            Err(err) => {
+                                error!(
+                                    "{} failed to modify column {} to nullable: {}",
+                                    tag, last_column, err
+                                );
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        info!(
+                            "{} last column {} is already nullable, no action needed",
+                            tag, last_column
+                        );
+                    }
+                    Err(err) => {
+                        error!(
+                            "{} failed to check nullable status of column {}: {}",
+                            tag, last_column, err
+                        );
+                    }
+                }
+            } else {
+                // 90% chance: Normal add/drop operations
+                let should_add = if current_columns.is_empty() {
+                    // If no columns exist, we must add one
+                    true
+                } else if current_columns.len() >= 10 {
+                    // If too many columns exist, we must drop one
+                    false
+                } else {
+                    // Otherwise, randomly choose (adjust probabilities for remaining 90%)
+                    let add_chance = rand::random::<usize>() % 10;
+                    // 60% chance to add, 30% chance to drop within the 90%
+                    add_chance < 6
+                };
+
+                if should_add {
+                    // Add a new column
+                    column_counter += 1;
+                    let column_name = if column_counter % 2 == 1 {
+                        format!("col_int_{}", column_counter)
+                    } else {
+                        format!("col_varchar_{}", column_counter)
+                    };
+
+                    info!(
+                        "{} cycle {}: adding column {} (current columns: {})",
+                        tag,
+                        column_counter,
+                        column_name,
+                        current_columns.len()
+                    );
+
+                    match self.add_column(&column_name).await {
+                        Ok(_) => {
+                            info!("{} successfully added column {}", tag, column_name);
+                        }
+                        Err(err) => {
+                            error!("{} failed to add column {}: {}", tag, column_name, err);
+                        }
+                    }
+                } else {
+                    // Drop an existing column
+                    let column_idx = rand::random::<usize>() % current_columns.len();
+                    let column_to_drop = &current_columns[column_idx];
+
+                    info!(
+                        "{} cycle {}: dropping column {} (current columns: {})",
+                        tag,
+                        column_counter,
+                        column_to_drop,
+                        current_columns.len()
+                    );
+
+                    match self.drop_column(column_to_drop).await {
+                        Ok(_) => {
+                            info!("{} successfully dropped column {}", tag, column_to_drop);
+                        }
+                        Err(err) => {
+                            error!("{} failed to drop column {}: {}", tag, column_to_drop, err);
+                        }
+                    }
+                }
+            }
+
+            // Wait before next iteration
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+
+        info!("{} column management workload exit after {} operations", tag, column_counter; "dur" => ?start_time.saturating_elapsed());
+    }
+
+    /// Query workload loop
+    async fn run_query_workload(&self) {
+        let tag = format!("dynamic-query-{}", self.keyspace_id);
+        let start_time = Instant::now();
+
+        while self.running.get() {
+            if let Err(err) = self.query_with_dynamic_columns().await {
+                error!("{} query workload error: {}", tag, err);
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+
+        info!("{} query workload exit", tag; "dur" => ?start_time.saturating_elapsed());
+    }
 }
