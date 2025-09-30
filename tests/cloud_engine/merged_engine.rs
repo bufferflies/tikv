@@ -3,7 +3,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use api_version::ApiV2;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use futures::executor::block_on;
 use kvengine::{dfs::S3Fs, table::BIT_DELETE, WRITE_CF};
 use kvproto::metapb;
@@ -229,14 +229,12 @@ fn update_merged_engine_for_store(
                 Duration::from_secs(10),
             ))
             .unwrap();
-        let data_len = data.len();
+        let end_off = start_off + data.len() as u64;
         merged_engine
-            .update_wal(store_id, epoch, start_off, data)
+            .update_wal(store_id, epoch, start_off, end_off, data.reader())
             .unwrap();
         if status == http::StatusCode::PARTIAL_CONTENT {
-            merged_engine
-                .rotate_wal(store_id, epoch, start_off + data_len as u64)
-                .unwrap();
+            merged_engine.rotate_wal(store_id, epoch, end_off).unwrap();
             epoch += 1;
             start_off = 0;
             continue;

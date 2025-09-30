@@ -5,7 +5,7 @@ use std::{
     cmp,
     collections::hash_map::Entry,
     default::Default,
-    fmt, mem, ops,
+    fmt, fs, mem, ops,
     ops::Deref,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
@@ -797,6 +797,7 @@ impl BackupCluster {
                     fetch_wal_timeout,
                     archiving,
                     archive_store_meta,
+                    restore_conf.lower_memory,
                 );
                 if let Err(err) = &res {
                     warn!(
@@ -867,6 +868,7 @@ impl BackupCluster {
         fetch_wal_timeout: Duration,
         archiving: bool,
         archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
+        lower_memory: bool,
     ) -> Result<RfEngine> {
         let rlog_files = if let Some((date, store_meta)) = &archive_store_meta {
             ArchiveReader::read_store_rlog_files(&dfs, date, store_meta)?
@@ -892,6 +894,13 @@ impl BackupCluster {
 
         // When archiving, the dfs should have complete wal chunks.
         let complete_wal_chunks = archiving;
+        let cache_dir = if lower_memory {
+            let dir = Path::new(&conf.storage.data_dir).join("cache");
+            box_try!(fs::create_dir_all(&dir));
+            Some(dir)
+        } else {
+            None
+        };
         let ctx = ReplayWalLogsContext {
             pd_client,
             dfs,
@@ -901,6 +910,7 @@ impl BackupCluster {
             complete_wal_chunks,
             full_restore: false,
             fetch_wal_timeout,
+            cache_dir,
         };
         replay_wal_logs(tag, ctx, archive_store_meta, rlog_files.snap_epoch)?;
         Ok(rf_engine)
@@ -934,6 +944,7 @@ impl BackupCluster {
         fetch_wal_timeout: Duration,
         archiving: bool,
         archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
+        low_memory: bool,
     ) -> Result<RfEngine> {
         if cluster_backup.is_lightweight {
             Self::setup_raft_engine_for_lightweight(
@@ -947,6 +958,7 @@ impl BackupCluster {
                 fetch_wal_timeout,
                 archiving,
                 archive_store_meta,
+                low_memory,
             )
         } else {
             Self::setup_raft_engine_for_normal(store_id, cluster_backup, conf, dfs)

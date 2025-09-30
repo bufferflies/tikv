@@ -877,6 +877,7 @@ impl Config {
             max_retry: self.native_br.restore_max_retry,
             tolerate_err,
             coarse_split_regions_factor: self.native_br.restore_coarse_split_regions_factor,
+            lower_memory: self.native_br.lower_memory,
             ..Default::default()
         }
     }

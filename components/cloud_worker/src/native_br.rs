@@ -1080,6 +1080,9 @@ pub struct NativeBrConfig {
     pub restore_tolerate_err: bool,
 
     pub restore_concurrency_per_core: f64,
+
+    /// See `RestoreConfig::lower_memory`.
+    pub lower_memory: bool,
 }
 
 impl Default for NativeBrConfig {
@@ -1102,6 +1105,7 @@ impl Default for NativeBrConfig {
             backup_tolerate_err: false,
             restore_tolerate_err: false,
             restore_concurrency_per_core: 1.0,
+            lower_memory: false,
         }
     }
 }

@@ -10,7 +10,7 @@ use std::{
     collections::{
         hash_map::Entry as HashMapEntry, HashMap as StdHashMap, HashSet as StdHashSet, VecDeque,
     },
-    fmt, fs, mem, ops,
+    fmt, fs, io, mem, ops,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -49,6 +49,7 @@ use security::SecurityConfig;
 use serde_derive::{Deserialize, Serialize};
 use tikv::config::TikvConfig;
 use tikv_util::{
+    box_try,
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     debug, error, info, mpsc, warn,
 };
@@ -626,6 +627,8 @@ impl MergedEngine {
         let raft_db_path = Path::new(&store_config.raft_store.raftdb_path);
         let data_dir = Path::new(&store_config.storage.data_dir);
         let rf_engine = RfEngine::open(raft_db_path, &store_config.rfengine, Some(data_dir), None)?;
+        let cache_dir = store_path.join("cache");
+        box_try!(fs::create_dir_all(&cache_dir));
         let ctx = ReplayWalLogsContext {
             pd_client: ctx.pd.clone(),
             dfs: ctx.fs.clone(),
@@ -635,6 +638,7 @@ impl MergedEngine {
             complete_wal_chunks: false,
             full_restore: false,
             fetch_wal_timeout: ctx.config.timeout_fetch_wal.0,
+            cache_dir: Some(cache_dir),
         };
         let tag = &format!("merged_{}", store_id);
         replay_wal_logs_from_backup(tag, &ctx, rlog_files.snap_epoch)?;
@@ -727,32 +731,33 @@ impl MergedEngine {
         regions
     }
 
-    pub fn update_wal(
+    pub fn update_wal<R: io::Read>(
         &mut self,
         store_id: u64,
         epoch_id: u32,
-        offset: u64,
-        data: Bytes,
+        start_off: u64,
+        end_off: u64,
+        reader: R,
     ) -> Result<()> {
-        let cur_offset = if let Some(store_progress) = self.manifest.store_progresses.get(&store_id)
-        {
-            if store_progress.epoch != epoch_id || store_progress.offset != offset {
-                return Err(Error::StoreProgressMismatch(format!(
-                    "store {} expect ({}, {}), got ({}, {}), wal_len: {}",
+        if let Some(store_progress) = self.manifest.store_progresses.get(&store_id) {
+            if store_progress.epoch != epoch_id || store_progress.offset != start_off {
+                let err_msg = format!(
+                    "store {} expect ({}, {}), got ({}, {}), end_off: {}",
                     store_id,
                     epoch_id,
-                    offset,
+                    start_off,
                     store_progress.epoch,
                     store_progress.offset,
-                    data.len(),
-                )));
+                    end_off,
+                );
+                error!("{}", &err_msg);
+                debug_assert!(false);
+                return Err(Error::StoreProgressMismatch(err_msg));
             }
-            store_progress.offset
         } else {
             return Err(Error::StoreProgressNotFound(store_id));
         };
-        let new_offset = cur_offset + data.len() as u64;
-        let mut wal_iterator = WalIterator::new_from_chunks(data, epoch_id, offset);
+        let mut wal_iterator = WalIterator::new_from_reader(reader, epoch_id, start_off);
         let mut origin_batches = Vec::new();
         wal_iterator.iterate_write_batch(|origin_wb| {
             origin_batches.push(origin_wb);
@@ -811,7 +816,7 @@ impl MergedEngine {
             }
         }
         self.manifest
-            .update_store_progress(store_id, epoch_id, new_offset);
+            .update_store_progress(store_id, epoch_id, end_off);
         Ok(())
     }
 

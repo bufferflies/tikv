@@ -4,8 +4,10 @@ use std::{
     fmt::{self, Formatter},
     fs,
     fs::OpenOptions,
-    io, ops,
-    path::PathBuf,
+    io,
+    io::BufWriter,
+    ops,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -14,7 +16,7 @@ use std::{
 };
 
 use bstr::ByteSlice;
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use chrono::{NaiveTime, Utc};
 use collections::HashMap;
 use engine_traits::{GetObjectOptions, ObjectStorage};
@@ -27,9 +29,9 @@ use kvproto::{metapb, metapb::Store};
 use pd_client::{PdClient, RpcClient};
 use protobuf::Message;
 use rfengine::{
-    assemble_wal_chunks, find_latest_snapshot, get_integral_wal_chunks,
-    parse_epoch_from_snapshot_key, snapshot_store_meta_key, wal_chunk_file_prefix,
-    wal_chunk_file_suffix, RfEngine, WalChunkMeta, MAX_EPOCH_BACKWARD,
+    find_latest_snapshot, get_integral_wal_chunks, parse_epoch_from_snapshot_key,
+    snapshot_store_meta_key, wal_chunk_file_prefix, wal_chunk_file_suffix, RfEngine, WalChunkMeta,
+    MAX_EPOCH_BACKWARD,
 };
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::store::state::RaftState;
@@ -45,7 +47,7 @@ use crate::{
     backup::IncrementalBackupFile,
     error::{Error, HttpRequestError, Result},
     metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
-    wal::WalOnlineChunk,
+    wal::{AssembledWalData, LocalWalChunks, WalChunkData, WalOnlineChunk},
 };
 
 const MAX_S3_REQ_BATCH_SIZE: usize = 1024;
@@ -354,6 +356,7 @@ pub struct ReplayWalLogsContext<'a> {
     pub complete_wal_chunks: bool,
     pub full_restore: bool,
     pub fetch_wal_timeout: Duration,
+    pub cache_dir: Option<PathBuf>,
 }
 
 // TODO: Filter out the write batches of specified keyspace to replay to save
@@ -443,6 +446,7 @@ pub struct CollectWalChunksContext {
     pub store_id: u64,
     pub complete_wal_chunks: bool,
     pub fetch_wal_timeout: Duration,
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl From<&ReplayWalLogsContext<'_>> for CollectWalChunksContext {
@@ -453,6 +457,7 @@ impl From<&ReplayWalLogsContext<'_>> for CollectWalChunksContext {
             store_id: ctx.store_id,
             complete_wal_chunks: ctx.complete_wal_chunks,
             fetch_wal_timeout: ctx.fetch_wal_timeout,
+            cache_dir: ctx.cache_dir.clone(),
         }
     }
 }
@@ -464,7 +469,7 @@ pub fn collect_wal_chunks_with_retry(
     backup_epoch: u32,
     backup_offset: u64,
 ) -> Result<(
-    Vec<Bytes>,
+    Vec<WalChunkData>,
     Option<WalOnlineChunk>,
     bool, // has_last_chunk
 )> {
@@ -492,7 +497,18 @@ pub fn collect_wal_chunks_with_retry(
 
     let chunks_data = with_retry(
         tag,
-        || collect_all_chunk_files(ctx.dfs.as_ref(), epoch_id, chunk_metas.clone()),
+        || {
+            if let Some(cache_dir) = &ctx.cache_dir {
+                collect_all_chunk_files_with_cache_dir(
+                    ctx.dfs.as_ref(),
+                    epoch_id,
+                    chunk_metas.clone(),
+                    cache_dir,
+                )
+            } else {
+                collect_all_chunk_files(ctx.dfs.as_ref(), epoch_id, chunk_metas.clone())
+            }
+        },
         |err| {
             warn!("{} collect wal chunks: collect chunk files failed", tag; "err" => ?err);
             true
@@ -730,7 +746,7 @@ fn collect_all_chunk_files(
     dfs: &S3Fs,
     epoch_id: u32,
     chunk_metas: Vec<WalChunkMeta>,
-) -> Result<Vec<Bytes>> {
+) -> Result<Vec<WalChunkData>> {
     let chunk_keys_with_option = chunk_metas
         .into_iter()
         .map(|meta| (meta.key, GetObjectOptions::default()))
@@ -750,16 +766,69 @@ fn collect_all_chunk_files(
                 epoch_id,
                 data.len()
             );
-            data
+            WalChunkData::Memory(data)
         })
         .collect::<Vec<_>>();
     Ok(chunks_data)
 }
 
+fn collect_all_chunk_files_with_cache_dir(
+    dfs: &S3Fs,
+    epoch_id: u32,
+    chunk_metas: Vec<WalChunkMeta>,
+    cache_dir: &Path,
+) -> Result<Vec<WalChunkData>> {
+    let chunk_metas_with_option = chunk_metas
+        .into_iter()
+        .map(|chunk| (chunk, GetObjectOptions::default()))
+        .collect::<Vec<_>>();
+
+    let runtime = dfs.get_runtime();
+    let mut chunks = runtime.block_on(get_objects_to_files(
+        dfs,
+        chunk_metas_with_option,
+        cache_dir,
+    ))?;
+    chunks.sort_by(|a, b| a.0.start_off.cmp(&b.0.start_off));
+    let chunks_data = chunks
+        .into_iter()
+        .map(|(meta, local_obj)| {
+            info!(
+                "collect wal chunk file {} epoch {} size {} (to local)",
+                meta.key, epoch_id, local_obj.len
+            );
+            WalChunkData::LocalFile { meta, local_obj }
+        })
+        .collect::<Vec<_>>();
+    Ok(chunks_data)
+}
+
+pub fn assemble_wal_chunks(chunks: Vec<WalChunkData>) -> Result<AssembledWalData> {
+    if chunks.is_empty() {
+        return Ok(AssembledWalData::BytesMut(BytesMut::new()));
+    }
+
+    let in_memory = chunks.first().unwrap().in_memory();
+    Ok(if in_memory {
+        let memory_chunks = chunks
+            .into_iter()
+            .map(|c| c.must_get_bytes())
+            .collect::<Vec<_>>();
+        let epoch_wal = rfengine::assemble_wal_chunks(memory_chunks)?;
+        AssembledWalData::BytesMut(epoch_wal)
+    } else {
+        let wal_chunks = chunks
+            .into_iter()
+            .map(|x| x.must_into_local_file())
+            .collect::<Vec<_>>();
+        AssembledWalData::LocalChunks(LocalWalChunks::new(wal_chunks))
+    })
+}
+
 fn replay_wal_chunks(
     tag: &str,
     ctx: &ReplayWalLogsContext<'_>,
-    chunks: Vec<Bytes>,
+    chunks: Vec<WalChunkData>,
     online_chunk: Option<WalOnlineChunk>,
     epoch_id: u32,
     backup_epoch: u32,
@@ -778,7 +847,7 @@ fn replay_wal_chunks(
 
     let end_offset = if backup_epoch == epoch_id {
         if let Some(online_chunk) = online_chunk {
-            epoch_wal.extend(online_chunk.data);
+            epoch_wal.push_online_chunk(online_chunk);
             if backup_offset != epoch_wal.len() as u64 {
                 error!("{} replay wal chunks: unexpected length of epoch WAL", tag;
                     "epoch" => epoch_id, "epoch_wal" => epoch_wal.len(),
@@ -804,7 +873,8 @@ fn replay_wal_chunks(
         epoch_wal.len(),
         end_offset
     );
-    let wal_reader = Box::new(epoch_wal.freeze().reader());
+    epoch_wal.freeze();
+    let wal_reader = epoch_wal.reader();
     ctx.rf_engine
         .replay_wal_file(wal_reader, epoch_id, end_offset, ctx.full_restore)?;
 
@@ -1004,6 +1074,7 @@ pub fn collect_store_wal_rlog_files(
         store_id,
         complete_wal_chunks: true,
         fetch_wal_timeout: timeout,
+        cache_dir: None, // TODO: cache_dir
     };
     // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found, the
     // `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
@@ -1011,6 +1082,10 @@ pub fn collect_store_wal_rlog_files(
         let (epoch_wals, online_chunk, _) =
             collect_wal_chunks_with_retry(tag, &ctx, epoch_id, backup_epoch, backup_offset)?;
         debug_assert!(online_chunk.is_none());
+        let epoch_wals = epoch_wals
+            .into_iter()
+            .map(|c| c.must_get_bytes())
+            .collect::<Vec<_>>();
         wals.push((epoch_id, epoch_wals))
     }
 
@@ -1317,4 +1392,64 @@ impl io::Write for TempLocalObject {
     fn flush(&mut self) -> io::Result<()> {
         self.object.file(false)?.flush()
     }
+}
+
+pub trait ObjectMeta {
+    fn key(&self) -> &str;
+}
+
+impl ObjectMeta for WalChunkMeta {
+    fn key(&self) -> &str {
+        &self.key
+    }
+}
+
+// Note: The order of metas in result will change.
+pub async fn get_objects_to_files<M>(
+    dfs: &S3Fs,
+    metas: Vec<(M, GetObjectOptions)>,
+    dir: &Path,
+) -> Result<Vec<(M, TempLocalObject)>>
+where
+    M: ObjectMeta + Clone + Send + 'static,
+{
+    let get_object = |meta: M, opts: GetObjectOptions| {
+        let meta_key = meta.key().to_string();
+        let full_key = format!("{}/{}", dfs.get_prefix(), meta_key);
+        let path = dir.join(meta_key.replace('/', "_"));
+        let dfs = dfs.clone();
+        async move {
+            let temp_obj = box_try!(TempLocalObject::create(path));
+            let mut writer = BufWriter::new(temp_obj);
+            match dfs
+                .get_object_to_writer(full_key, meta_key, opts, &mut writer)
+                .await
+            {
+                Ok(len) => {
+                    let temp_obj = box_try!(writer.into_inner()); // Writer will flush here.
+                    debug_assert_eq!(temp_obj.len, len);
+                    Ok((meta, temp_obj))
+                }
+                Err(err) => Err(Error::DfsError(err)),
+            }
+        }
+    };
+
+    if metas.len() == 1 {
+        let mut metas = metas;
+        let (key, opts) = metas.pop().unwrap();
+        return get_object(key, opts).await.map(|res| vec![res]);
+    }
+
+    let mut join_set = tokio::task::JoinSet::new();
+    for (meta, opts) in metas {
+        join_set.spawn_on(get_object(meta, opts), dfs.get_runtime().handle());
+    }
+
+    let mut objects = vec![];
+    while let Some(res) = join_set.join_next().await {
+        let res = res.expect("task panic")?;
+        objects.push(res);
+    }
+    Ok(objects)
 }

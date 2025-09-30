@@ -12,7 +12,7 @@ use std::{
 };
 
 use api_version::ApiV2;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use cdc::{CdcEvent, Conn, ConnId};
 use collections::{HashMap, HashSet};
 use futures::executor::block_on;
@@ -37,15 +37,19 @@ use kvproto::{
 };
 use log_wrappers::Value as LogValue;
 use merged_engine::{MergedEngine, MergedEngineContext, StoreProgress};
-use native_br::common::{
-    collect_wal_chunks_with_retry, get_latest_backup_meta, CollectWalChunksContext,
+use native_br::{
+    common::{
+        assemble_wal_chunks, collect_wal_chunks_with_retry, get_latest_backup_meta,
+        CollectWalChunksContext,
+    },
+    wal::AssembledWalData,
 };
 use pd_client::{util::get_all_stores_except_tiflash, PdClient, RegionStat};
-use rfengine::{assemble_wal_chunks, RfEngine, TRUNCATE_ALL_INDEX};
+use rfengine::{RfEngine, TRUNCATE_ALL_INDEX};
 use rfstore::store::ApplyContext;
 use security::{HttpClient, SecurityConfig};
 use tikv_util::{
-    box_err, codec, debug, error, info,
+    box_err, box_try, codec, debug, error, info,
     mpsc::{Receiver, Sender},
     thd_name,
     time::Instant,
@@ -64,7 +68,7 @@ use crate::{
         build_request_range_for_keyspace, keyspace_prefix_len, post_to_ticdc,
         send_request_to_store, DISPATCH_CDC_TIMEOUT,
     },
-    wal::{StoreWalProgresses, WalProgressFetcher, WalProgressTargets},
+    wal::{StoreWalProgresses, WalCache, WalProgressFetcher, WalProgressTargets},
     CdcMsg, Deregister, Error, KeyspaceService, KeyspaceStates, ReplicationScheduler,
     ReplicationService, ReplicationWorkerConfig, Result,
 };
@@ -101,7 +105,9 @@ pub struct ReplicationWorker {
 
     last_update_ts: TimeStamp,
     wal_progress_targets: WalProgressTargets,
+    wal_cache: WalCache,
 
+    working_dir: PathBuf,
     stop: bool,
 }
 
@@ -115,7 +121,9 @@ impl ReplicationWorker {
     ) -> Result<Self> {
         let data_dir = PathBuf::from(data_dir);
         let merged_engine_dir = data_dir.join("merged_engine");
-        fs::create_dir_all(merged_engine_dir.as_path()).unwrap();
+        box_try!(fs::create_dir_all(&merged_engine_dir));
+        let worker_dir = data_dir.join("rep_worker");
+        box_try!(fs::create_dir_all(&worker_dir));
         let master_key = fs.get_runtime().block_on(security.new_master_key());
         let ctx = MergedEngineContext {
             pd,
@@ -214,6 +222,8 @@ impl ReplicationWorker {
             resolved_regions: Default::default(),
             last_update_ts: backup_ts,
             wal_progress_targets: WalProgressTargets::default(),
+            wal_cache: WalCache::default(),
+            working_dir: worker_dir,
             stop: false,
         };
         let env = Arc::new(
@@ -968,9 +978,9 @@ impl ReplicationWorker {
                 let err_str = String::from_utf8_lossy(&data);
                 return Err(box_err!("{}", err_str));
             }
-            let data_len = data.len();
+            let end_off = start_off + data.len() as u64;
             self.merged_engine
-                .update_wal(store_id, epoch, start_off, data.clone())?;
+                .update_wal(store_id, epoch, start_off, end_off, data.reader())?;
             let rotate = if epoch < target.epoch {
                 debug_assert_eq!(status, StatusCode::PARTIAL_CONTENT);
                 true
@@ -979,8 +989,7 @@ impl ReplicationWorker {
                 status == StatusCode::OK
             };
             if rotate {
-                self.merged_engine
-                    .rotate_wal(store_id, epoch, start_off + data_len as u64)?;
+                self.merged_engine.rotate_wal(store_id, epoch, end_off)?;
             }
             (epoch, start_off) = next_epoch_offset(epoch, end_off, rotate);
         }
@@ -996,37 +1005,62 @@ impl ReplicationWorker {
     ) -> Result<bool /* rotated */> {
         info!("update_store_wal_from_s3"; "store" => store_id,
             "epoch" => epoch_id, "start" => start_off, "target" => %target);
+        let wal_data = match self.wal_cache.get_mut(store_id, epoch_id) {
+            Some(wal_data) => wal_data,
+            None => {
+                let wal_data = self.fetch_store_wal_complete_epoch_from_s3(store_id, epoch_id)?;
+                self.wal_cache.insert(store_id, epoch_id, wal_data);
+                self.wal_cache.get_mut(store_id, epoch_id).unwrap()
+            }
+        };
+        debug_assert!(wal_data.must_get_local_chunks().has_last_chunk());
+        let end_off = if epoch_id == target.epoch {
+            target.offset
+        } else {
+            wal_data.len()
+        };
+        let reader = box_try!(wal_data.range_reader(start_off, end_off));
+        self.merged_engine
+            .update_wal(store_id, epoch_id, start_off, end_off, reader)?;
+        let rotate = end_off == wal_data.len(); // `wal_data` must be a complete epoch.
+        if rotate {
+            self.wal_cache.remove_cache(store_id);
+            self.merged_engine.rotate_wal(store_id, epoch_id, end_off)?;
+        }
+        Ok(rotate)
+    }
+
+    // Fetch the complete WAL of the epoch.
+    fn fetch_store_wal_complete_epoch_from_s3(
+        &mut self,
+        store_id: u64,
+        epoch_id: u32,
+    ) -> Result<AssembledWalData> {
+        info!("fetch_store_wal_from_s3"; "store" => store_id, "epoch" => epoch_id);
+        let cache_dir = self.store_working_dir(store_id).join("cache");
+        if !self.wal_cache.contains_store(store_id) {
+            box_try!(fs::create_dir_all(&cache_dir));
+        }
+
         let collect_ctx = CollectWalChunksContext {
             pd_client: self.ctx.pd.clone(),
             dfs: self.ctx.fs.clone(),
             store_id,
             complete_wal_chunks: true,
             fetch_wal_timeout: FETCH_WAL_TIMEOUT,
+            cache_dir: Some(cache_dir),
         };
         let tag = format!("{}:{}", store_id, epoch_id);
         // there is no online chunk for this epoch.
-        let (chunks, online_chunk, has_last_chunk) = collect_wal_chunks_with_retry(
-            &tag,
-            &collect_ctx,
-            epoch_id,
-            target.epoch,
-            target.offset,
-        )
-        .map_err(|e| Error::from(e))?;
+        let (chunks, online_chunk, has_last_chunk) =
+            collect_wal_chunks_with_retry(&tag, &collect_ctx, epoch_id, epoch_id, u64::MAX)?;
         debug_assert!(online_chunk.is_none());
-        if epoch_id < target.epoch {
-            debug_assert!(has_last_chunk);
-        }
-        let rotate = has_last_chunk;
-        let wal_data = assemble_wal_chunks(chunks)?.freeze();
-        let end_off = wal_data.len() as u64;
-        let remained_wal_data = wal_data.slice((start_off as usize)..);
-        self.merged_engine
-            .update_wal(store_id, epoch_id, start_off, remained_wal_data)?;
-        if rotate {
-            self.merged_engine.rotate_wal(store_id, epoch_id, end_off)?;
-        }
-        Ok(rotate)
+        debug_assert!(has_last_chunk);
+
+        // Assemble WAL chunks.
+        let mut epoch_wal = assemble_wal_chunks(chunks)?;
+        epoch_wal.freeze();
+        Ok(epoch_wal)
     }
 
     fn report_store_to_pd(pd_client: &Arc<dyn PdClient>, store_id: u64) {
@@ -1511,6 +1545,10 @@ impl ReplicationWorker {
     fn remove_region(&mut self, region_id: u64) {
         self.region_to_keyspace.remove(&region_id);
         self.region_delegates.remove(&region_id);
+    }
+
+    fn store_working_dir(&self, store_id: u64) -> PathBuf {
+        self.working_dir.join(store_id.to_string())
     }
 }
 

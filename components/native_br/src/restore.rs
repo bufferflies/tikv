@@ -1,6 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -18,6 +19,7 @@ use rfstore::store::{load_raft_engine_meta, load_region_state};
 use security::{GetSecurityManager, SecurityConfig};
 use tikv::config::TikvConfig;
 use tikv_util::{
+    box_try,
     config::{ensure_dir_exist, ReadableDuration, ReadableSize},
     debug, info, warn,
 };
@@ -116,6 +118,7 @@ pub fn restore_tikv(
             &tikv_conf,
             path,
             Arc::new(s3fs),
+            config.lower_memory,
         )
         .unwrap();
 
@@ -244,6 +247,7 @@ fn setup_raft_engine(
     conf: &TikvConfig,
     path: &str,
     dfs: Arc<S3Fs>,
+    lower_memory: bool,
 ) -> Result<()> {
     let snap_epoch_opt = if lightweight {
         let rlog_files = collect_snapshot_meta_rlog_files(
@@ -277,6 +281,13 @@ fn setup_raft_engine(
     rf_engine.set_engine_id(store_id);
 
     if lightweight {
+        let cache_dir = if lower_memory {
+            let dir = Path::new(&conf.storage.data_dir).join("cache");
+            box_try!(fs::create_dir_all(&dir));
+            Some(dir)
+        } else {
+            None
+        };
         let ctx = ReplayWalLogsContext {
             pd_client: Arc::new(MockPdClient {}),
             dfs,
@@ -287,6 +298,7 @@ fn setup_raft_engine(
             full_restore: true,
             fetch_wal_timeout: Duration::from_secs(1), /* NOTE: Retry is unnecessary for full
                                                         * restoration. */
+            cache_dir,
         };
         replay_wal_logs_from_backup(tag, &ctx, snap_epoch_opt.unwrap())?;
     }
@@ -491,6 +503,9 @@ pub struct RestoreConfig {
     /// Coarse split regions when the target region cover more than the factor *
     /// number of regions in backup.
     pub coarse_split_regions_factor: usize,
+
+    /// Whether to use lower memory (by cache remote WAL chunks in local disks).
+    pub lower_memory: bool,
 }
 
 impl Default for RestoreConfig {
@@ -511,6 +526,7 @@ impl Default for RestoreConfig {
             strict_tolerate: false,
             store_concurrency: RESTORE_RFENGINE_CONCURRENCY,
             coarse_split_regions_factor: 64, // It's about 32 GiB when region size is 500 MiB.
+            lower_memory: false,
         }
     }
 }

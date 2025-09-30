@@ -481,6 +481,10 @@ impl ReservableWriter for std::fs::File {
     fn reserve_capacity(&mut self, _additional: u64) {}
 }
 
+impl<W: std::io::Write> ReservableWriter for std::io::BufWriter<W> {
+    fn reserve_capacity(&mut self, _additional: u64) {}
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::MetadataExt;

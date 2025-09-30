@@ -1,8 +1,5 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-// TODO: remove this.
-#![allow(dead_code)]
-
 use std::{fmt, io, io::Read, os::unix::fs::FileExt, sync::Arc};
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -76,6 +73,14 @@ impl AssembledWalData {
             Self::BytesMut(bytes_mut) => bytes_mut.is_empty(),
             Self::Bytes(bytes) => bytes.is_empty(),
             Self::LocalChunks(chunks) => chunks.is_empty(),
+        }
+    }
+
+    pub fn must_get_local_chunks(&self) -> &LocalWalChunks {
+        match self {
+            Self::BytesMut(_) => unreachable!(),
+            Self::Bytes(_) => unreachable!(),
+            Self::LocalChunks(chunks) => chunks,
         }
     }
 
@@ -197,6 +202,10 @@ impl LocalWalChunks {
             current_chunk_idx: None,
             current_chunk: None,
         }
+    }
+
+    pub fn has_last_chunk(&self) -> bool {
+        self.online_chunk.is_none() && self.metas.last().is_some_and(|x| x.last)
     }
 }
 

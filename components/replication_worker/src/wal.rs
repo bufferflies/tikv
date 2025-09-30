@@ -5,6 +5,7 @@ use std::{collections::VecDeque, sync::Arc, time::Duration};
 use collections::{HashMap, HashMapExt};
 use kvproto::metapb;
 use merged_engine::StoreProgress;
+use native_br::wal::AssembledWalData;
 use parking_lot::Mutex;
 use pd_client::{util::get_all_stores_except_tiflash_async, PdClient};
 use rfengine::service_worker::WalProgress;
@@ -171,5 +172,36 @@ impl WalProgressFetcher {
             epoch: progress.epoch,
             offset: progress.offset,
         })
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct WalCache {
+    inner: HashMap<u64 /* store_id */, Option<(u32 /* epoch_id */, AssembledWalData)>>,
+}
+
+impl WalCache {
+    pub(crate) fn get_mut(&mut self, store_id: u64, epoch: u32) -> Option<&mut AssembledWalData> {
+        let entry = self.inner.get_mut(&store_id)?.as_mut()?;
+        if entry.0 != epoch {
+            debug_assert!(false);
+            None
+        } else {
+            Some(&mut entry.1)
+        }
+    }
+
+    pub(crate) fn insert(&mut self, store_id: u64, epoch: u32, wal_data: AssembledWalData) {
+        self.inner.insert(store_id, Some((epoch, wal_data)));
+    }
+
+    pub(crate) fn remove_cache(&mut self, store_id: u64) {
+        if let Some(entry) = self.inner.get_mut(&store_id) {
+            entry.take();
+        }
+    }
+
+    pub(crate) fn contains_store(&self, store_id: u64) -> bool {
+        self.inner.contains_key(&store_id)
     }
 }
