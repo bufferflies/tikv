@@ -187,8 +187,8 @@ impl Default for FlowControlOptions {
             enable: false,
             soft_region_mem_limit: DEFAULT_SOFT_REGION_MEM_USAGE_LIMIT_MB << 20,
             hard_region_mem_limit: DEFAULT_HARD_REGION_MEM_USAGE_LIMIT_MB << 20,
-            soft_region_l0table_size_limit: DEFAULT_BASE_SIZE * 4,
-            hard_region_l0table_size_limit: DEFAULT_BASE_SIZE * 16,
+            soft_region_l0table_size_limit: DEFAULT_SOFT_REGION_MEM_USAGE_LIMIT_MB << 20,
+            hard_region_l0table_size_limit: DEFAULT_HARD_REGION_MEM_USAGE_LIMIT_MB << 20,
             max_region_speed_limit: DEFAULT_MAX_REGION_SPEED_LIMIT_MB_PER_SEC << 20,
             min_region_speed_limit: DEFAULT_MIN_REGION_SPEED_LIMIT_MB_PER_SEC << 20,
         }

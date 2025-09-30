@@ -6,11 +6,11 @@ use std::{
     time::Duration,
 };
 
-use prometheus::IntGauge;
+use prometheus::{IntCounter, IntGauge};
 use tikv_util::time::{Instant, Limiter};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::{metrics::ENGINE_THROTTLE_ACTION_COUNTER, KvEngineConfig, ShardTag};
+use crate::{metrics::ENGINE_LIMITER_THROTTLE_COUNTER, KvEngineConfig, ShardTag};
 
 /// All members are in bytes.
 #[derive(Clone, Default, Debug)]
@@ -49,7 +49,7 @@ impl LimiterTypeTrait for RegionL0Table {
     const TAG: &'static str = "region-l0table";
 }
 
-struct LimiterMetrics {
+struct StoreMetrics {
     speed_metric: IntGauge,
     last_record_time: Mutex<Instant>,
 }
@@ -59,7 +59,8 @@ struct LimiterMetrics {
 pub struct WriteRateLimiter<Ty: LimiterTypeTrait> {
     options: LimiterOptions,
     limiter: Arc<Limiter>,
-    metrics: Option<Arc<LimiterMetrics>>,
+    store_metrics: Option<Arc<StoreMetrics>>,
+    throttle_metric: IntCounter,
     _phantom: PhantomData<Ty>,
 }
 
@@ -89,7 +90,11 @@ impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
     }
 
     pub fn consume(&self, _region_id: u64, bytes: usize) -> Duration {
-        self.limiter.consume_duration(bytes)
+        let dur = self.limiter.consume_duration(bytes);
+        if !dur.is_zero() {
+            self.throttle_metric.inc();
+        }
+        dur
     }
 
     pub fn unconsume(&self, _region_id: u64, bytes: usize) {
@@ -131,16 +136,18 @@ impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
                 .refill(Duration::from_millis(1))
                 .build(),
         );
-        let metrics = speed_metric.map(|speed_metric| {
-            Arc::new(LimiterMetrics {
+        let store_metrics = speed_metric.map(|speed_metric| {
+            Arc::new(StoreMetrics {
                 speed_metric,
                 last_record_time: Mutex::new(Instant::now_coarse()),
             })
         });
+        let throttle_metric = ENGINE_LIMITER_THROTTLE_COUNTER.with_label_values(&[Ty::TAG]);
         Self {
             options,
             limiter,
-            metrics,
+            store_metrics,
+            throttle_metric,
             _phantom: PhantomData,
         }
     }
@@ -153,26 +160,14 @@ impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
         Self::new_impl(options, None)
     }
 
-    fn update_speed_limit(&self, tag: &ShardTag, throttle: f64) {
-        let pre = self.limiter.speed_limit();
+    fn update_speed_limit(&self, throttle: f64) {
+        self.limiter.speed_limit();
         self.limiter.set_speed_limit(throttle);
-
-        if pre.is_infinite() && throttle.is_finite() {
-            info!("{} {}: start_throttle", tag, Ty::TAG; "throttle" => throttle);
-            ENGINE_THROTTLE_ACTION_COUNTER
-                .with_label_values(&[Ty::TAG, "start_throttle"])
-                .inc();
-        } else if pre.is_finite() && throttle.is_infinite() {
-            info!("{} {}: stop_throttle", tag, Ty::TAG; "pre_throttle" => pre);
-            ENGINE_THROTTLE_ACTION_COUNTER
-                .with_label_values(&[Ty::TAG, "stop_throttle"])
-                .inc();
-        }
         self.update_statistics();
     }
 
     fn update_statistics(&self) {
-        if let Some(metrics) = self.metrics.as_ref() {
+        if let Some(metrics) = self.store_metrics.as_ref() {
             let mut last_record_time = metrics.last_record_time.lock().unwrap();
             let dur = last_record_time.saturating_elapsed_secs();
             if dur < f64::EPSILON {
@@ -212,7 +207,7 @@ impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
                 "throttle" => throttle,
             );
         }
-        self.update_speed_limit(tag, throttle);
+        self.update_speed_limit(throttle);
     }
 
     /// Calculate throttle according to current usage.

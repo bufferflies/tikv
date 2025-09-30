@@ -52,10 +52,10 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
-    pub static ref ENGINE_THROTTLE_ACTION_COUNTER: IntCounterVec = register_int_counter_vec!(
-        "kv_engine_throttle_action_total",
-        "Total number of actions for flow control.",
-        &["limiter", "action"]
+    pub static ref ENGINE_LIMITER_THROTTLE_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "kv_engine_limiter_throttle_counter",
+        "Counter when throttle happens.",
+        &["limiter"]
     )
     .unwrap();
     pub static ref ENGINE_REGION_HUGE_MEM_TABLE_BYTES_HISTOGRAM: Histogram = register_histogram!(

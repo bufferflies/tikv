@@ -218,10 +218,10 @@ pub struct FlowControlConfig {
     pub soft_region_mem_limit: ReadableSize,
     #[online_config(skip)]
     pub hard_region_mem_limit: ReadableSize,
-    // Region level flow controls for L0 table size, defaults to 4 x LSM base_size.
+    // Region level flow controls for L0 table size, defaults to the same as soft_region_mem_limit.
     #[online_config(skip)]
     pub soft_region_l0table_size_limit: Option<ReadableSize>,
-    // Region level flow controls for L0 table size, defaults to 16 x LSM base_size.
+    // Region level flow controls for L0 table size, defaults to the same as hard_region_mem_limit.
     #[online_config(skip)]
     pub hard_region_l0table_size_limit: Option<ReadableSize>,
     // Max speed limit of single region when size of memory usage reaches `soft_region_mem_limit`,

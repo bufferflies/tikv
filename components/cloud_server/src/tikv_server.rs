@@ -1116,10 +1116,12 @@ impl TikvServer {
         kv_opts.flow_control.hard_region_mem_limit = flow_control.hard_region_mem_limit.0;
         kv_opts.flow_control.soft_region_l0table_size_limit = flow_control
             .soft_region_l0table_size_limit
-            .map_or(kv_opts.base_size * 4, |x| x.0);
+            .unwrap_or(flow_control.soft_region_mem_limit)
+            .0;
         kv_opts.flow_control.hard_region_l0table_size_limit = flow_control
             .hard_region_l0table_size_limit
-            .map_or(kv_opts.base_size * 16, |x| x.0);
+            .unwrap_or(flow_control.hard_region_mem_limit)
+            .0;
         kv_opts.flow_control.max_region_speed_limit = flow_control.max_region_speed_limit.0;
         kv_opts.flow_control.min_region_speed_limit = flow_control.min_region_speed_limit.0;
 
