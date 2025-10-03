@@ -133,6 +133,13 @@ impl Engine {
             .map(|l0| l0.id())
             .collect();
         for new_shard in &new_shards {
+            if is_whole_keyspace_range(
+                new_shard.range.outer_start.chunk(),
+                new_shard.range.outer_end.chunk(),
+            ) {
+                // The newly split keyspace should be empty.
+                continue;
+            }
             let new_mem_tbls = new_shard.split_mem_tables(&old_data.mem_tbls);
             let mut new_l0s = vec![];
             let mut new_unconverted_l0s = vec![];

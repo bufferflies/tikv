@@ -25,7 +25,7 @@ use test_cloud_server::{
 };
 use test_util::init_log_for_test;
 use tikv::storage::{mvcc::CloudReader, txn::CloudStoreScanner, Scanner};
-use tikv_util::config::ReadableSize;
+use tikv_util::{codec::bytes::encode_bytes, config::ReadableSize};
 use txn_types::{Key, TsSet};
 
 use crate::alloc_node_id;
@@ -73,6 +73,29 @@ fn test_split_by_key() {
     let _ = try_wait(|| engine.get_all_shard_id_vers().len() == 5, 10);
     let shard_stats = engine.get_all_shard_stats();
     assert!(shard_stats.len() == 5, "{:?}", &shard_stats);
+    cluster.stop();
+}
+
+#[test]
+fn test_split_whole_keyspace() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let mut cluster = ServerCluster::new(vec![node_id], |_, _| {});
+    let mut client = cluster.new_client();
+    let default_keyspace_i_to_key =
+        |i: usize| -> Vec<u8> { format!("t123key_{:05}", i).into_bytes() };
+    client.put_kv(0..10, default_keyspace_i_to_key, i_to_val);
+    client.split_keyspace(1);
+    cluster.wait_pd_region_count(3);
+    let pd_client = cluster.get_pd_client();
+    let keyspace_prefix = ApiV2::get_txn_keyspace_prefix(1);
+    let region = pd_client
+        .get_region(&encode_bytes(&keyspace_prefix))
+        .unwrap();
+    let kv = cluster.get_kvengine(node_id);
+    let shard = kv.get_shard(region.id).unwrap();
+    let stats = shard.get_stats();
+    assert_eq!(stats.kv_size, 0);
     cluster.stop();
 }
 
