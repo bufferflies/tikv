@@ -2702,7 +2702,8 @@ pub async fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
         }) => match spec {
             InPlaceCompaction::DestroyRange(del_prefix) => {
                 let row_tb = if !file_ids.is_empty() {
-                    compact_destroy_range(ctx, *block_size, file_ids, del_prefix).await?
+                    compact_destroy_range(ctx, *block_size, file_ids, &mut id_allocator, del_prefix)
+                        .await?
                 } else {
                     pb::TableChange::new()
                 };
@@ -2724,7 +2725,7 @@ pub async fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
             }
             InPlaceCompaction::TrimOverBound => {
                 let row_tb = if !file_ids.is_empty() {
-                    compact_trim_over_bound(ctx, *block_size, file_ids).await?
+                    compact_trim_over_bound(ctx, *block_size, file_ids, &mut id_allocator).await?
                 } else {
                     pb::TableChange::new()
                 };
@@ -2745,7 +2746,8 @@ pub async fn local_compact(ctx: &CompactionCtx) -> Result<pb::ChangeSet> {
             }
             InPlaceCompaction::TruncateTs(truncate_ts) => {
                 let row_tb = if !file_ids.is_empty() {
-                    compact_truncate_ts(ctx, *block_size, file_ids, *truncate_ts).await?
+                    compact_truncate_ts(ctx, *block_size, file_ids, &mut id_allocator, *truncate_ts)
+                        .await?
                 } else {
                     pb::TableChange::new()
                 };
@@ -2801,6 +2803,7 @@ async fn compact_destroy_range(
     ctx: &CompactionCtx,
     block_size: usize,
     files: &[(u64, u32, i32)],
+    id_allocator: &mut LocalIdAllocator,
     del_prefix: &[u8],
 ) -> Result<pb::TableChange> {
     let req = &ctx.req;
@@ -2828,7 +2831,8 @@ async fn compact_destroy_range(
     let mut creates = vec![];
     let del_prefixes = DeletePrefixes::unmarshal(del_prefix, req.keyspace_id());
     let mut tasks = Vec::with_capacity(req.file_ids.len());
-    for (&(id, level, cf), &new_id) in files.iter().zip(req.file_ids.iter()) {
+    for &(id, level, cf) in files.iter() {
+        let new_id = id_allocator.alloc_id().await;
         let mut delete = pb::TableDelete::new();
         delete.set_id(id);
         delete.set_level(level);
@@ -3072,6 +3076,7 @@ async fn compact_truncate_ts(
     ctx: &CompactionCtx,
     block_size: usize,
     files: &[(u64, u32, i32)],
+    id_allocator: &mut LocalIdAllocator,
     truncate_ts: u64,
 ) -> Result<pb::TableChange> {
     let req = &ctx.req;
@@ -3097,7 +3102,8 @@ async fn compact_truncate_ts(
     let mut deletes = vec![];
     let mut creates = vec![];
     let mut tasks = Vec::with_capacity(req.file_ids.len());
-    for (&(id, level, cf), &new_id) in files.iter().zip(req.file_ids.iter()) {
+    for &(id, level, cf) in files.iter() {
+        let new_id = id_allocator.alloc_id().await;
         let file = table_files.remove(&id).unwrap();
         let mut delete = pb::TableDelete::new();
         delete.set_id(id);
@@ -3325,6 +3331,7 @@ async fn compact_trim_over_bound(
     ctx: &CompactionCtx,
     block_size: usize,
     files: &[(u64, u32, i32)],
+    id_allocator: &mut LocalIdAllocator,
 ) -> Result<pb::TableChange> {
     let req = &ctx.req;
     let dfs = &ctx.dfs;
@@ -3350,7 +3357,8 @@ async fn compact_trim_over_bound(
     let mut deletes = vec![];
     let mut creates = vec![];
     let mut tasks = Vec::with_capacity(req.file_ids.len());
-    for (&(id, level, cf), &new_id) in files.iter().zip(req.file_ids.iter()) {
+    for &(id, level, cf) in files.iter() {
+        let new_id = id_allocator.alloc_id().await;
         let file = table_files.remove(&id).unwrap();
 
         let mut delete = pb::TableDelete::new();
