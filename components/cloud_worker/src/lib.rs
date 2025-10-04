@@ -157,6 +157,10 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
             _ = close_rx => {}
         }
     });
+    if let Some(thd_pool_rt) = Arc::into_inner(thread_pool) {
+        // The final referee could shutdown all background tasks.
+        thd_pool_rt.shutdown_background();
+    }
 }
 
 // `config_file_path`: optional path to the config file which cloud_worker will
