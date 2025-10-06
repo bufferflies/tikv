@@ -445,7 +445,7 @@ impl Dfs for LocalFs {
         let mut fd = std::fs::File::open(local_file_name).dfs_ctx(file_id, "open")?;
         let buf = if let Some(end_off) = opts.end_off {
             let mut buf = vec![0; (end_off - opts.start_off) as usize];
-            fd.read_at(&mut buf, opts.start_off)
+            fd.read_exact_at(&mut buf, opts.start_off)
                 .dfs_ctx(file_id, "read")?;
             buf
         } else {

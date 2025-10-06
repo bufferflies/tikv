@@ -1302,12 +1302,12 @@ pub fn restore(
         let wal_path = wal_file_name(dir, store_meta.get_manifest().epoch_id + 1);
         let file = OpenOptions::new().write(true).open(wal_path).unwrap();
         for (i, (_, data)) in objects.into_iter().enumerate() {
-            file.write_at(&data, store_meta.get_wal_chunks()[i].start_off)
+            file.write_all_at(&data, store_meta.get_wal_chunks()[i].start_off)
                 .unwrap();
         }
         let end_off = wal_chunks.last().unwrap().end_off;
         let eof = vec![0u8; 4096];
-        file.write_at(&eof, end_off).unwrap();
+        file.write_all_at(&eof, end_off).unwrap();
         file.sync_data().unwrap();
     }
     match keyspace {

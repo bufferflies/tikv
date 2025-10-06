@@ -639,7 +639,7 @@ impl EngineCore {
         let mut f = fs::File::open(path).table_ctx(id, "read_local_file.open")?;
         if let Some(end_off) = end_off {
             let mut buf = vec![0; (end_off - start_off) as usize];
-            f.read_at(&mut buf, start_off).dfs_ctx(id, "read")?;
+            f.read_exact_at(&mut buf, start_off).dfs_ctx(id, "read")?;
             Ok(buf.into())
         } else {
             if start_off > 0 {
