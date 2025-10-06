@@ -221,14 +221,14 @@ impl File for LocalFile {
     fn read(&self, off: u64, length: usize) -> table::Result<Bytes> {
         let mut buf = vec![0; length];
         let fd = self.get_file()?;
-        fd.read_at(&mut buf, off)
+        fd.read_exact_at(&mut buf, off)
             .table_ctx(self.id(), "local.read")?;
         Ok(Bytes::from(buf))
     }
 
     fn read_at(&self, buf: &mut [u8], offset: u64) -> table::Result<()> {
         let fd = self.get_file()?;
-        fd.read_at(buf, offset)
+        fd.read_exact_at(buf, offset)
             .table_ctx(self.id(), "local.read_at")?;
         Ok(())
     }

@@ -296,9 +296,9 @@ pub(crate) fn persist_change_set(
     let mut header_buf = Vec::with_capacity(8);
     header_buf.put_u32_le(crc32c::crc32c(&buf));
     header_buf.put_u32_le(buf.len() as u32);
-    file.write_at(&header_buf, offset)?;
+    file.write_all_at(&header_buf, offset)?;
     offset += 8;
-    file.write_at(&buf, offset)?;
+    file.write_all_at(&buf, offset)?;
     offset += buf.len() as u64;
     file.sync_data()?;
     Ok(offset)
