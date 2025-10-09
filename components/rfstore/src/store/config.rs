@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use online_config::OnlineConfig;
-use raftstore::coprocessor;
+use raftstore::{coprocessor, store::config::SPLIT_REGION_MAX_KEYS_DEF};
 use serde::{Deserialize, Serialize};
 use tikv_util::config::{ReadableDuration, ReadableSize};
 use time::Duration as TimeDuration;
@@ -75,6 +75,9 @@ pub struct Config {
 
     // Interval (ms) to check region whether need to be split or not.
     pub split_region_check_tick_interval: ReadableDuration,
+
+    // Maximum number of split_keys in a split region request.
+    pub split_region_max_keys: usize,
 
     // Interval (ms) to check region whether need to switch mem-table or not.
     pub switch_mem_table_check_tick_interval: ReadableDuration,
@@ -159,6 +162,7 @@ impl Default for Config {
             raft_log_gc_size_limit: Some(ReadableSize::mb(32)),
             raft_log_gc_no_kv_count: 4,
             split_region_check_tick_interval: ReadableDuration::secs(3),
+            split_region_max_keys: SPLIT_REGION_MAX_KEYS_DEF,
             switch_mem_table_check_tick_interval: ReadableDuration::minutes(1),
             region_split_size: ReadableSize::mb(256),
             region_split_keys: 2_560_000,
@@ -220,6 +224,7 @@ impl Config {
             // The default old interval is too large, we only set if it's smaller for test.
             cfg.split_region_check_tick_interval = old.split_region_check_tick_interval;
         }
+        cfg.split_region_max_keys = old.split_region_max_keys;
         cfg.raft_election_timeout_ticks = old.raft_election_timeout_ticks;
         cfg.raft_min_election_timeout_ticks = old.raft_min_election_timeout_ticks;
         cfg.raft_max_election_timeout_ticks = old.raft_max_election_timeout_ticks;

@@ -1437,44 +1437,46 @@ impl<'a> PeerMsgHandler<'a> {
         epoch: &metapb::RegionEpoch,
         split_keys: &[Vec<u8>],
     ) -> Result<()> {
+        let tag = self.peer.tag();
         if split_keys.is_empty() {
             error!(
                 "no split key is specified.";
-                "tag" => self.peer.tag(),
+                "tag" => tag,
                 "peer_id" => self.fsm.peer_id(),
             );
-            return Err(box_err!(
-                "{} no split key is specified.",
-                self.fsm.peer.tag()
-            ));
+            return Err(box_err!("{} no split key is specified.", tag));
+        }
+        if split_keys.len() > self.ctx.cfg.split_region_max_keys {
+            error!(
+                "number of split keys exceeds limit";
+                "tag" => tag,
+            );
+            return Err(box_err!("{} number of split keys exceeds limit", tag));
         }
         for key in split_keys {
             if key.is_empty() {
                 error!(
                     "split key should not be empty!!!";
-                    "tag" => self.peer.tag(),
+                    "tag" => tag,
                     "peer_id" => self.fsm.peer_id(),
                 );
-                return Err(box_err!(
-                    "{} split key should not be empty",
-                    self.fsm.peer.tag()
-                ));
+                return Err(box_err!("{} split key should not be empty", tag));
             }
             if let Err(err) = decode_bytes(&mut key.as_slice(), false) {
                 error!(
                     "split key decode error";
-                    "tag" => self.peer.tag(),
+                    "tag" => tag,
                     "peer_id" => self.fsm.peer_id(),
                     "err" => ?err,
                 );
-                return Err(box_err!("{} split key decode failed", self.fsm.peer.tag()));
+                return Err(box_err!("{} split key decode failed", tag));
             }
         }
         if !self.fsm.peer.is_leader() {
             // region on this store is no longer leader, skipped.
             info!(
                 "not leader, skip.";
-                "tag" => self.peer.tag(),
+                "tag" => tag,
                 "peer_id" => self.fsm.peer_id(),
             );
             return Err(Error::NotLeader(
@@ -1492,7 +1494,7 @@ impl<'a> PeerMsgHandler<'a> {
         if latest_epoch.get_version() != epoch.get_version() {
             info!(
                 "epoch changed, retry later";
-                "tag" => self.peer.tag(),
+                "tag" => tag,
                 "peer_id" => self.fsm.peer_id(),
                 "prev_epoch" => ?region.get_region_epoch(),
                 "epoch" => ?epoch,
@@ -1500,9 +1502,7 @@ impl<'a> PeerMsgHandler<'a> {
             return Err(Error::EpochNotMatch(
                 format!(
                     "{} epoch changed {:?} != {:?}, retry later",
-                    self.fsm.peer.tag(),
-                    latest_epoch,
-                    epoch
+                    tag, latest_epoch, epoch
                 ),
                 vec![region.to_owned()],
             ));
@@ -1513,7 +1513,6 @@ impl<'a> PeerMsgHandler<'a> {
 
         if let Some(shard_meta) = self.peer.get_store().shard_meta.as_ref() {
             if shard_meta.has_txn_file_locks() {
-                let tag = self.peer.tag();
                 info!("{} prepare split: txn file locks exist, retry later", tag;
                     "txn_file_locks" => %shard_meta.txn_file_locks(),
                 );
