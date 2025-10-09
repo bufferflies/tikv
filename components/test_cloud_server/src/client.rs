@@ -56,7 +56,7 @@ use tikv_util::{
 };
 
 use crate::{
-    try_wait, try_wait_result,
+    must_wait_result, try_wait, try_wait_result,
     txn::{
         lock_resolver::{LockResolver, ResolveLocksOptions},
         txn_file::{TxnFileChunk, TxnFileHelper},
@@ -343,7 +343,16 @@ impl ClusterClient {
     }
 
     pub fn get_ts(&self) -> TimeStamp {
-        block_on(self.pd_client.get_tso()).unwrap()
+        must_wait_result(
+            || {
+                block_on(self.pd_client.get_tso()).map_err(|e| {
+                    warn!("get_ts failed: {:?}", e);
+                    e
+                })
+            },
+            10,
+            || "get_ts failed".to_string(),
+        )
     }
 
     pub fn del_table_rows_commit(&mut self, start_ts: TimeStamp, mutations: &[Mutation]) {

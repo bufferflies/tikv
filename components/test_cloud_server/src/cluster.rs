@@ -1582,14 +1582,17 @@ impl TryWaiter {
         }
     }
 
-    pub fn must_wait_result<T, E, F, FnMsg>(&self, f: F, fail_msg: FnMsg)
+    pub fn must_wait_result<T, E, F, FnMsg>(&self, f: F, fail_msg: FnMsg) -> T
     where
         E: std::fmt::Debug,
         F: FnMut() -> Result<T, E>,
         FnMsg: FnOnce() -> String,
     {
-        if let Err(err) = self.try_wait_result(f) {
-            panic!("{}: {:?}", fail_msg(), err);
+        match self.try_wait_result(f) {
+            Ok(t) => t,
+            Err(err) => {
+                panic!("{}: {:?}", fail_msg(), err);
+            }
         }
     }
 }
@@ -1696,13 +1699,13 @@ where
     TryWaiter::timeout(seconds).try_wait_result(f)
 }
 
-pub fn must_wait_result<F, T, E, FnMsg>(f: F, seconds: usize, fail_msg: FnMsg)
+pub fn must_wait_result<F, T, E, FnMsg>(f: F, seconds: usize, fail_msg: FnMsg) -> T
 where
     E: std::fmt::Debug,
     F: FnMut() -> Result<T, E>,
     FnMsg: FnOnce() -> String,
 {
-    TryWaiter::timeout(seconds).must_wait_result(f, fail_msg);
+    TryWaiter::timeout(seconds).must_wait_result(f, fail_msg)
 }
 
 #[derive(Default, Debug)]
