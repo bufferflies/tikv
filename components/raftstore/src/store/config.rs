@@ -22,6 +22,8 @@ use time::Duration as TimeDuration;
 use super::worker::{RaftStoreBatchComponent, RefreshConfigTask};
 use crate::Result;
 
+pub const SPLIT_REGION_MAX_KEYS_DEF: usize = 1024;
+
 lazy_static! {
     pub static ref CONFIG_RAFTSTORE_GAUGE: prometheus::GaugeVec = register_gauge_vec!(
         "tikv_config_raftstore",
@@ -94,6 +96,8 @@ pub struct Config {
 
     // Interval (ms) to check region whether need to be split or not.
     pub split_region_check_tick_interval: ReadableDuration,
+    // Maximum number of split_keys in a split region request.
+    pub split_region_max_keys: usize,
     /// When size change of region exceed the diff since last check, it
     /// will be checked again whether it should be split.
     pub region_split_check_diff: Option<ReadableSize>,
@@ -367,6 +371,7 @@ impl Default for Config {
             raft_entry_cache_life_time: ReadableDuration::secs(30),
             raft_reject_transfer_leader_duration: ReadableDuration::secs(3),
             split_region_check_tick_interval: ReadableDuration::secs(10),
+            split_region_max_keys: SPLIT_REGION_MAX_KEYS_DEF,
             region_split_check_diff: None,
             region_compact_check_interval: ReadableDuration::minutes(5),
             region_compact_check_step: 100,
