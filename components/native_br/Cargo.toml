@@ -8,7 +8,7 @@ publish = false
 
 [features]
 pprof-fp = ["tikv/pprof-fp"]
-testexport = []
+testexport = ["rand"]
 failpoints = ["fail/failpoints", "tikv/failpoints"]
 
 [dependencies]
@@ -41,6 +41,7 @@ pd_client = { workspace = true }
 prometheus = { version = "0.13", features = ["nightly"] }
 protobuf = "2.8"
 raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
+rand = { version = "0.8", optional = true }
 regex = "1"
 rfengine = { workspace = true }
 rfenginepb = { workspace = true }

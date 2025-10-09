@@ -357,6 +357,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
     let dfs_load_concurrency_per_core =
         DFS_LOAD_MEMORY_USAGE / cpu_cores / tikv_server_nodes_count as u64 / KV_TARGET_FILE_SIZE.0;
     let dfs_load_concurrency_per_request = dfs_load_concurrency_per_core / 8; // 64
+    let rfengine_target_file_size = switches.rfengine_target_file_size;
 
     move |_node_id: u16, conf: &mut TikvConfig| {
         let mut rng = thread_rng();
@@ -387,10 +388,10 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.rocksdb.writecf.block_size = ReadableSize::kb(2);
         conf.rocksdb.writecf.target_file_size_base = KV_TARGET_FILE_SIZE;
 
-        conf.rfengine.target_file_size = ReadableSize::mb(8);
+        conf.rfengine.target_file_size = rfengine_target_file_size;
         conf.rfengine.batch_compression_threshold = ReadableSize::kb(rng.gen_range(0..2));
         conf.rfengine.lightweight_backup = true;
-        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
+        conf.rfengine.wal_chunk_target_file_size = rfengine_target_file_size / 16;
         conf.rfengine.dfs_worker_memory_limit = (conf.rfengine.target_file_size * 8).into();
         conf.rfengine.wal_secondary_dir = Path::new(&conf.rfengine.wal_sync_dir)
             .with_file_name("wal2")
@@ -1061,6 +1062,8 @@ pub(crate) struct Switches {
     pub enable_value_cache: bool,
     pub tidb_next_gen: bool,
     pub tidb_gc_lifetime: String, // ReadableDuration, e.g. "90s".
+    pub rfengine_target_file_size: ReadableSize,
+    pub enable_oss_chaos: bool,
 }
 
 impl Switches {
@@ -1090,6 +1093,8 @@ impl Switches {
         let enable_value_cache = env_switch("ENABLE_VALUE_CACHE");
         let tidb_next_gen = env_switch_opt("TIDB_NEXT_GEN", 0);
         let tidb_gc_lifetime = env_param("TIDB_GC_LIFETIME", TIDB_GC_LIFETIME.to_string());
+        let rfengine_target_file_size = ReadableSize::mb(8);
+        let enable_oss_chaos = rng.gen_bool(env_param("OSS_CHAOS_RATIO", 0.2));
 
         Self {
             remote_cop_min_block_size,
@@ -1111,6 +1116,8 @@ impl Switches {
             enable_value_cache,
             tidb_next_gen,
             tidb_gc_lifetime,
+            rfengine_target_file_size,
+            enable_oss_chaos,
         }
     }
 }

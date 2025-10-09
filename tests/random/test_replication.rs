@@ -51,10 +51,15 @@ fn test_random_replication() {
         .unwrap();
     let _guard = runtime.enter();
 
+    let mut rng = thread_rng();
+
     let mut switches = Switches::from_env();
     // Set GC lifetime to 10m. Small GC lifetime will break the sync_diff_inspector
     // if the snapshot is earlier than GC safe point.
     switches.tidb_gc_lifetime = "600s".into();
+    // Randomly choose from 8MB, 2MB and 512KB to make WAL rotate slower or faster.
+    switches.rfengine_target_file_size =
+        ReadableSize(*[8 << 20, 2 << 20, 512 << 10].choose(&mut rng).unwrap());
     info!("switches: {:?}", switches);
 
     // Start local provider in advance.
@@ -67,7 +72,7 @@ fn test_random_replication() {
         local_provider
     });
 
-    let (_temp_dir, _oss, dfs_conf) = prepare_dfs("oss_");
+    let (_temp_dir, oss, dfs_conf) = prepare_dfs("oss_");
     let security_conf = new_security_config();
     let tc = prepare_tidb_cluster(&security_conf, &switches);
     let mut cluster = prepare_cluster(
@@ -247,6 +252,7 @@ fn test_random_replication() {
     info!("start workloads");
     let start_time = Instant::now();
     let running = Running::new_start();
+    let mut sync_handles = vec![];
     let async_handles = start_workloads(
         &tc,
         pd_client.clone(),
@@ -256,6 +262,9 @@ fn test_random_replication() {
         &tables,
         running.clone(),
     );
+    if switches.enable_oss_chaos {
+        sync_handles.push(spawn_oss_chaos(&oss, OSS_CHAOS_INTERVAL, running.clone()))
+    }
 
     for i in 6..=10 {
         let val = String::from_utf8(val_fn(1000)).unwrap();
@@ -358,16 +367,35 @@ fn test_random_replication() {
         while start_time.saturating_elapsed() < TEST_DURATION {
             // Restart nodes.
             random_node_restart(&mut cluster, |_, _| {}, false);
+
+            if rng.gen_ratio(1, 4) {
+                // TODO: restart node & replication worker at the same time.
+                info!("shutdown replication worker");
+                worker.shutdown();
+
+                let sleep_secs = rng.gen_range(0..=10);
+                thread::sleep(Duration::from_secs(sleep_secs));
+
+                info!("restart replication worker");
+                worker = CloudWorker::new(worker_conf.clone(), None, 2, pd_client.clone());
+                worker.start();
+
+                let wait_secs = rng.gen_range(0..=3);
+                thread::sleep(Duration::from_secs(wait_secs));
+            }
         }
 
         // Finish workloads.
+        info!("test finished, stop workloads");
+        running.stop();
         runtime.block_on(async {
-            info!("test finished, stop workloads");
-            running.stop();
             for handle in async_handles {
                 handle.await.unwrap();
             }
         });
+        for handle in sync_handles {
+            handle.join().unwrap();
+        }
     }
 
     // Verify.

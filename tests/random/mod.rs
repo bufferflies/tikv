@@ -422,10 +422,12 @@ pub(crate) fn spawn_keyspace_write(
     })
 }
 
+const OSS_CHAOS_INTERVAL: Duration = Duration::from_secs(10);
+
 pub(crate) fn spawn_oss_chaos(
     oss: &ObjectStorageService,
     interval: Duration,
-    timeout: Duration,
+    running: Running,
 ) -> JoinHandle<()> {
     let write_limiter = oss.write_limiter();
     let origin_rate = write_limiter.get_io_rate_limit();
@@ -438,8 +440,7 @@ pub(crate) fn spawn_oss_chaos(
     ];
     std::thread::spawn(move || {
         let mut rng = thread_rng();
-        let start_time = Instant::now_coarse();
-        while start_time.saturating_elapsed() < timeout {
+        while running.get() {
             let interval_secs = (1..=interval.as_secs()).choose(&mut rng).unwrap();
             thread::sleep(Duration::from_secs(interval_secs));
 

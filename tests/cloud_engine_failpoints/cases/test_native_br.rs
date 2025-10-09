@@ -194,6 +194,7 @@ fn test_backup_on_scaling_up() {
         let restore_config = RestoreConfig {
             tolerate_err: 0,
             strict_tolerate: true,
+            lower_memory: RestoreConfig::use_lower_memory(),
             ..Default::default()
         };
         let res = restore_keyspace::restore_keyspace(
@@ -286,6 +287,7 @@ fn test_restore_on_disk_full() {
 
     fail::cfg(low_space_fp, "return").unwrap();
 
+    let restore_config = RestoreConfig::default_for_test();
     thread::scope(|s| {
         let pd_client = cluster.get_pd_client();
         let h = s.spawn(move || {
@@ -295,7 +297,7 @@ fn test_restore_on_disk_full() {
                 &backup_name,
                 None,
                 s3fs.clone(),
-                RestoreConfig::default(),
+                restore_config,
                 pd_client,
                 &runtime,
                 None,
@@ -589,6 +591,7 @@ fn test_backup_pessimistic_lock() {
     let restore_config = RestoreConfig {
         tolerate_err: 0,
         strict_tolerate: true,
+        lower_memory: RestoreConfig::use_lower_memory(),
         ..Default::default()
     };
     let res = restore_keyspace::restore_keyspace(
@@ -767,13 +770,14 @@ fn test_check_backup_ts(#[case] write_method: TxnWriteMethod) {
     });
 
     // Perform restore.
+    let restore_config = RestoreConfig::default_for_test();
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
         &backup_name,
         None,
         s3fs,
-        RestoreConfig::default(),
+        restore_config,
         cluster.get_pd_client(),
         &runtime,
         None,

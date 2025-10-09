@@ -69,8 +69,6 @@ const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
 
 const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(4); // Small size to make eviction more frequent.
 
-const OSS_CHAOS_INTERVAL: Duration = Duration::from_secs(10);
-
 #[test]
 fn test_random_all() {
     init_logger();
@@ -140,6 +138,7 @@ fn test_random_all() {
     let s3fs = S3Fs::new_from_config(dfs_conf);
 
     // Start workloads & schedulers.
+    let running = Running::new_start();
     let mut handles = vec![
         spawn_merge(cluster.new_scheduler(), true),
         spawn_transfer(cluster.new_scheduler()),
@@ -165,6 +164,7 @@ fn test_random_all() {
         tolerate_err: 1,
         strict_tolerate: true,
         max_retry: 20,
+        lower_memory: switches.restore_lower_memory,
         ..Default::default()
     };
     for _ in 0..RESTORE_CONCURRENCY {
@@ -241,7 +241,7 @@ fn test_random_all() {
     }
 
     if switches.enable_oss_chaos {
-        handles.push(spawn_oss_chaos(&oss, OSS_CHAOS_INTERVAL, TIMEOUT))
+        handles.push(spawn_oss_chaos(&oss, OSS_CHAOS_INTERVAL, running.clone()))
     }
 
     // Main loop.
@@ -255,6 +255,7 @@ fn test_random_all() {
 
     // Finish.
     info!("test finished, stopping all workers");
+    running.stop();
     for handle in handles {
         handle.join().unwrap();
     }
@@ -604,6 +605,7 @@ pub(crate) struct Switches {
     pub enable_oss_chaos: bool,
     pub txn_check_backup_ts: bool,
     pub enable_value_cache: bool,
+    pub restore_lower_memory: bool,
 }
 
 impl Switches {
@@ -613,12 +615,14 @@ impl Switches {
         let enable_oss_chaos = rng.gen_bool(env_param("OSS_CHAOS_RATIO", 0.2));
         let txn_check_backup_ts = env_switch("TXN_CHECK_BACKUP_TS");
         let enable_value_cache = env_switch("ENABLE_VALUE_CACHE");
+        let lower_memory = rng.gen_bool(0.5);
 
         Self {
             ia_table_ratio,
             enable_oss_chaos,
             txn_check_backup_ts,
             enable_value_cache,
+            restore_lower_memory: lower_memory,
         }
     }
 }

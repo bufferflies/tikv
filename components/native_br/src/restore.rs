@@ -530,3 +530,24 @@ impl Default for RestoreConfig {
         }
     }
 }
+
+#[cfg(feature = "testexport")]
+impl RestoreConfig {
+    pub fn default_for_test() -> Self {
+        Self {
+            tolerate_err: 1,
+            lower_memory: Self::use_lower_memory(),
+            ..Default::default()
+        }
+    }
+
+    pub fn use_lower_memory() -> bool {
+        use rand::Rng;
+        if rand::thread_rng().gen_bool(0.5) {
+            info!("lower memory enabled");
+            true
+        } else {
+            false
+        }
+    }
+}
