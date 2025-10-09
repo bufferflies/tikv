@@ -149,6 +149,20 @@ lazy_static! {
         "kv_engine_value_cache_hit",
         "Total number of value cache hit",
     ).unwrap();
+    pub static ref ENGINE_COMPACTION_TRIGGER_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "kv_engine_compaction_trigger_counter",
+        "Total number of kvengine compaction with a label of compaction type triggered",
+        &["type"]
+    ).unwrap();
+    pub static ref ENGINE_DUPLICATED_CHANGE_SET_COUNTER: IntCounter = register_int_counter!(
+        "kv_engine_duplicated_changeset_counter",
+        "Total number of kvengine duplicated change set",
+    ).unwrap();
+    pub static ref ENGINE_COMPACTION_RESULT_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "kv_engine_compaction_result_counter",
+        "Total number of kvengine compaction with a label of compaction result",
+        &["result"]
+    ).unwrap();
 }
 
 pub(crate) fn elapsed_secs(t: Instant) -> f64 {

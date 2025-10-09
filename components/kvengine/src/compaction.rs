@@ -47,6 +47,7 @@ use tokio::sync::mpsc;
 use crate::{
     dfs,
     dfs::FileType,
+    metrics::{ENGINE_COMPACTION_RESULT_COUNTER, ENGINE_COMPACTION_TRIGGER_COUNTER},
     table::{
         blobtable::{
             blobtable::BlobTable,
@@ -607,25 +608,65 @@ impl Engine {
             FallbackLocalCompactorDisabled
         )));
         match shard.get_compaction_priority() {
-            Some(CompactionPriority::L0 { .. }) => self.trigger_l0_compaction(&shard).await,
+            Some(CompactionPriority::L0 { .. }) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["l0"])
+                    .inc();
+                self.trigger_l0_compaction(&shard).await
+            }
             Some(CompactionPriority::L1Plus { cf, level, .. }) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["l1_plus"])
+                    .inc();
                 self.trigger_l1_plus_compaction(&shard, cf, level).await
             }
             Some(CompactionPriority::Major { is_manual, .. }) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["major"])
+                    .inc();
                 self.trigger_major_compaction(&shard, is_manual).await
             }
-            Some(CompactionPriority::DestroyRange) => self.destroy_range(&shard).await.transpose(),
-            Some(CompactionPriority::TruncateTs) => self.truncate_ts(&shard).await.transpose(),
+            Some(CompactionPriority::DestroyRange) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["destroy_range"])
+                    .inc();
+                self.destroy_range(&shard).await.transpose()
+            }
+            Some(CompactionPriority::TruncateTs) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["truncate_ts"])
+                    .inc();
+                self.truncate_ts(&shard).await.transpose()
+            }
             Some(CompactionPriority::TrimOverBound) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["trim_over_bound"])
+                    .inc();
                 self.trim_over_bound(&shard).await.transpose()
             }
-            Some(CompactionPriority::GcLockFile) => self.trigger_gc_lock_file(&shard).transpose(),
+            Some(CompactionPriority::GcLockFile) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["gc_lock_file"])
+                    .inc();
+                self.trigger_gc_lock_file(&shard).transpose()
+            }
             Some(CompactionPriority::GcExtraFile) => self.trigger_gc_extra_file(&shard).transpose(),
-            Some(CompactionPriority::L0ToColumnar) => self.trigger_l0_to_columnar(&shard).await,
+            Some(CompactionPriority::L0ToColumnar) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["l0_to_columnar"])
+                    .inc();
+                self.trigger_l0_to_columnar(&shard).await
+            }
             Some(CompactionPriority::ColumnarL0 { .. }) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["columnar_l0"])
+                    .inc();
                 self.trigger_columnar_l0_compaction(&shard).await
             }
             Some(CompactionPriority::ColumnarL1 { .. }) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["columnar_l1"])
+                    .inc();
                 self.trigger_columnar_l1_compaction(&shard).await
             }
             Some(CompactionPriority::ColumnarMajor {
@@ -635,9 +676,15 @@ impl Engine {
                 schema_version,
             }) => {
                 if is_manual {
+                    ENGINE_COMPACTION_TRIGGER_COUNTER
+                        .with_label_values(&["columnar_major_from_col"])
+                        .inc();
                     self.trigger_columnar_major_compaction_from_col(&shard, schema_version)
                         .await
                 } else {
+                    ENGINE_COMPACTION_TRIGGER_COUNTER
+                        .with_label_values(&["columnar_major_from_sst"])
+                        .inc();
                     self.trigger_columnar_major_compaction_from_sst(
                         &shard,
                         (table_ids_to_add, table_ids_to_clear),
@@ -647,6 +694,9 @@ impl Engine {
                 }
             }
             Some(CompactionPriority::ColumnarClear) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["columnar_clear"])
+                    .inc();
                 self.trigger_remove_columnar_compaction(&shard).await
             }
             Some(CompactionPriority::UpdateVectorIndex {
@@ -656,6 +706,9 @@ impl Engine {
                 rebuild,
                 ..
             }) => {
+                ENGINE_COMPACTION_TRIGGER_COUNTER
+                    .with_label_values(&["update_vector_index"])
+                    .inc();
                 self.trigger_vector_index_update(&shard, table_id, index_id, col_id, rebuild)
                     .await
             }
@@ -5533,20 +5586,32 @@ impl CompactRunner {
 
         let need_reset_compacting = match result {
             Some(Ok(resp)) => {
+                ENGINE_COMPACTION_RESULT_COUNTER
+                    .with_label_values(&["success"])
+                    .inc();
                 self.engine.handle_compact_response(resp);
                 self.notified.insert(id_ver);
                 self.schedule_pending_compaction();
                 false
             }
             Some(Err(FallbackLocalCompactorDisabled)) => {
+                ENGINE_COMPACTION_RESULT_COUNTER
+                    .with_label_values(&["local_compaction_disabled"])
+                    .inc();
                 error!("shard {} local compaction disabled, no need retry", tag);
                 true
             }
             Some(Err(CompactionNotRetryable(e))) => {
+                ENGINE_COMPACTION_RESULT_COUNTER
+                    .with_label_values(&["not_retryable"])
+                    .inc();
                 error!("shard {} compaction failed {}, not retryable", tag, e);
                 true
             }
             Some(Err(TableError(table::Error::SchemaOutOfDate(e)))) => {
+                ENGINE_COMPACTION_RESULT_COUNTER
+                    .with_label_values(&["schema_out_of_date"])
+                    .inc();
                 error!("shard {} decode row to columnar failed {}", tag, e);
                 if let Ok(shard) = self.engine.get_shard_with_ver(id_ver.id, id_ver.ver) {
                     if let Some(schema_file) = shard.get_schema_file() {
@@ -5556,11 +5621,17 @@ impl CompactRunner {
                 true
             }
             Some(Err(e)) => {
+                ENGINE_COMPACTION_RESULT_COUNTER
+                    .with_label_values(&["failure"])
+                    .inc();
                 error!("shard {} compaction failed {}, retrying", tag, e);
                 self.compact(id_ver);
                 false
             }
             None => {
+                ENGINE_COMPACTION_RESULT_COUNTER
+                    .with_label_values(&["empty"])
+                    .inc();
                 info!("shard {} got empty compaction result", tag);
                 // The compaction result can be none under complex situations. To avoid
                 // compaction not making progress, we trigger it actively.

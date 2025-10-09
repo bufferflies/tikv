@@ -97,6 +97,7 @@ impl Preprocessor {
             pending_truncate: &mut self.pending_truncate,
             raft_hard_state: self.raft_hard_state.clone(),
             raft_state: &mut self.raft_state,
+            is_leader: false,
             pending_merge_state: &mut self.pending_merge_state,
             want_rollback_merge_peers: &mut self.want_rollback_merge_peers,
             learner_skip_idx: &mut self.learner_skip_idx,

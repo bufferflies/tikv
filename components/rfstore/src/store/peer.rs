@@ -15,8 +15,8 @@ use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    get_shard_property, set_shard_property, util::PropertiesHelper, FilePrepareType, ShardMeta,
-    ENCRYPTION_KEY, STORAGE_CLASS_KEY,
+    get_shard_property, metrics::ENGINE_DUPLICATED_CHANGE_SET_COUNTER, set_shard_property,
+    util::PropertiesHelper, FilePrepareType, ShardMeta, ENCRYPTION_KEY, STORAGE_CLASS_KEY,
 };
 use kvproto::{
     disk_usage::DiskUsage,
@@ -1955,6 +1955,9 @@ impl<'a> PreprocessRef<'a> {
                 "version" => cs.get_shard_ver(),
             );
         } else if shard_meta.is_duplicated_change_set(&mut cs) {
+            if self.is_leader {
+                ENGINE_DUPLICATED_CHANGE_SET_COUNTER.inc();
+            }
             rejected = true;
             warn!(
                 "shard meta is duplicated change set";
@@ -4054,6 +4057,7 @@ pub struct PreprocessRef<'a> {
     // `raft_hard_state` is not reference as we don't have `raft::Raft` during restore.
     // Note: `raft_hard_state` should be updated before handle every batch of Raft entries.
     pub raft_hard_state: eraftpb::HardState,
+    pub is_leader: bool,
 
     pub preprocessed_index: &'a mut u64,
 
@@ -4069,6 +4073,7 @@ pub struct PreprocessRef<'a> {
 impl<'a> PreprocessRef<'a> {
     pub(crate) fn from_peer(peer: &'a mut Peer) -> PreprocessRef<'a> {
         let raft_hard_state = peer.raft_group.raft.hard_state();
+        let is_leader = peer.is_leader();
 
         let (
             pb_peer,
@@ -4105,6 +4110,7 @@ impl<'a> PreprocessRef<'a> {
             shard_meta,
             raft_state,
             raft_hard_state,
+            is_leader,
             preprocessed_index,
             last_committed_split_idx,
             pending_truncate,
