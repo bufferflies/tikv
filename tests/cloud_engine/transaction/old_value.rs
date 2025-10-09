@@ -62,26 +62,28 @@ fn test_old_value_acquire_pessimistic_lock() {
 
 #[test]
 #[serial(old_value)]
-#[ignore = "TODO: @ekexium"]
 fn test_old_value_pessimistic_prewrite() {
     let _extra_op = ExtraOpGuard::to_read_old_value();
 
     run_test_cases(vec![
-        // Pessimistic prewrite without pessimistic locks will not capture
-        // old_value
+        // NOTE: this is different from classic TiKV.
+        // Pessimistic prewrite without prior pessimistic lock
+        // still captures old_value when ExtraOp::ReadOldValue is enabled.
+        // This is due to next-gen tikv enforces constraint checks, even if the
+        // pessimistic_action is SkipPessimisticCheck.
         case!(
             prewrite!(5).value(b"initial"),
             commit!(5, 6),
             pessimistic_prewrite!(10, 15).value(b"pessimistic_v2"),
             assert_old_value!(Some(b"initial"));
-            fail!()
+            ok!()
         ),
         case!(
             prewrite!(25).value(b"to_delete_pessimistic"),
             commit!(25, 26),
             pessimistic_prewrite!(30, 35).delete(),
             assert_old_value!(Some(b"to_delete_pessimistic"));
-            fail!()
+            ok!()
         ),
     ]);
 }
