@@ -131,7 +131,7 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
     );
 
     let running_ctl = RunningController::default();
-    let (server, _) = start_server(
+    let (server, ctx, svc_handles) = start_server(
         config,
         config_file_path,
         thread_pool.clone(),
@@ -154,6 +154,9 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
             _ = close_rx => {}
         }
     });
+
+    drop(running_ctl);
+    stop_services(ctx, svc_handles);
 }
 
 // `config_file_path`: optional path to the config file which cloud_worker will
@@ -165,7 +168,7 @@ fn start_server(
     hyper_runtime: Arc<Runtime>,
     pd: Arc<dyn PdClient>,
     running_ctl: &RunningController,
-) -> (ServerFuture, Arc<server::Context>) {
+) -> (ServerFuture, Arc<server::Context>, ServiceHandles) {
     tikv_util::init_task_local_sync(|| {
         start_server_impl(
             config,
@@ -185,7 +188,7 @@ fn start_server_impl(
     hyper_runtime: Arc<Runtime>,
     pd: Arc<dyn PdClient>,
     running_ctl: &RunningController,
-) -> (ServerFuture, Arc<server::Context>) {
+) -> (ServerFuture, Arc<server::Context>, ServiceHandles) {
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(kvengine::dfs::S3Fs::new_from_config(dfs_config));
 
@@ -302,7 +305,7 @@ fn start_server_impl(
         config.txn_chunk_manager.clone(),
     );
 
-    let replication_scheduler = if config.replication_worker.enabled {
+    let (rep_scheduler, rep_handle) = if config.replication_worker.enabled {
         ReplicationWorker::new(
             pd.clone(),
             s3fs.clone(),
@@ -312,8 +315,9 @@ fn start_server_impl(
         )
         .map(|mut replication_worker| {
             let scheduler = replication_worker.scheduler();
-            thread::spawn(move || tikv_util::init_task_local_sync(|| replication_worker.run()));
-            scheduler
+            let handle =
+                thread::spawn(move || tikv_util::init_task_local_sync(|| replication_worker.run()));
+            (scheduler, handle)
         })
         .map_err(|e| {
             error!("failed to create replication worker"; "err" => ?e);
@@ -321,7 +325,8 @@ fn start_server_impl(
         .ok()
     } else {
         None
-    };
+    }
+    .unzip();
     let meta_file_cache_size = config.cop_block_cache_size.0 / 4;
     let meta_file_cache = new_meta_file_cache(meta_file_cache_size);
     let http_client = Arc::new(
@@ -338,7 +343,7 @@ fn start_server_impl(
         pd: pd.clone(),
         load_manager: load_manager.clone(),
         br_manager,
-        replication_scheduler,
+        rep_scheduler,
         txn_chunk_handler,
         master_key,
         quota_limiter: Arc::new(QuotaLimiter::default()),
@@ -414,7 +419,17 @@ fn start_server_impl(
         run_prometheus_push(config.push_metrics_addr, config.push_metrics_interval.0);
     }
 
-    (ServerFuture::new(server, cop_server_opt), ctx)
+    let svc_handles = ServiceHandles { rep_handle };
+    (ServerFuture::new(server, cop_server_opt), ctx, svc_handles)
+}
+
+fn stop_services(ctx: Arc<server::Context>, svc_handles: ServiceHandles) {
+    if let Some(rep_scheduler) = &ctx.rep_scheduler {
+        rep_scheduler.schedule(CdcMsg::Stop);
+    }
+    if let Some(rep_handle) = svc_handles.rep_handle {
+        rep_handle.join().expect("replication worker panic");
+    }
 }
 
 fn run_prometheus_push(push_metrics_addr: String, push_metrics_interval: Duration) {
@@ -488,8 +503,10 @@ pub struct CloudWorker {
     hyper_runtime: Arc<Runtime>,
     pd: Arc<dyn PdClient>,
 
-    svc_handle: Option<thread::JoinHandle<()>>,
+    server_handle: Option<thread::JoinHandle<()>>,
     ctx: Option<Arc<server::Context>>,
+    svc_handles: Option<ServiceHandles>,
+
     close_tx: oneshot::Sender<()>,
     close_rx: Option<oneshot::Receiver<()>>,
     running_ctl: RunningController,
@@ -524,8 +541,9 @@ impl CloudWorker {
             thread_pool,
             hyper_runtime,
             pd,
-            svc_handle: None,
+            server_handle: None,
             ctx: None,
+            svc_handles: None,
             close_tx,
             close_rx: Some(close_rx),
             running_ctl: RunningController::default(),
@@ -539,7 +557,7 @@ impl CloudWorker {
     pub fn start(&mut self) {
         let close_rx = self.close_rx.take().expect("already started");
 
-        let (server, ctx) = start_server(
+        let (server, ctx, svc_handles) = start_server(
             self.config.clone(),
             self.config_file_path.clone(),
             self.thread_pool.clone(),
@@ -551,7 +569,7 @@ impl CloudWorker {
         info!("{} cloud_worker server start", addr; "config" => ?self.config);
 
         let handle = self.hyper_runtime.handle().clone();
-        let svc_handle = thread::spawn(move || {
+        let server_handle = thread::spawn(move || {
             handle.block_on(async move {
                 tokio::select! {
                     _ = close_rx => {
@@ -567,17 +585,17 @@ impl CloudWorker {
                 }
             })
         });
-        self.svc_handle = Some(svc_handle);
+        self.server_handle = Some(server_handle);
         self.ctx = Some(ctx);
+        self.svc_handles = Some(svc_handles);
     }
 
     pub fn shutdown(mut self) {
-        if let Some(ctx) = self.ctx.take() {
-            if let Some(rep_scheduler) = &ctx.replication_scheduler {
-                rep_scheduler.schedule(CdcMsg::Stop);
-            }
+        self.running_ctl.stop();
+        if let Some((ctx, svc_handles)) = self.ctx.take().zip(self.svc_handles.take()) {
+            stop_services(ctx, svc_handles);
         }
-        if let Some(handle) = self.svc_handle.take() {
+        if let Some(handle) = self.server_handle.take() {
             if self.close_tx.send(()).is_err() {
                 warn!("notify shutdown failed");
             }
@@ -896,4 +914,8 @@ impl Config {
             && !self.data_dir.is_empty()
             && (!self.ia.mem_cap.is_zero() && !self.ia.disk_cap.is_zero())
     }
+}
+
+struct ServiceHandles {
+    rep_handle: Option<thread::JoinHandle<()>>,
 }

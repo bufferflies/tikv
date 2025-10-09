@@ -72,7 +72,7 @@ pub(crate) struct Context {
     pub s3fs: Arc<S3Fs>,
     pub load_manager: Arc<LoadDataManager>,
     pub br_manager: Arc<NativeBrManager>,
-    pub replication_scheduler: Option<ReplicationScheduler>,
+    pub rep_scheduler: Option<ReplicationScheduler>,
     pub txn_chunk_handler: Arc<TxnChunkHandler>,
     pub pd: Arc<dyn PdClient>,
     pub master_key: MasterKey,
@@ -169,11 +169,8 @@ where
                             resp
                         }
                         path if path.starts_with("/cdc") => {
-                            replication_worker::handle_cdc_request(
-                                ctx.replication_scheduler.as_ref(),
-                                req,
-                            )
-                            .await
+                            replication_worker::handle_cdc_request(ctx.rep_scheduler.as_ref(), req)
+                                .await
                         }
                         "/coprocessor" => handle_coprocessor(ctx, req).await,
                         "/load_data" => handle_load_data(ctx, req).await,
