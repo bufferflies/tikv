@@ -29,7 +29,6 @@ use tokio::sync::RwLock;
 
 use crate::metrics::WORKER_SCALER_QUERY_FAILURES_COUNTER_VEC;
 
-const CLEAN_UP_WORKER_TICK_INTERVAL: u64 = 60;
 const DEFAULT_LOAD_DATA_WORKER_MIN_STORAGE_GB: usize = 20;
 const DEFAULT_LOAD_DATA_WORKER_NAME: &str = "load-data-worker";
 const DEFAULT_LOAD_DATA_WORKER_PORT: u16 = 19500;
@@ -55,7 +54,11 @@ const LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_CPU_NUM: f64 = 48.0;
 
 const NETWORK_PROTOCOL: &str = "TCP";
 
-const WORKER_SCALER_QUERY_FAILURES_LIMIT: usize = 10;
+// The max retry time: 30 * 50 * 10 * 1 = 15000s
+const CLEAN_UP_WORKER_TICK_INTERVAL: u64 = 30;
+const WORKER_SCALER_QUERY_FAILURES_LIMIT: usize = 50;
+const WORKER_SCALER_QUERY_RETRY_COUNT: usize = 10;
+const WORKER_SCALER_QUERY_RETRY_INTERVAL: u64 = 1;
 
 pub const LOAD_DATA_WORKER_ENV: &str = "TIKV_LOAD_DATA_WORKER";
 pub const LOAD_DATA_WORKER_WORKER_NUM_ENV: &str = "TIKV_LOAD_DATA_WORKER_WORKER_NUM_ENV";
@@ -186,28 +189,27 @@ pub(crate) struct WorkerPod {
 }
 
 impl WorkerPod {
-    fn new(task_id: &str, pod: &Pod) -> Self {
-        let mut worker_pod = Self::default();
-        let pod_name = pod.name_any();
-        worker_pod.name = pod_name.clone();
-        if let Some(status) = &pod.status {
-            if let Some(start) = &status.start_time {
-                worker_pod.started_at = start.0.timestamp();
-                worker_pod.updated_at = start.0.timestamp();
-                worker_pod.svc_name = new_worker_svc_name_by_pod_name(task_id, &pod_name);
-            }
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            ..Default::default()
         }
-        worker_pod
     }
 
     fn init(&mut self, task_id: &str, pod: &Pod) {
         let pod_name = pod.name_any();
-        self.name = pod_name.clone();
+        self.name = pod.name_any();
         if let Some(status) = &pod.status {
-            if let Some(start) = &status.start_time {
-                self.started_at = start.0.timestamp();
-                self.updated_at = start.0.timestamp();
-                self.svc_name = new_worker_svc_name_by_pod_name(task_id, &pod_name);
+            if let Some(conditions) = &status.conditions {
+                if let Some(ready_condition) = conditions.iter().find(|c| c.type_ == "Ready") {
+                    if ready_condition.status == "True" {
+                        if let Some(t) = &ready_condition.last_transition_time {
+                            self.started_at = t.0.timestamp();
+                            self.updated_at = t.0.timestamp();
+                            self.svc_name = new_worker_svc_name_by_pod_name(task_id, &pod_name);
+                        }
+                    }
+                }
             }
         }
     }
@@ -366,7 +368,7 @@ impl WorkerScaler {
             let task_id = parse_task_id_by_pod_name(name.as_str());
             assert!(!task_id.is_empty());
             info!("load pod {} task {}", name, task_id);
-            let worker_pod = WorkerPod::new(&task_id, &pod);
+            let worker_pod = WorkerPod::new(pod.name_any());
             self.pods_map
                 .insert(task_id, Arc::new(RwLock::new(worker_pod)));
         }
@@ -703,7 +705,7 @@ impl WorkerScaler {
         worker_pod_name: &str,
         worker_addr: &str,
     ) -> Option<Vec<LoadTaskStates>> {
-        for _ in 0..18 {
+        for _ in 0..WORKER_SCALER_QUERY_RETRY_COUNT {
             let tasks = self.get_pod_task_states(worker_pod_name, worker_addr).await;
             if tasks.is_some() {
                 return tasks;
@@ -712,7 +714,7 @@ impl WorkerScaler {
                 "{} can't get tasks with addr {}",
                 worker_pod_name, worker_addr
             );
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            tokio::time::sleep(Duration::from_secs(WORKER_SCALER_QUERY_RETRY_INTERVAL)).await;
         }
         None
     }
@@ -789,6 +791,9 @@ impl WorkerScaler {
 
     pub(crate) fn get_worker_addr(&self, worker_pod: &WorkerPod) -> Option<String> {
         let svc_name = worker_pod.svc_name.as_str();
+        if svc_name.is_empty() {
+            return None;
+        }
         self.security_mgr
             .build_uri(format!(
                 "{}.{}.svc.cluster.local:{}/load_data",
@@ -1024,7 +1029,10 @@ fn find_sts_config(data_size_gb: usize, config: &WorkerScalerConfig) -> StsConfi
 
 #[cfg(test)]
 mod tests {
-    use k8s_openapi::{api::core::v1::Pod, apimachinery::pkg::apis::meta::v1::Time};
+    use k8s_openapi::{
+        api::core::v1::{Pod, PodCondition},
+        apimachinery::pkg::apis::meta::v1::Time,
+    };
     use load_data::task::LoadTaskStates;
     use rand::prelude::*;
 
@@ -1042,15 +1050,24 @@ mod tests {
     fn test_worker_pod_update() {
         let mut pod = Pod::default();
         let task_id = "taskid-1-0";
-        pod.metadata.name = Some(new_worker_pod_name(task_id));
+        let pod_name = new_worker_pod_name(task_id);
+        pod.metadata.name = Some(pod_name.clone());
         pod.status = Some(Default::default());
         let status = pod.status.as_mut().unwrap();
         status.pod_ip = Some("127.0.0.1".to_string());
         let now = chrono::Utc::now();
-        status.start_time = Some(Time(now));
         let now_ts = now.timestamp();
+        status.conditions = Some(vec![PodCondition {
+            last_transition_time: Some(Time(now)),
+            message: Some("pod has been ready".to_string()),
+            reason: Some("PodReady".to_string()),
+            status: "True".to_string(),
+            type_: "Ready".to_string(),
+            ..Default::default()
+        }]);
 
-        let mut worker_pod = WorkerPod::new(task_id, &pod);
+        let mut worker_pod = WorkerPod::new(pod_name.clone());
+        worker_pod.init(task_id, &pod);
         assert_eq!(worker_pod.started_at, now_ts);
         assert_eq!(worker_pod.updated_at, now_ts);
         assert_eq!(worker_pod.svc_name, new_worker_svc_name(task_id));
@@ -1071,14 +1088,16 @@ mod tests {
         assert!(worker_pod.canceled);
 
         // worker pod is canceled if task is empty and expired.
-        worker_pod = WorkerPod::new(task_id, &pod);
+        worker_pod = WorkerPod::new(pod_name.clone());
+        worker_pod.init(task_id, &pod);
         worker_pod.update_task_states(Some(vec![]), now_ts + 100, 60);
         assert!(worker_pod.canceled);
 
         // worker pod is canceled if task is canceled.
         let mut task_states = LoadTaskStates::default();
         task_states.canceled = true;
-        worker_pod = WorkerPod::new(task_id, &pod);
+        worker_pod = WorkerPod::new(pod_name.clone());
+        worker_pod.init(task_id, &pod);
         worker_pod.update_task_states(Some(vec![task_states]), now_ts + 100, 60);
         assert!(worker_pod.canceled);
 
@@ -1086,7 +1105,8 @@ mod tests {
         // finish time.
         let mut task_states = LoadTaskStates::default();
         task_states.finished = true;
-        worker_pod = WorkerPod::new(task_id, &pod);
+        worker_pod = WorkerPod::new(pod_name.clone());
+        worker_pod.init(task_id, &pod);
         worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 100, 60);
         // worker pod is not canceled if task finished duration not exceed expire time.
         assert!(!worker_pod.canceled);
@@ -1095,7 +1115,8 @@ mod tests {
         assert!(worker_pod.canceled);
 
         // worker pod is canceled if not finished and no progress for a long time.
-        worker_pod = WorkerPod::new(task_id, &pod);
+        worker_pod = WorkerPod::new(pod_name);
+        worker_pod.init(task_id, &pod);
         task_states = LoadTaskStates::default();
         task_states.created_files = 1;
         worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 100, 60);
