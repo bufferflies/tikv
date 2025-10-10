@@ -662,6 +662,9 @@ impl Delegate {
                 .physical()
                 .saturating_sub(d.advanced_to.physical());
             if Duration::from_millis(lag) > WARN_LAG_THRESHOLD {
+                info!("found slow connection"; "region_id" => self.region_id,
+                    "downstream_id" => ?d.id, "request_id" => ?d.req_id,
+                    "conn_id" => ?d.conn_id, "lag_ms" => lag);
                 slow_downstreams.push(d.id);
             }
         }
@@ -786,6 +789,9 @@ impl Delegate {
             if TxnSource::is_lightning_physical_import(row.txn_source)
                 || TxnSource::is_lossy_ddl_reorg_source_set(row.txn_source)
                 || filter_loop && TxnSource::is_cdc_write_source_set(row.txn_source)
+                // In next-gen, all events become `Committed` as we can always observe the value when committing.
+                // Hence `Prewrite` entries is nolonger needed by the client.
+                || row.get_type() == EventLogType::Prewrite || row.get_type() == EventLogType::Unknown
             {
                 continue;
             }
@@ -875,6 +881,7 @@ impl Delegate {
                 if !downstream.observed_range.contains_raw_key(&v.key) {
                     continue;
                 }
+
                 if let Some(read_old_ts) = needs_old_value {
                     read_old_value(v, *read_old_ts)?;
                     *needs_old_value = None;
@@ -903,6 +910,8 @@ impl Delegate {
                 if TxnSource::is_lightning_physical_import(v.txn_source)
                     || TxnSource::is_lossy_ddl_reorg_source_set(v.txn_source)
                     || downstream.filter_loop && TxnSource::is_cdc_write_source_set(v.txn_source)
+                    // In next-gen, all events become `Committed` as we can always observe the value when committing.
+                    || v.get_type() == EventLogType::Prewrite || v.get_type() == EventLogType::Unknown
                 {
                     continue;
                 }
@@ -941,22 +950,20 @@ impl Delegate {
                     return Ok(());
                 }
 
-                if rows.is_one_pc {
-                    assert_eq!(row.v.r_type, EventLogType::Commit);
-                    set_event_row_type(&mut row.v, EventLogType::Committed);
+                let start_ts = TimeStamp::from(row.v.start_ts);
+                if row.v.r_type == EventLogType::Commit {
                     let read_old_ts = TimeStamp::from(row.v.commit_ts).prev();
                     row.needs_old_value = Some(read_old_ts);
-                } else {
                     assert_eq!(row.lock_count_modify, 0);
-                    let start_ts = TimeStamp::from(row.v.start_ts);
-                    row.lock_count_modify = self.pop_lock(key, start_ts)?;
+                    // In next-gen, here must be a default cf modification or short value.
+                    set_event_row_type(&mut row.v, EventLogType::Committed);
                 }
+                row.lock_count_modify = self.pop_lock(key, start_ts)?;
             }
             "lock" => {
                 let lock = Lock::parse(put.get_value()).unwrap();
-                let for_update_ts = lock.for_update_ts;
                 let txn_source = lock.txn_source;
-
+                // let for_update_ts = lock.for_update_ts;
                 let key = Key::from_encoded_slice(&put.key);
                 let row = rows.txns_by_key.entry(key.clone()).or_default();
                 if decode_lock(put.take_key(), lock, &mut row.v, &mut row.has_value) {
@@ -966,8 +973,10 @@ impl Delegate {
                 assert_eq!(row.lock_count_modify, 0);
                 let mini_lock = MiniLock::new(row.v.start_ts, txn_source);
                 row.lock_count_modify = self.push_lock(key, mini_lock)?;
-                let read_old_ts = std::cmp::max(for_update_ts, row.v.start_ts.into());
-                row.needs_old_value = Some(read_old_ts);
+                // No need to fetch old_value in next-gen.
+                // let read_old_ts = std::cmp::max(for_update_ts,
+                // row.v.start_ts.into()); row.needs_old_value =
+                // Some(read_old_ts);
             }
             "" | "default" => {
                 let key = Key::from_encoded(put.take_key()).truncate_ts().unwrap();
@@ -1079,6 +1088,14 @@ impl RowsBuilder {
                 // Large-Transaction. Those prewrites are not complete, we must skip them.
                 continue;
             }
+            // defensive assertion for next-gen TiKV: where `Prewrite` and `Commit` are no
+            // longer used and only `Committed`s are sent.
+            assert!(
+                !(row.v.r_type == EventLogType::Committed
+                    && row.v.op_type == EventRowOpType::Put
+                    && row.v.value.is_empty()),
+                "committed put event without value, this can be a bug; row = {row:?}"
+            );
             txns.push(row);
         }
         txns
@@ -1165,6 +1182,7 @@ fn decode_lock(key: Vec<u8>, mut lock: Lock, row: &mut EventRow, has_value: &mut
         }
     };
 
+    // We need to fill some metadata used internally in cse-cdc.
     row.start_ts = lock.ts.into_inner();
     row.key = key.into_raw().unwrap();
     row.op_type = op_type as _;
@@ -1585,19 +1603,13 @@ mod tests {
         let mut rows_builder = RowsBuilder::default();
         for k in b'a'..=b'e' {
             let mut put = PutRequest::default();
-            put.key = Key::from_raw(&[k]).into_encoded();
-            put.cf = "lock".to_owned();
-            put.value = Lock::new(
-                LockType::Put,
-                put.key.clone(),
-                1.into(),
-                10,
-                Some(b"test".to_vec()),
-                TimeStamp::zero(),
-                0,
-                TimeStamp::zero(),
-            )
-            .to_bytes();
+            put.key = Key::from_raw(&[k])
+                .append_ts(TimeStamp::new(2))
+                .into_encoded();
+            put.cf = "write".to_owned();
+            put.value = txn_types::Write::new(WriteType::Put, 1.into(), Some(b"test".to_vec()))
+                .as_ref()
+                .to_bytes();
             delegate.sink_txn_put(put, &mut rows_builder).unwrap();
         }
         assert_eq!(rows_builder.txns_by_key.len(), 5);
@@ -1646,23 +1658,16 @@ mod tests {
         let mut rows_builder = RowsBuilder::default();
         for k in b'a'..=b'e' {
             let mut put = PutRequest::default();
-            put.key = Key::from_raw(&[k]).into_encoded();
-            put.cf = "lock".to_owned();
-            let mut lock = Lock::new(
-                LockType::Put,
-                put.key.clone(),
-                1.into(),
-                10,
-                Some(b"test".to_vec()),
-                TimeStamp::zero(),
-                0,
-                TimeStamp::zero(),
-            );
+            put.key = Key::from_raw(&[k])
+                .append_ts(TimeStamp::new(2))
+                .into_encoded();
+            put.cf = "write".to_owned();
+            let mut write = txn_types::Write::new(WriteType::Put, 1.into(), Some(b"test".to_vec()));
             // Only the key `a` is a normal write.
             if k != b'a' {
-                lock = lock.set_txn_source(txn_source.into());
+                write = write.set_txn_source(txn_source.into());
             }
-            put.value = lock.to_bytes();
+            put.value = write.as_ref().to_bytes();
             delegate.sink_txn_put(put, &mut rows_builder).unwrap();
         }
         assert_eq!(rows_builder.txns_by_key.len(), 5);

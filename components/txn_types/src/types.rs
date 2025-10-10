@@ -75,6 +75,9 @@ impl Key {
     #[inline]
     pub fn into_raw(self) -> Result<Vec<u8>, codec::Error> {
         let mut k = self.0;
+        if k.is_empty() {
+            return Ok(k);
+        }
         bytes::decode_bytes_in_place(&mut k, false)?;
         Ok(k)
     }
@@ -82,6 +85,9 @@ impl Key {
     /// Gets the raw representation of this key.
     #[inline]
     pub fn to_raw(&self) -> Result<Vec<u8>, codec::Error> {
+        if self.is_empty() {
+            return Ok(vec![]);
+        }
         bytes::decode_bytes(&mut self.0.as_slice(), false)
     }
 

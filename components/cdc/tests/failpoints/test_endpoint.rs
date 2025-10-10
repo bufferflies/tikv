@@ -724,11 +724,14 @@ fn test_cdc_pipeline_dml() {
     mutation.value = v;
     suite.must_kv_flush(rid, vec![mutation], k.clone(), prewrite_tso, 2);
 
-    let events = receive_event(false).take_events().into_vec();
-    for entry in events[0].get_entries().get_entries() {
-        assert_eq!(entry.r_type, EventLogType::Prewrite);
-        assert_eq!(entry.generation, 2);
-        assert_eq!(entry.value, vec![b'y'; 16]);
+    #[cfg(NO_NEXT_GEN_COMPATIBLE)]
+    {
+        let events = receive_event(false).take_events().into_vec();
+        for entry in events[0].get_entries().get_entries() {
+            assert_eq!(entry.r_type, EventLogType::Prewrite);
+            assert_eq!(entry.generation, 2);
+            assert_eq!(entry.value, vec![b'y'; 16]);
+        }
     }
 
     let commit_tso = block_on(suite.cluster.pd_client().get_tso()).unwrap();
@@ -736,19 +739,22 @@ fn test_cdc_pipeline_dml() {
 
     let events = receive_event(false).take_events().into_vec();
     for entry in events[0].get_entries().get_entries() {
-        assert_eq!(entry.r_type, EventLogType::Commit);
+        assert_eq!(entry.r_type, EventLogType::Committed);
         assert_eq!(entry.start_ts, prewrite_tso.into_inner());
         assert_eq!(entry.commit_ts, commit_tso.into_inner());
     }
 
     fail::remove("cdc_incremental_scan_start");
 
-    let events = receive_event(false).take_events().into_vec();
-    let entries = events[0].get_entries().get_entries();
-    assert_eq!(entries[0].r_type, EventLogType::Prewrite);
-    assert_eq!(entries[0].generation, 1);
-    assert_eq!(entries[0].value, vec![b'x'; 16]);
-    assert_eq!(entries[1].r_type, EventLogType::Initialized);
+    #[cfg(NO_NEXT_GEN_COMPATIBLE)]
+    {
+        let events = receive_event(false).take_events().into_vec();
+        let entries = events[0].get_entries().get_entries();
+        assert_eq!(entries[0].r_type, EventLogType::Prewrite);
+        assert_eq!(entries[0].generation, 1);
+        assert_eq!(entries[0].value, vec![b'x'; 16]);
+        assert_eq!(entries[1].r_type, EventLogType::Initialized);
+    }
 }
 
 #[test]

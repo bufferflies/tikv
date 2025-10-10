@@ -66,15 +66,6 @@ fn test_cdc_basic() {
     mutation.key = k.clone().into_bytes();
     mutation.value = v.into_bytes();
     suite.must_kv_prewrite(region_id, vec![mutation], k.clone().into_bytes(), start_ts);
-    let mut events = receive_event(false).events.to_vec();
-    assert_eq!(events.len(), 1, "{:?}", events);
-    match events.pop().unwrap().event.unwrap() {
-        Event_oneof_event::Entries(entries) => {
-            assert_eq!(entries.entries.len(), 1);
-            assert_eq!(entries.entries[0].get_type(), EventLogType::Prewrite);
-        }
-        other => panic!("unknown event {:?}", other),
-    }
 
     let mut counter = 0;
     loop {
@@ -98,7 +89,7 @@ fn test_cdc_basic() {
     match events.pop().unwrap().event.unwrap() {
         Event_oneof_event::Entries(entries) => {
             assert_eq!(entries.entries.len(), 1);
-            assert_eq!(entries.entries[0].get_type(), EventLogType::Commit);
+            assert_eq!(entries.entries[0].get_type(), EventLogType::Committed);
         }
         other => panic!("unknown event {:?}", other),
     }
@@ -535,14 +526,8 @@ fn test_cdc_scan_impl<F: KvFormat>() {
     match events.remove(0).event.unwrap() {
         // Batch size is set to 2.
         Event_oneof_event::Entries(es) => {
-            assert!(es.entries.len() == 2, "{:?}", es);
+            assert!(es.entries.len() == 1, "{:?}", es);
             let e = &es.entries[0];
-            assert_eq!(e.get_type(), EventLogType::Prewrite, "{:?}", es);
-            assert_eq!(e.start_ts, start_ts2.into_inner(), "{:?}", es);
-            assert_eq!(e.commit_ts, 0, "{:?}", es);
-            assert_eq!(e.key, k, "{:?}", es);
-            assert_eq!(e.value, v, "{:?}", es);
-            let e = &es.entries[1];
             assert_eq!(e.get_type(), EventLogType::Committed, "{:?}", es);
             assert_eq!(e.start_ts, start_ts1.into_inner(), "{:?}", es);
             assert_eq!(e.commit_ts, commit_ts1.into_inner(), "{:?}", es);
@@ -587,15 +572,8 @@ fn test_cdc_scan_impl<F: KvFormat>() {
     match events.remove(0).event.unwrap() {
         // Batch size is set to 2.
         Event_oneof_event::Entries(es) => {
-            assert!(es.entries.len() == 2, "{:?}", es);
+            assert!(es.entries.len() == 1, "{:?}", es);
             let e = &es.entries[0];
-            assert_eq!(e.get_type(), EventLogType::Prewrite, "{:?}", es);
-            assert_eq!(e.get_op_type(), EventRowOpType::Delete, "{:?}", es);
-            assert_eq!(e.start_ts, start_ts3.into_inner(), "{:?}", es);
-            assert_eq!(e.commit_ts, 0, "{:?}", es);
-            assert_eq!(e.key, k, "{:?}", es);
-            assert!(e.value.is_empty(), "{:?}", es);
-            let e = &es.entries[1];
             assert_eq!(e.get_type(), EventLogType::Committed, "{:?}", es);
             assert_eq!(e.get_op_type(), EventRowOpType::Put, "{:?}", es);
             assert_eq!(e.start_ts, start_ts2.into_inner(), "{:?}", es);
@@ -941,35 +919,38 @@ fn test_cdc_batch_size_limit_impl<F: KvFormat>() {
     );
 
     // Prewrite
-    let start_ts = block_on(suite.cluster.pd_client().get_tso()).unwrap();
-    let mut m3 = Mutation::default();
-    let k3 = b"xk3".to_vec();
-    m3.set_op(Op::Put);
-    m3.key = k3.clone();
-    m3.value = vec![0; 7 * 1024 * 1024];
-    let mut m4 = Mutation::default();
-    let k4 = b"xk4".to_vec();
-    m4.set_op(Op::Put);
-    m4.key = k4;
-    m4.value = b"v4".to_vec();
-    suite.must_kv_prewrite(region_id, vec![m3, m4], k3, start_ts);
+    #[cfg(NO_NEXT_GEN_COPMPATIBLE)]
+    {
+        let start_ts = block_on(suite.cluster.pd_client().get_tso()).unwrap();
+        let mut m3 = Mutation::default();
+        let k3 = b"xk3".to_vec();
+        m3.set_op(Op::Put);
+        m3.key = k3.clone();
+        m3.value = vec![0; 7 * 1024 * 1024];
+        let mut m4 = Mutation::default();
+        let k4 = b"xk4".to_vec();
+        m4.set_op(Op::Put);
+        m4.key = k4;
+        m4.value = b"v4".to_vec();
+        suite.must_kv_prewrite(region_id, vec![m3, m4], k3, start_ts);
 
-    let mut events = receive_event(false).events.to_vec();
-    assert_eq!(events.len(), 1, "{:?}", events);
-    match events.pop().unwrap().event.unwrap() {
-        Event_oneof_event::Entries(mut es) => {
-            let mut entries = es.take_entries().into_vec();
-            assert_eq!(entries.len(), 2);
-            entries.sort_by(|a, b| a.key.cmp(&b.key));
+        let mut events = receive_event(false).events.to_vec();
+        assert_eq!(events.len(), 1, "{:?}", events);
+        match events.pop().unwrap().event.unwrap() {
+            Event_oneof_event::Entries(mut es) => {
+                let mut entries = es.take_entries().into_vec();
+                assert_eq!(entries.len(), 2);
+                entries.sort_by(|a, b| a.key.cmp(&b.key));
 
-            let e = &entries[0];
-            assert_eq!(e.get_type(), EventLogType::Prewrite, "{:?}", e.get_type());
-            assert_eq!(e.key, b"xk3", "{:?}", e.key);
-            let e = &entries[1];
-            assert_eq!(e.get_type(), EventLogType::Prewrite, "{:?}", e.get_type());
-            assert_eq!(e.key, b"xk4", "{:?}", e.key);
+                let e = &entries[0];
+                assert_eq!(e.get_type(), EventLogType::Prewrite, "{:?}", e.get_type());
+                assert_eq!(e.key, b"xk3", "{:?}", e.key);
+                let e = &entries[1];
+                assert_eq!(e.get_type(), EventLogType::Prewrite, "{:?}", e.get_type());
+                assert_eq!(e.key, b"xk4", "{:?}", e.key);
+            }
+            other => panic!("unknown event {:?}", other),
         }
-        other => panic!("unknown event {:?}", other),
     }
 
     event_feed_wrap.replace(None);
@@ -1069,7 +1050,7 @@ fn test_old_value_basic_impl<F: KvFormat>() {
             match event.event.unwrap() {
                 Event_oneof_event::Entries(mut es) => {
                     for row in es.take_entries().to_vec() {
-                        if row.get_type() == EventLogType::Prewrite {
+                        if row.get_type() == EventLogType::Committed {
                             if row.get_start_ts() == ts3.into_inner()
                                 || row.get_start_ts() == ts4.into_inner()
                             {
@@ -1093,7 +1074,8 @@ fn test_old_value_basic_impl<F: KvFormat>() {
                 other => panic!("unknown event {:?}", other),
             }
         }
-        if event_count >= 4 {
+        // Prewrite are filtered out. (origin 4)
+        if event_count >= 2 {
             break;
         }
     }
@@ -1129,7 +1111,8 @@ fn test_old_value_basic_impl<F: KvFormat>() {
                 other => panic!("unknown event {:?}", other),
             }
         }
-        if event_count >= 3 {
+        // Prewrite are filtered out. (origin 3)
+        if event_count >= 2 {
             break;
         }
     }
@@ -1189,7 +1172,7 @@ fn test_old_value_multi_changefeeds_impl<F: KvFormat>() {
             match event.event.unwrap() {
                 Event_oneof_event::Entries(mut es) => {
                     for row in es.take_entries().to_vec() {
-                        if row.get_type() == EventLogType::Prewrite {
+                        if row.get_type() == EventLogType::Committed {
                             if row.get_start_ts() == ts3.into_inner() {
                                 assert_eq!(row.get_old_value(), b"v1");
                             } else {
@@ -1216,7 +1199,7 @@ fn test_old_value_multi_changefeeds_impl<F: KvFormat>() {
             match event.event.unwrap() {
                 Event_oneof_event::Entries(mut es) => {
                     for row in es.take_entries().to_vec() {
-                        if row.get_type() == EventLogType::Prewrite {
+                        if row.get_type() == EventLogType::Committed {
                             if row.get_start_ts() == ts3.into_inner() {
                                 assert_eq!(row.get_old_value(), b"v1");
                             } else {
@@ -1529,14 +1512,28 @@ fn test_old_value_cache_hit_impl<F: KvFormat>() {
     m1.key = k1.clone();
     m1.value = b"v1".to_vec();
     suite.must_kv_prewrite(region_id, vec![m1], k1.clone(), 10.into());
+    #[cfg(NO_NEXT_GEN_COMPATIBLE)]
+    {
+        let mut events = receive_event(false).events.to_vec();
+        match events.remove(0).event.unwrap() {
+            Event_oneof_event::Entries(mut es) => {
+                let row = &es.take_entries().to_vec()[0];
+                assert_eq!(row.get_value(), b"v1");
+                assert_eq!(row.get_old_value(), b"");
+                assert_eq!(row.get_type(), EventLogType::Prewrite);
+                assert_eq!(row.get_start_ts(), 10);
+            }
+            other => panic!("unknown event {:?}", other),
+        }
+    }
+
+    suite.must_kv_commit(region_id, vec![k1], 10.into(), 15.into());
     let mut events = receive_event(false).events.to_vec();
     match events.remove(0).event.unwrap() {
         Event_oneof_event::Entries(mut es) => {
             let row = &es.take_entries().to_vec()[0];
-            assert_eq!(row.get_value(), b"v1");
-            assert_eq!(row.get_old_value(), b"");
-            assert_eq!(row.get_type(), EventLogType::Prewrite);
-            assert_eq!(row.get_start_ts(), 10);
+            assert_eq!(row.get_type(), EventLogType::Committed);
+            assert_eq!(row.get_commit_ts(), 15);
         }
         other => panic!("unknown event {:?}", other),
     }
@@ -1553,16 +1550,6 @@ fn test_old_value_cache_hit_impl<F: KvFormat>() {
     let (access_count, miss_count) = rx.recv().unwrap();
     assert_eq!(access_count, 1);
     assert_eq!(miss_count, 0);
-    suite.must_kv_commit(region_id, vec![k1], 10.into(), 15.into());
-    let mut events = receive_event(false).events.to_vec();
-    match events.remove(0).event.unwrap() {
-        Event_oneof_event::Entries(mut es) => {
-            let row = &es.take_entries().to_vec()[0];
-            assert_eq!(row.get_type(), EventLogType::Commit);
-            assert_eq!(row.get_commit_ts(), 15);
-        }
-        other => panic!("unknown event {:?}", other),
-    }
 
     // Update a noexist value, simulate INSERT IGNORE INTO.
     let mut m2 = Mutation::default();
@@ -1571,17 +1558,32 @@ fn test_old_value_cache_hit_impl<F: KvFormat>() {
     m2.key = k2.clone();
     m2.value = b"v2".to_vec();
     suite.must_kv_prewrite(region_id, vec![m2], k2.clone(), 10.into());
+    #[cfg(NO_NEXT_GEN_COMPATIBLE)]
+    {
+        let mut events = receive_event(false).events.to_vec();
+        match events.remove(0).event.unwrap() {
+            Event_oneof_event::Entries(mut es) => {
+                let row = &es.take_entries().to_vec()[0];
+                assert_eq!(row.get_value(), b"v2");
+                assert_eq!(row.get_old_value(), b"");
+                assert_eq!(row.get_type(), EventLogType::Prewrite);
+                assert_eq!(row.get_start_ts(), 10);
+            }
+            other => panic!("unknown event {:?}", other),
+        }
+    }
+
+    suite.must_kv_commit(region_id, vec![k2], 10.into(), 15.into());
     let mut events = receive_event(false).events.to_vec();
     match events.remove(0).event.unwrap() {
         Event_oneof_event::Entries(mut es) => {
             let row = &es.take_entries().to_vec()[0];
-            assert_eq!(row.get_value(), b"v2");
-            assert_eq!(row.get_old_value(), b"");
-            assert_eq!(row.get_type(), EventLogType::Prewrite);
-            assert_eq!(row.get_start_ts(), 10);
+            assert_eq!(row.get_type(), EventLogType::Committed);
+            assert_eq!(row.get_commit_ts(), 15);
         }
         other => panic!("unknown event {:?}", other),
     }
+
     // k2 old value must be cached.
     let tx_ = tx.clone();
     scheduler
@@ -1595,16 +1597,6 @@ fn test_old_value_cache_hit_impl<F: KvFormat>() {
     let (access_count, miss_count) = rx.recv().unwrap();
     assert_eq!(access_count, 2);
     assert_eq!(miss_count, 0);
-    suite.must_kv_commit(region_id, vec![k2], 10.into(), 15.into());
-    let mut events = receive_event(false).events.to_vec();
-    match events.remove(0).event.unwrap() {
-        Event_oneof_event::Entries(mut es) => {
-            let row = &es.take_entries().to_vec()[0];
-            assert_eq!(row.get_type(), EventLogType::Commit);
-            assert_eq!(row.get_commit_ts(), 15);
-        }
-        other => panic!("unknown event {:?}", other),
-    }
 
     // Update an exist value, simulate UPDATE.
     let mut m2 = Mutation::default();
@@ -1613,17 +1605,33 @@ fn test_old_value_cache_hit_impl<F: KvFormat>() {
     m2.key = k2.clone();
     m2.value = b"v3".to_vec();
     suite.must_kv_prewrite(region_id, vec![m2], k2.clone(), 20.into());
+
+    #[cfg(NO_NEXT_GEN_COMPATIBLE)]
+    {
+        let mut events = receive_event(false).events.to_vec();
+        match events.remove(0).event.unwrap() {
+            Event_oneof_event::Entries(mut es) => {
+                let row = &es.take_entries().to_vec()[0];
+                assert_eq!(row.get_value(), b"v3");
+                assert_eq!(row.get_old_value(), b"v2");
+                assert_eq!(row.get_type(), EventLogType::Prewrite);
+                assert_eq!(row.get_start_ts(), 20);
+            }
+            other => panic!("unknown event {:?}", other),
+        }
+    }
+
+    suite.must_kv_commit(region_id, vec![k2], 20.into(), 25.into());
     let mut events = receive_event(false).events.to_vec();
     match events.remove(0).event.unwrap() {
         Event_oneof_event::Entries(mut es) => {
             let row = &es.take_entries().to_vec()[0];
-            assert_eq!(row.get_value(), b"v3");
-            assert_eq!(row.get_old_value(), b"v2");
-            assert_eq!(row.get_type(), EventLogType::Prewrite);
-            assert_eq!(row.get_start_ts(), 20);
+            assert_eq!(row.get_type(), EventLogType::Committed);
+            assert_eq!(row.get_commit_ts(), 25);
         }
         other => panic!("unknown event {:?}", other),
     }
+
     // k2 old value must be cached.
     let tx_ = tx;
     scheduler
@@ -1637,16 +1645,6 @@ fn test_old_value_cache_hit_impl<F: KvFormat>() {
     let (access_count, miss_count) = rx.recv().unwrap();
     assert_eq!(access_count, 3);
     assert_eq!(miss_count, 0);
-    suite.must_kv_commit(region_id, vec![k2], 20.into(), 25.into());
-    let mut events = receive_event(false).events.to_vec();
-    match events.remove(0).event.unwrap() {
-        Event_oneof_event::Entries(mut es) => {
-            let row = &es.take_entries().to_vec()[0];
-            assert_eq!(row.get_type(), EventLogType::Commit);
-            assert_eq!(row.get_commit_ts(), 25);
-        }
-        other => panic!("unknown event {:?}", other),
-    }
 
     event_feed_wrap.replace(None);
     suite.stop();
@@ -1705,17 +1703,31 @@ fn test_old_value_cache_hit_pessimistic_impl<F: KvFormat>() {
     m3.set_op(Op::Put);
     m3.value = b"v1".to_vec();
     suite.must_kv_pessimistic_prewrite(region_id, vec![m3], k3.clone(), 10.into(), 10.into());
-    // Current implementation emits an empty entry when encountering a `pessimistic`
-    // lock...
-    let _events = receive_event(false).events.to_vec();
+    #[cfg(NO_NEXT_GEN_COMPATIBLE)]
+    {
+        // Current implementation emits an empty entry when encountering a `pessimistic`
+        // lock...
+        let _events = receive_event(false).events.to_vec();
+        let mut events = receive_event(false).events.to_vec();
+        match events.remove(0).event.unwrap() {
+            Event_oneof_event::Entries(mut es) => {
+                let row = &es.take_entries().to_vec()[0];
+                assert_eq!(row.get_value(), b"v1");
+                assert_eq!(row.get_old_value(), b"");
+                assert_eq!(row.get_type(), EventLogType::Prewrite);
+                assert_eq!(row.get_start_ts(), 10);
+            }
+            other => panic!("unknown event {:?}", other),
+        }
+    }
+
+    suite.must_kv_commit(region_id, vec![k3], 10.into(), 15.into());
     let mut events = receive_event(false).events.to_vec();
     match events.remove(0).event.unwrap() {
         Event_oneof_event::Entries(mut es) => {
             let row = &es.take_entries().to_vec()[0];
-            assert_eq!(row.get_value(), b"v1");
-            assert_eq!(row.get_old_value(), b"");
-            assert_eq!(row.get_type(), EventLogType::Prewrite);
-            assert_eq!(row.get_start_ts(), 10);
+            assert_eq!(row.get_type(), EventLogType::Committed);
+            assert_eq!(row.get_commit_ts(), 15);
         }
         other => panic!("unknown event {:?}", other),
     }
@@ -1732,17 +1744,6 @@ fn test_old_value_cache_hit_pessimistic_impl<F: KvFormat>() {
     let (access_count, miss_count) = rx.recv().unwrap();
     assert_eq!(access_count, 1);
     assert_eq!(miss_count, 0);
-
-    suite.must_kv_commit(region_id, vec![k3], 10.into(), 15.into());
-    let mut events = receive_event(false).events.to_vec();
-    match events.remove(0).event.unwrap() {
-        Event_oneof_event::Entries(mut es) => {
-            let row = &es.take_entries().to_vec()[0];
-            assert_eq!(row.get_type(), EventLogType::Commit);
-            assert_eq!(row.get_commit_ts(), 15);
-        }
-        other => panic!("unknown event {:?}", other),
-    }
 
     // Update a value in pessimistic txn.
     let mut m3 = Mutation::default();
@@ -1773,20 +1774,35 @@ fn test_old_value_cache_hit_pessimistic_impl<F: KvFormat>() {
     m3.set_op(Op::Put);
     m3.value = b"v2".to_vec();
     suite.must_kv_pessimistic_prewrite(region_id, vec![m3], k3.clone(), 20.into(), 20.into());
-    // Current implementation emits an empty entry when encountering a `pessimistic`
-    // lock...
-    let _events = receive_event(false).events.to_vec();
+    #[cfg(NO_NEXT_GEN_COMPATIBLE)]
+    {
+        // Current implementation emits an empty entry when encountering a `pessimistic`
+        // lock...
+        let _events = receive_event(false).events.to_vec();
+        let mut events = receive_event(false).events.to_vec();
+        match events.remove(0).event.unwrap() {
+            Event_oneof_event::Entries(mut es) => {
+                let row = &es.take_entries().to_vec()[0];
+                assert_eq!(row.get_value(), b"v2");
+                assert_eq!(row.get_old_value(), b"v1");
+                assert_eq!(row.get_type(), EventLogType::Prewrite);
+                assert_eq!(row.get_start_ts(), 20);
+            }
+            other => panic!("unknown event {:?}", other),
+        }
+    }
+
+    suite.must_kv_commit(region_id, vec![k3], 20.into(), 25.into());
     let mut events = receive_event(false).events.to_vec();
     match events.remove(0).event.unwrap() {
         Event_oneof_event::Entries(mut es) => {
             let row = &es.take_entries().to_vec()[0];
-            assert_eq!(row.get_value(), b"v2");
-            assert_eq!(row.get_old_value(), b"v1");
-            assert_eq!(row.get_type(), EventLogType::Prewrite);
-            assert_eq!(row.get_start_ts(), 20);
+            assert_eq!(row.get_type(), EventLogType::Committed);
+            assert_eq!(row.get_commit_ts(), 25);
         }
         other => panic!("unknown event {:?}", other),
     }
+
     // k3 old value must be cached.
     let tx_ = tx;
     scheduler
@@ -1800,16 +1816,6 @@ fn test_old_value_cache_hit_pessimistic_impl<F: KvFormat>() {
     let (access_count, miss_count) = rx.recv().unwrap();
     assert_eq!(access_count, 2);
     assert_eq!(miss_count, 0);
-    suite.must_kv_commit(region_id, vec![k3], 20.into(), 25.into());
-    let mut events = receive_event(false).events.to_vec();
-    match events.remove(0).event.unwrap() {
-        Event_oneof_event::Entries(mut es) => {
-            let row = &es.take_entries().to_vec()[0];
-            assert_eq!(row.get_type(), EventLogType::Commit);
-            assert_eq!(row.get_commit_ts(), 25);
-        }
-        other => panic!("unknown event {:?}", other),
-    }
 
     event_feed_wrap.replace(None);
     suite.stop();
@@ -2086,20 +2092,6 @@ fn test_cdc_extract_rollback_if_gc_fence_set_impl<F: KvFormat>() {
     mutation.key = key.to_vec();
     mutation.value = v3.to_vec();
     suite.must_kv_prewrite(region_id, vec![mutation], key.to_vec(), start_ts3);
-    // Consume the prewrite event.
-    let event = receive_event(false);
-    event
-        .events
-        .into_iter()
-        .for_each(|e| match e.event.unwrap() {
-            Event_oneof_event::Entries(es) => {
-                assert!(es.entries.len() == 1, "{:?}", es);
-                let e = &es.entries[0];
-                assert_eq!(e.get_type(), EventLogType::Prewrite, "{:?}", es);
-                assert_eq!(e.get_start_ts(), start_ts3.into_inner());
-            }
-            other => panic!("unknown event {:?}", other),
-        });
 
     // Again, assume the transaction is committed with async commit protocol, and
     // the commit_ts is also another transaction's start_ts.
@@ -2141,7 +2133,7 @@ fn test_cdc_extract_rollback_if_gc_fence_set_impl<F: KvFormat>() {
             Event_oneof_event::Entries(es) => {
                 assert!(es.entries.len() == 1, "{:?}", es);
                 let e = &es.entries[0];
-                assert_eq!(e.get_type(), EventLogType::Commit, "{:?}", es);
+                assert_eq!(e.get_type(), EventLogType::Committed, "{:?}", es);
                 assert_eq!(e.get_start_ts(), start_ts3.into_inner());
                 assert_eq!(e.get_commit_ts(), commit_ts3.into_inner());
                 assert_eq!(e.get_value(), v3);
@@ -2332,7 +2324,7 @@ fn test_cdc_write_rollback_when_no_lock_impl<F: KvFormat>() {
 }
 
 #[test]
-#[cfg(NGDISABLE)]
+#[cfg(NO_NEXT_GEN_COMPATIBLE)]
 #[ignore = "TiKV cannot upgrade to Cloud Engine, and Cloud Engine doesn't support ADVANCE_METHOD = 1 yet."]
 fn test_resolved_ts_cluster_upgrading() {
     let cluster = new_server_cluster(0, 3);
@@ -2379,7 +2371,7 @@ fn test_resolved_ts_cluster_upgrading() {
 
 #[test]
 // I cannot fix this case yet...
-#[cfg(NGDISABLE)]
+#[cfg(NO_NEXT_GEN_COMPATIBLE)]
 fn test_resolved_ts_with_learners() {
     let mut cluster = new_server_cluster(0, 2);
     cluster.pd_client.disable_default_operator();
@@ -2430,23 +2422,27 @@ fn test_prewrite_without_value() {
     // The prewrite can be retrieved from incremental scan.
     let event = receive_event(false);
     assert_eq!(
-        event.get_events()[0].get_entries().entries[0].value,
-        large_value
+        event.get_events()[0].get_entries().entries[0].get_type(),
+        EventLogType::Initialized,
+        "{event:?}"
     );
 
     // check_txn_status will put the lock again, but without value.
     must_check_txn_status(&client, ctx.clone(), b"xkeykey", 10, 12, 12);
     must_kv_commit(&client, ctx, vec![b"xkeykey".to_vec()], 10, 14, 14);
-    // The lock without value shouldn't be retrieved.
-    // Cloud Engine: value is always inlined in `Lock`.
-    let event = receive_event(false);
-    assert!(
-        !event.get_events()[0].get_entries().entries[0]
-            .get_value()
-            .is_empty(),
-        "{:?}",
-        event
-    );
+    #[cfg(NO_NEXT_GEN_COMPATIBLE)]
+    {
+        // The lock without value shouldn't be retrieved.
+        // Cloud Engine: value is always inlined in `Lock`.
+        let event = receive_event(false);
+        assert!(
+            !event.get_events()[0].get_entries().entries[0]
+                .get_value()
+                .is_empty(),
+            "{:?}",
+            event
+        );
+    }
     let event = receive_event(false);
     assert_eq!(event.get_events()[0].get_entries().entries[0].commit_ts, 14);
 }
@@ -2784,16 +2780,6 @@ fn test_cdc_filter_key_range() {
         mutation.key = k.clone().into_bytes();
         mutation.value = v.into_bytes();
         suite.must_kv_prewrite(region_id, vec![mutation], k.clone().into_bytes(), start_ts);
-        let mut events = receive_and_check_events(case.1, case.2);
-        while let Some(event) = events.pop() {
-            match event.event.unwrap() {
-                Event_oneof_event::Entries(entries) => {
-                    assert_eq!(entries.entries.len(), 1);
-                    assert_eq!(entries.entries[0].get_type(), EventLogType::Prewrite);
-                }
-                other => panic!("unknown event {:?}", other),
-            }
-        }
 
         if case.3 {
             // Commit
@@ -2804,7 +2790,7 @@ fn test_cdc_filter_key_range() {
                 match event.event.unwrap() {
                     Event_oneof_event::Entries(entries) => {
                         assert_eq!(entries.entries.len(), 1);
-                        assert_eq!(entries.entries[0].get_type(), EventLogType::Commit);
+                        assert_eq!(entries.entries[0].get_type(), EventLogType::Committed);
                     }
                     other => panic!("unknown event {:?}", other),
                 }

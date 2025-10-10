@@ -491,7 +491,7 @@ test-cloud-engine: pre-test
 		-p test_cloud_server -p test_pd_client \
 		-p native_br -p load_data -p cloud_encryption \
 		-p cloud_server -p pd_client -p api_version \
-		-p concurrency_manager \
+		-p concurrency_manager -p cdc \
 		--tests
 
 test-cloud-engine-integration: pre-test
