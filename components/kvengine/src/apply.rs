@@ -725,13 +725,12 @@ impl EngineCore {
                     );
                 }
             }
-            for deleted in tc.get_table_deletes() {
-                new_col_levels
-                    .unconverted_l0s
-                    .retain(|l0| l0.id() != deleted.get_id());
-            }
         }
-
+        for deleted in tc.get_table_deletes() {
+            new_col_levels
+                .unconverted_l0s
+                .retain(|l0| l0.id() != deleted.get_id());
+        }
         let mut columnar_deletes = HashSet::new();
         for deleted in tc.get_columnar_deletes() {
             columnar_deletes.insert(deleted.get_id());

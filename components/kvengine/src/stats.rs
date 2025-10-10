@@ -342,6 +342,7 @@ pub struct ShardStats {
     pub schema_version: i64,
     pub schema_restore_version: u64,
     pub columnar_tables: usize,
+    pub unconverted_l0_count: usize,
     pub columnar_levels: Vec<ColumnarLevelStats>,
     pub vector_indexes: VectorIndexStats,
 }
@@ -694,6 +695,7 @@ impl super::Shard {
             .map(|sf| sf.get_restore_version())
             .unwrap_or_default();
         let columnar_tables = data.columnar_table_ids.len();
+        let unconverted_l0_count = data.col_levels.unconverted_l0s.len();
         let mut columnar_levels = vec![ColumnarLevelStats::default(); COLUMNAR_LEVELS];
         for (i, l) in data.col_levels.levels.iter().enumerate() {
             columnar_levels[i].num_files = l.files.len();
@@ -760,6 +762,7 @@ impl super::Shard {
             schema_version,
             schema_restore_version,
             columnar_tables,
+            unconverted_l0_count,
             columnar_levels,
             vector_indexes,
         }
