@@ -32,7 +32,7 @@ use kvengine::{
         schema_file::{build_schema_file, Schema, SchemaBuf},
         sstable::{BlockCache, BlockCacheType},
     },
-    ColumnarStatusResp, SnapAccess, STORAGE_CLASS_KEY, WRITE_CF,
+    ColumnarStatusResp, Engine, SnapAccess, STORAGE_CLASS_KEY, WRITE_CF,
 };
 use kvproto::coprocessor::DelegateResponse;
 use pd_client::PdClient;
@@ -63,7 +63,7 @@ use tikv_util::{
 };
 use tipb::ColumnInfo;
 
-use crate::{alloc_node_id, request_dump_snapshot_on_store};
+use crate::{alloc_node_id, destroy_range, request_dump_snapshot_on_store};
 
 const SEGMENT_SIZE: i64 = 64;
 const FREQ_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
@@ -1001,10 +1001,7 @@ fn test_columnar_ia_file() {
     oss.shutdown();
 }
 
-#[test]
-fn test_columnar_scan_with_filter() {
-    test_util::init_log_for_test();
-    let node_id = alloc_node_id();
+fn prepare_columnar_cluster(node_id: u16) -> (ServerCluster, Schema, u32) {
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
         conf.kvengine
             .columnar_table_build_options
@@ -1014,6 +1011,7 @@ fn test_columnar_scan_with_filter() {
             .pack_max_row_count = 9;
         conf.kvengine.build_columnar = true;
         conf.kvengine.read_columnar = true;
+        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(1));
     });
     let dfs = cluster.get_dfs().unwrap();
     let (keyspace_id, table_ids) = dfs
@@ -1052,13 +1050,10 @@ fn test_columnar_scan_with_filter() {
         10,
         || "failed to build schema file".to_string(),
     );
-    let mut client = cluster.new_client();
-    let ctx = Mutex::new(EvalContext::default());
-    client.put_kv(
-        0..1000,
-        |i: usize| gen_row_key(keyspace_id, table_id, i),
-        |i: usize| gen_row_val(&ctx, i),
-    );
+    (cluster, schema, keyspace_id)
+}
+
+fn wait_columnar_built(kvengine: &Engine, table_id: i64) -> u64 {
     let mut shard_id = None;
     must_wait(
         || {
@@ -1076,7 +1071,69 @@ fn test_columnar_scan_with_filter() {
         10,
         || "failed to build columnar file".to_string(),
     );
-    let shard_id = shard_id.unwrap();
+    shard_id.unwrap()
+}
+
+#[test]
+fn test_columnar_destroy_range() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let (cluster, schema, keyspace_id) = prepare_columnar_cluster(node_id);
+    let table_id = schema.table_id;
+    let kvengine = cluster.get_kvengine(node_id);
+    let mut client = cluster.new_client();
+    let ctx = Mutex::new(EvalContext::default());
+    client.put_kv(
+        0..500,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    let shard_id = wait_columnar_built(&kvengine, table_id);
+    let compact_fp = "kvengine_l0_to_columnar";
+    fail::cfg(compact_fp, "return").unwrap();
+    client.put_kv(
+        500..1000,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    must_wait(
+        || {
+            let shard = kvengine.get_shard(shard_id).unwrap();
+            let stats = shard.get_stats();
+            stats.unconverted_l0_count > 0
+        },
+        10,
+        || "failed to build columnar file".to_string(),
+    );
+    let store_id = cluster.get_stores()[0];
+    let range_prefix = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
+    destroy_range(&mut client, store_id, &range_prefix);
+    must_wait(
+        || {
+            let shard = kvengine.get_shard(shard_id).unwrap();
+            let stats = shard.get_stats();
+            stats.unconverted_l0_count == 0
+        },
+        10,
+        || "failed to clear unconverted l0".to_string(),
+    );
+}
+
+#[test]
+fn test_columnar_scan_with_filter() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let (cluster, schema, keyspace_id) = prepare_columnar_cluster(node_id);
+    let table_id = schema.table_id;
+    let kvengine = cluster.get_kvengine(node_id);
+    let mut client = cluster.new_client();
+    let ctx = Mutex::new(EvalContext::default());
+    client.put_kv(
+        0..1000,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    let shard_id = wait_columnar_built(&kvengine, table_id);
     let shard = kvengine.get_shard(shard_id).unwrap();
     let snap_access = shard.new_snap_access();
     let ts = client.get_ts().into_inner();

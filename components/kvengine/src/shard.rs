@@ -1220,6 +1220,7 @@ impl Shard {
                     return None;
                 }
             }
+            fail::fail_point!("kvengine_l0_to_columnar", |_| None);
             return Some(CompactionPriority::L0ToColumnar);
         }
 
