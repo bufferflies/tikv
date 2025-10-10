@@ -5,6 +5,7 @@ use std::{sync::Arc, time::Duration};
 use bytes::{Buf, Bytes};
 use http::{HeaderMap, HeaderValue};
 use hyper::{Body, Method, Request, Response, Result, StatusCode, Uri};
+use merged_engine::ForceStop;
 use security::HttpClient;
 use serde::{Deserialize, Serialize};
 use tikv_util::{box_err, future::paired_future_callback, info};
@@ -17,6 +18,8 @@ pub struct ReplicationScheduler {
     cdc_addrs: Arc<dashmap::DashMap<u32, String>>,
     http_client: Arc<HttpClient>,
     scheme: String,
+    #[allow(dead_code)]
+    force_stop: ForceStop,
 }
 
 impl ReplicationScheduler {
@@ -24,6 +27,7 @@ impl ReplicationScheduler {
         sender: tikv_util::mpsc::Sender<CdcMsg>,
         cdc_addrs: Arc<dashmap::DashMap<u32, String>>,
         http_client: Arc<HttpClient>,
+        force_stop: ForceStop,
     ) -> Self {
         let scheme = if matches!(http_client.as_ref(), HttpClient::Http(_)) {
             "http".to_string()
@@ -35,6 +39,7 @@ impl ReplicationScheduler {
             cdc_addrs,
             http_client,
             scheme,
+            force_stop,
         }
     }
 
@@ -46,6 +51,11 @@ impl ReplicationScheduler {
         self.cdc_addrs
             .get(&keyspace_id)
             .map(|addr| addr.value().clone())
+    }
+
+    pub fn force_stop(&self) {
+        #[cfg(feature = "testexport")]
+        self.force_stop.set();
     }
 }
 
@@ -437,6 +447,7 @@ mod tests {
                 sender,
                 cdc_addrs,
                 Arc::new(HttpClient::Http(hyper::Client::new())),
+                ForceStop::default(),
             )
         }
     }

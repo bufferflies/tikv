@@ -36,7 +36,7 @@ use kvproto::{
     tikvpb::create_tikv,
 };
 use log_wrappers::Value as LogValue;
-use merged_engine::{MergedEngine, MergedEngineContext, StoreProgress};
+use merged_engine::{ForceStop, MergedEngine, MergedEngineContext, StoreProgress};
 use native_br::{
     common::{
         assemble_wal_chunks, collect_wal_chunks_with_retry, get_latest_backup_meta,
@@ -78,6 +78,25 @@ const FETCH_WAL_TIMEOUT: Duration = Duration::from_secs(30);
 const TRACK_WAL_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_STORES_TIMEOUT: Duration = Duration::from_secs(120);
 
+macro_rules! try_force_stop {
+    ($self:ident, $expr:expr) => {{
+        #[cfg(feature = "testexport")]
+        if $self.force_stop.get() {
+            info!("replication_worker force stopped");
+            return $expr;
+        }
+    }};
+    ($self:ident) => {{
+        try_force_stop!($self, ());
+    }};
+}
+
+macro_rules! try_force_stop_err {
+    ($self:ident) => {{
+        try_force_stop!($self, Err(Error::ForceStopped));
+    }};
+}
+
 pub struct ReplicationWorker {
     ctx: MergedEngineContext,
     http_client: Arc<HttpClient>,
@@ -109,6 +128,7 @@ pub struct ReplicationWorker {
 
     working_dir: PathBuf,
     stop: bool,
+    force_stop: ForceStop,
 }
 
 impl ReplicationWorker {
@@ -125,6 +145,7 @@ impl ReplicationWorker {
         let worker_dir = data_dir.join("rep_worker");
         box_try!(fs::create_dir_all(&worker_dir));
         let master_key = fs.get_runtime().block_on(security.new_master_key());
+        let force_stop = ForceStop::default();
         let ctx = MergedEngineContext {
             pd,
             fs,
@@ -132,6 +153,7 @@ impl ReplicationWorker {
             security_config: Arc::new(security),
             config: config.merged_engine.clone(),
             master_key,
+            force_stop: force_stop.clone(),
         };
         let http_client = ctx
             .pd
@@ -225,6 +247,7 @@ impl ReplicationWorker {
             wal_cache: WalCache::default(),
             working_dir: worker_dir,
             stop: false,
+            force_stop,
         };
         let env = Arc::new(
             EnvBuilder::new()
@@ -276,6 +299,7 @@ impl ReplicationWorker {
             self.tx.clone(),
             self.cdc_addrs.clone(),
             self.http_client.clone(),
+            self.force_stop.clone(),
         )
     }
 
@@ -311,6 +335,7 @@ impl ReplicationWorker {
                 info!("replication_worker stopped");
                 return;
             }
+            try_force_stop!(self);
             let should_sync = self.should_sync();
             if has_msg || should_sync {
                 // When has message (e.g. `CdcMsg::Applied`), send resolved_ts in time.
@@ -318,6 +343,7 @@ impl ReplicationWorker {
                     error!("send resolved ts error"; "err" => ?err);
                 }
             }
+            try_force_stop!(self);
             if should_sync {
                 if let Err(err) = self.maybe_update_merged_engine() {
                     error!("update merged engine error"; "err" => ?err);
@@ -327,6 +353,7 @@ impl ReplicationWorker {
     }
 
     fn handle_msg(&mut self, msg: CdcMsg) {
+        try_force_stop!(self);
         match msg {
             CdcMsg::AddKeyspace {
                 keyspace_id,
@@ -756,6 +783,7 @@ impl ReplicationWorker {
         info!("send_resolved_ts"; "last_update_time" => self.last_update_ts);
         self.resolved_regions.clear();
         for (&region_id, delegate) in &mut self.region_delegates {
+            try_force_stop_err!(self);
             let Some(ts) = delegate
                 .resolver
                 .as_mut()
@@ -779,6 +807,7 @@ impl ReplicationWorker {
         // TODO: Send small ts with small batch first.
         // Ref: https://github.com/tikv/tikv/blob/release-7.5/components/cdc/src/endpoint.rs, on_min_ts.
         for ((ts, req_key), regions) in self.resolved_regions.drain() {
+            try_force_stop_err!(self);
             let Some(conn) = self.conns.get(&req_key.conn_id) else {
                 warn!("send_resolved_ts: conn not found"; "conn_id" => ?req_key.conn_id);
                 continue;
@@ -877,6 +906,7 @@ impl ReplicationWorker {
         let mut last_err: Option<Error> = None;
         let start_time = Instant::now_coarse();
         while start_time.saturating_elapsed() < timeout {
+            try_force_stop_err!(self);
             match self.update_stores(&targets) {
                 Ok(()) => return Ok(()),
                 Err(err) => {
@@ -946,6 +976,8 @@ impl ReplicationWorker {
         let mut epoch = store_progress.epoch;
         let mut start_off = store_progress.offset;
         while (epoch, start_off) < (target.epoch, target.offset) {
+            try_force_stop_err!(self);
+
             let end_off = get_end_off(epoch);
             debug!("update_store_wal"; "store" => store_id, "epoch" => epoch,
                 "start" => start_off, "end" => end_off);
@@ -1388,6 +1420,9 @@ impl ReplicationWorker {
                 continue;
             };
             'EVENTS_LOOP: for event in &region_events.events {
+                // It's OK to not return error. Outer loop will exit before handle next message.
+                try_force_stop!(self, vec![]);
+
                 let mut event_to_send = Event::new();
                 event_to_send.set_request_id(req_key.request_id.into_inner());
                 event_to_send.set_region_id(region_id);

@@ -79,6 +79,10 @@ impl WriteBatch {
         self.peers.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.peers.len()
+    }
+
     pub(crate) fn merge_peer(&mut self, peer_batch: PeerBatch) {
         match self.peers.entry(peer_batch.peer_id) {
             Entry::Occupied(old_peer_batch) => {

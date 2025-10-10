@@ -340,7 +340,7 @@ fn test_random_replication() {
     block_on(pd_ctl.merge_regions_by_key(&row_key_5, &row_key_1, Duration::from_secs(30))).unwrap();
 
     info!("shutdown replication worker");
-    worker.shutdown();
+    worker.random_force_shutdown(0.75);
 
     // Write some data to make the wal rotate more than 4 times.
     info!("update workload");
@@ -371,7 +371,7 @@ fn test_random_replication() {
             if rng.gen_ratio(1, 4) {
                 // TODO: restart node & replication worker at the same time.
                 info!("shutdown replication worker");
-                worker.shutdown();
+                worker.random_force_shutdown(0.75);
 
                 let sleep_secs = rng.gen_range(0..=10);
                 thread::sleep(Duration::from_secs(sleep_secs));

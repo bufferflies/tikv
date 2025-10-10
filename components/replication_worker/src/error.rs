@@ -26,6 +26,10 @@ pub enum Error {
     TiCdcError(#[from] TiCdcError),
     #[error("other error {0}")]
     OtherError(#[from] Box<dyn std::error::Error + Sync + Send>),
+
+    #[cfg(feature = "testexport")]
+    #[error("replication worker force stopped")]
+    ForceStopped,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

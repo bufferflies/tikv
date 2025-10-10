@@ -156,7 +156,8 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
     });
 
     drop(running_ctl);
-    stop_services(ctx, svc_handles);
+    let force = false;
+    stop_services(ctx, svc_handles, force);
 }
 
 // `config_file_path`: optional path to the config file which cloud_worker will
@@ -423,9 +424,12 @@ fn start_server_impl(
     (ServerFuture::new(server, cop_server_opt), ctx, svc_handles)
 }
 
-fn stop_services(ctx: Arc<server::Context>, svc_handles: ServiceHandles) {
+fn stop_services(ctx: Arc<server::Context>, svc_handles: ServiceHandles, force: bool) {
     if let Some(rep_scheduler) = &ctx.rep_scheduler {
         rep_scheduler.schedule(CdcMsg::Stop);
+        if force {
+            rep_scheduler.force_stop();
+        }
     }
     if let Some(rep_handle) = svc_handles.rep_handle {
         rep_handle.join().expect("replication worker panic");
@@ -590,10 +594,14 @@ impl CloudWorker {
         self.svc_handles = Some(svc_handles);
     }
 
-    pub fn shutdown(mut self) {
+    pub fn shutdown(self) {
+        self.shutdown_opt(false);
+    }
+
+    pub fn shutdown_opt(mut self, force: bool) {
         self.running_ctl.stop();
         if let Some((ctx, svc_handles)) = self.ctx.take().zip(self.svc_handles.take()) {
-            stop_services(ctx, svc_handles);
+            stop_services(ctx, svc_handles, force);
         }
         if let Some(handle) = self.server_handle.take() {
             if self.close_tx.send(()).is_err() {
@@ -601,6 +609,13 @@ impl CloudWorker {
             }
             handle.join().unwrap();
         }
+    }
+
+    #[cfg(feature = "testexport")]
+    pub fn random_force_shutdown(self, ratio: f64) {
+        use rand::{thread_rng, Rng};
+        let force = thread_rng().gen_bool(ratio);
+        self.shutdown_opt(force);
     }
 }
 

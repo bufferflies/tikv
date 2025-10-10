@@ -18,6 +18,10 @@ pub enum Error {
     StoreProgressMismatch(String),
     #[error("{0} store progress not found")]
     StoreProgressNotFound(u64),
+
+    #[cfg(feature = "testexport")]
+    #[error("merged engine force stopped")]
+    ForceStopped,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

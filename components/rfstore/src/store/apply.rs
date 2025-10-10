@@ -213,6 +213,10 @@ impl ApplyMsgs {
         self.msgs.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.msgs.len()
+    }
+
     pub fn clear(&mut self) {
         self.msgs.clear();
     }

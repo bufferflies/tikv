@@ -59,6 +59,22 @@ use crate::{
     preprocessor::Preprocessor,
 };
 
+macro_rules! try_force_stop {
+    ($self:ident, $expr:expr) => {{
+        #[cfg(feature = "testexport")]
+        if $self.ctx.force_stop.get() {
+            info!("merged engine force stopped");
+            return $expr;
+        }
+    }};
+}
+
+macro_rules! try_force_stop_err {
+    ($self:ident) => {{
+        try_force_stop!($self, Err(Error::ForceStopped));
+    }};
+}
+
 // The quorum size when replicas number is 3.
 // Used to check whether the Raft log is committed.
 const QUORUM_SIZE: u8 = 2;
@@ -71,6 +87,9 @@ pub struct MergedEngineContext {
     pub master_key: MasterKey,
     pub config: MergedEngineConfig,
     pub security_config: Arc<SecurityConfig>,
+
+    #[allow(dead_code)]
+    pub force_stop: ForceStop, // For test purpose.
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -867,15 +886,30 @@ impl MergedEngine {
             destroyed_regions: HashSet::default(),
         };
         let updated_regions: Vec<u64> = self.updated_regions.drain().collect();
-        self.sync_merged_for_regions(&mut ctx, &updated_regions)?;
-        self.handle_prepared_msgs(&mut ctx);
+        self.sync_merged_with_ctx(&mut ctx, updated_regions)
+            .map_err(|e| {
+                debug!("sync_merged: clear context on error: {:?}", ctx; "err" => ?e);
+                ctx.clear();
+                e
+            })
+    }
+
+    fn sync_merged_with_ctx(
+        &mut self,
+        ctx: &mut SyncRegionsContext<'_>,
+        updated_regions: Vec<u64>,
+    ) -> Result<()> {
+        self.sync_merged_for_regions(ctx, &updated_regions)?;
+        self.handle_prepared_msgs(ctx);
         self.update_progress_and_truncate(&updated_regions, ctx.raft_wb);
-        self.destroy_regions(&mut ctx);
+        self.destroy_regions(ctx);
         if !ctx.raft_wb.is_empty() {
+            try_force_stop_err!(self);
             self.raft.write(mem::take(ctx.raft_wb))?;
         }
         self.manifest
             .update_region_progresses(&self.region_progresses);
+        try_force_stop_err!(self);
         self.manifest.persist()?;
         Ok(())
     }
@@ -892,6 +926,7 @@ impl MergedEngine {
         let mut merged_wb_estimated_size = 0;
         let mut finished_regions = HashSet::default();
         while let Some(updated_region) = update_queue.pop_front() {
+            try_force_stop_err!(self);
             tikv_util::set_current_region(updated_region);
             match self.sync_region(
                 ctx,
@@ -963,6 +998,7 @@ impl MergedEngine {
         let mut res = SyncRegionResult::Finished;
         // preprocess entries.
         for log_index in low..high {
+            try_force_stop_err!(self);
             let mut entry = progress
                 .entries
                 .get(&log_index)
@@ -1069,6 +1105,7 @@ impl MergedEngine {
             .handle_apply_msgs_for_replication(applier, ctx.apply_ctx);
         // We keep waiting for paused region because later region may depend on it.
         while applier.is_paused() {
+            try_force_stop_err!(self);
             let msgs = if let Some(msgs) = ctx.prepared_msgs.remove(&updated_region) {
                 // received by previous region, handle it now.
                 msgs
@@ -1240,6 +1277,24 @@ impl SyncRegionsContext<'_> {
     fn skip_apply(&mut self) {
         self.apply_msgs.clear();
     }
+
+    fn clear(&mut self) {
+        self.apply_msgs.clear();
+        self.prepared_msgs.clear();
+        self.destroyed_regions.clear();
+        self.raft_wb.reset();
+    }
+}
+
+impl fmt::Debug for SyncRegionsContext<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SyncRegionsContext")
+            .field("apply_msgs", &self.apply_msgs.len())
+            .field("prepared_msgs", &self.prepared_msgs.len())
+            .field("destroyed_regions", &self.destroyed_regions.len())
+            .field("raft_wb", &self.raft_wb.len())
+            .finish()
+    }
 }
 
 fn update_peer_state(
@@ -1375,3 +1430,23 @@ impl RaftLogOpWithCounter {
 fn get_keyspace_id_of_snapshot(snap: &kvenginepb::Snapshot) -> u32 {
     ApiV2::get_u32_keyspace_id_by_key(snap.get_outer_start()).unwrap_or_default()
 }
+
+#[cfg(feature = "testexport")]
+#[derive(Default, Clone)]
+pub struct ForceStop(Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(feature = "testexport")]
+impl ForceStop {
+    pub fn set(&self) {
+        use std::sync::atomic::Ordering;
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(not(feature = "testexport"))]
+pub type ForceStop = ();

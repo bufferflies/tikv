@@ -86,6 +86,7 @@ fn test_merged_engine_once() {
             raft_write_batch_size: ReadableSize::kb(256),
         },
         security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),
+        force_stop: Default::default(),
     };
     let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone()).unwrap();
     let merged_kv = merged_engine.get_kv();
