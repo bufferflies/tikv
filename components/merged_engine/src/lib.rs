@@ -936,6 +936,7 @@ impl MergedEngine {
     ) -> Result<()> {
         self.sync_merged_for_regions(ctx, &updated_regions)?;
         self.handle_prepared_msgs(ctx);
+        self.remove_dependents(ctx);
         self.update_progress_and_truncate(&updated_regions, ctx.raft_wb);
         self.destroy_regions(ctx);
         if !ctx.raft_wb.is_empty() {
@@ -1191,6 +1192,12 @@ impl MergedEngine {
         }
     }
 
+    fn remove_dependents(&mut self, ctx: &mut SyncRegionsContext<'_>) {
+        for (parent_id, dependent_id) in ctx.remove_dependents.drain(..) {
+            self.raft.remove_dependent(parent_id, dependent_id);
+        }
+    }
+
     fn update_progress_and_truncate(&mut self, regions: &[u64], raft_wb: &mut WriteBatch) {
         for &region_id in regions {
             tikv_util::set_current_region(region_id);
@@ -1199,21 +1206,15 @@ impl MergedEngine {
             let commit_index = progress.commit_index;
             progress.synced_index = commit_index;
             // We need to keep the uncommitted index for the next round.
-            debug!(
-                "{} update_progress_and_truncate: truncate <= {}",
-                tag, commit_index
-            );
             progress.entries.retain(|&index, _| index > commit_index);
 
-            let truncated_idx = self.raft.get_truncated_index(region_id).unwrap();
-            if progress.truncated_index > truncated_idx {
+            // Skip truncating region with dependents. The parent region may need the old
+            // raft logs on recover.
+            let truncate_raft_log = if !self.raft.has_dependents(region_id)
+                && progress.truncated_index > self.raft.get_truncated_index(region_id).unwrap()
+            {
                 if let Some(preprocessor) = self.preprocessors.get_mut(&region_id) {
                     if let Some(shard_meta) = preprocessor.as_ref().shard_meta {
-                        if shard_meta.parent.is_some() {
-                            // skip truncating region with parent, the parent may need the old
-                            // raft logs on recover.
-                            continue;
-                        }
                         if shard_meta.data_sequence < progress.truncated_index {
                             shard_meta.data_sequence = progress.truncated_index;
                             write_engine_meta(raft_wb, region_id, shard_meta);
@@ -1221,7 +1222,15 @@ impl MergedEngine {
                     }
                 }
                 raft_wb.truncate_raft_log(region_id, region_id, progress.truncated_index);
-            }
+                Some(progress.truncated_index)
+            } else {
+                None
+            };
+
+            debug!(
+                "{} update_progress_and_truncate: truncate entries <= {}, raft log <= {:?}",
+                tag, commit_index, truncate_raft_log
+            );
         }
     }
 
