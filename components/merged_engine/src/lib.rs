@@ -1372,6 +1372,7 @@ fn merged_region_meta(origin_region: &metapb::Region, store_id: u64) -> metapb::
     merged_peer.set_store_id(store_id);
     let mut merged_region = origin_region.clone();
     merged_region.set_peers(vec![merged_peer].into());
+    merged_region.mut_region_epoch().set_conf_ver(1);
     merged_region
 }
 
