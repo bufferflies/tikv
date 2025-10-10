@@ -1084,6 +1084,21 @@ impl ShardTag {
         }
     }
 
+    // Get `engine_id` from first peer when it is None.
+    pub fn from_region(engine_id: Option<u64>, region: &kvproto::metapb::Region) -> Self {
+        let engine_id = engine_id.unwrap_or_else(|| {
+            region
+                .get_peers()
+                .first()
+                .map(|p| p.store_id)
+                .unwrap_or_default()
+        });
+        Self::new(
+            engine_id,
+            IdVer::new(region.id, region.get_region_epoch().version),
+        )
+    }
+
     pub fn with_region_version(mut self, region_ver: u64) -> Self {
         self.id_ver.ver = region_ver;
         self

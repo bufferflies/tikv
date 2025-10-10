@@ -120,7 +120,7 @@ impl Default for MergedEngineConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RegionProgress {
     pub keyspace_id: u32,
     pub region_id: u64,
@@ -128,6 +128,21 @@ pub struct RegionProgress {
     pub synced_index: u64,
     pub commit_index: u64,
     pub truncated_index: u64,
+}
+
+impl fmt::Debug for RegionProgress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut entries: Vec<_> = self.entries.keys().collect();
+        entries.sort_unstable();
+        f.debug_struct("RegionProgress")
+            .field("keyspace", &self.keyspace_id)
+            .field("region", &self.region_id)
+            .field("entries", &entries)
+            .field("synced", &self.synced_index)
+            .field("commit", &self.commit_index)
+            .field("truncated", &self.truncated_index)
+            .finish()
+    }
 }
 
 impl RegionProgress {
@@ -607,24 +622,32 @@ impl MergedEngine {
                 continue;
             }
             let region_state = rfstore::store::load_last_peer_state(merged_raft, peer_id).unwrap();
+            let tag = ShardTag::from_region(None, region_state.get_region());
             let region_version = region_state.get_region().get_region_epoch().get_version();
             let raft_state =
                 rfstore::store::load_peer_raft_state(merged_raft, peer_id, region_version).unwrap();
-            let commit = raft_state.get_commit();
             let keyspace_id =
                 ApiV2::get_u32_keyspace_id_by_key(region_state.get_region().get_start_key())
                     .unwrap_or_default();
             let region_progress = region_progresses
                 .entry(region_id)
                 .or_insert(RegionProgress::new(keyspace_id, region_id));
-            region_progress.commit_index = commit;
-            region_progress.synced_index = commit;
+            region_progress.commit_index = raft_state.get_commit();
+            region_progress.synced_index = raft_state.get_last_preprocessed_index();
             region_progress.truncated_index = merged_raft
                 .get_truncated_index(region_id)
                 .unwrap_or(RAFT_INIT_LOG_INDEX);
             if let Some(entries) = uncommitted_entries.get_region_entries(region_id) {
                 region_progress.entries = entries.clone();
             }
+
+            debug!(
+                "{} recover_from_merged_raft_engine", tag;
+                "region" => ?region_state,
+                "raft_state" => ?raft_state,
+                "progress" => ?region_progress,
+                "keyspace" => keyspace_id,
+            );
         }
 
         Ok(region_progresses)
