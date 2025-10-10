@@ -23,13 +23,16 @@ use collections::{HashMap, HashMapExt, HashSet};
 pub use error::{Error, Result};
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use kvengine::{
-    dfs::S3Fs, ia::util::IaConfig, limiter::StoreLimiter, IdVer, MetaIterator, Shard, ShardMeta,
-    ShardTag, TERM_KEY,
+    dfs::{Dfs, S3Fs},
+    ia::util::IaConfig,
+    limiter::StoreLimiter,
+    IdVer, MetaIterator, Shard, ShardMeta, ShardTag, TERM_KEY,
 };
 use kvenginepb::ChangeSet;
 use kvproto::{metapb, metapb::Peer, raft_cmdpb::AdminRequest, raft_serverpb::StoreIdent};
 use native_br::common::{
-    collect_snapshot_meta_rlog_files, replay_wal_logs_from_backup, ReplayWalLogsContext,
+    collect_snapshot_meta_rlog_files, get_latest_backup_meta, replay_wal_logs_from_backup,
+    ReplayWalLogsContext,
 };
 use pd_client::PdClient;
 use protobuf::Message;
@@ -255,7 +258,7 @@ pub struct MergedEngine {
 }
 
 impl MergedEngine {
-    pub fn new(ctx: MergedEngineContext, backup_meta: ClusterBackupMeta) -> Result<Self> {
+    pub fn new(ctx: MergedEngineContext, backup_meta: Option<ClusterBackupMeta>) -> Result<Self> {
         let merged_dir = ctx.local_dir.join("merged");
         let merged_cfg = rfengine::RfEngineConfig::default();
         let raft = RfEngine::open(merged_dir.as_path(), &merged_cfg, None, None)?;
@@ -278,7 +281,7 @@ impl MergedEngine {
         let mut manifest = Manifest::open(&manifest_dir)?;
         let region_progresses = if manifest.store_progresses.is_empty() {
             let (region_progresses, store_progresses) =
-                Self::recover_from_backup(&ctx, &backup_meta, &raft)?;
+                Self::recover_from_backup(&ctx, backup_meta, &raft)?;
             manifest.store_progresses = store_progresses;
             // Note: manifest is not persisted here to avoid saving all entries. If
             // replication worker restart before next loop, we will recover from backup
@@ -429,9 +432,18 @@ impl MergedEngine {
 
     fn recover_from_backup(
         ctx: &MergedEngineContext,
-        backup_meta: &ClusterBackupMeta,
+        backup_meta: Option<ClusterBackupMeta>,
         merged_raft: &RfEngine,
     ) -> Result<(HashMap<u64, RegionProgress>, HashMap<u64, StoreProgress>)> {
+        let backup_meta = match backup_meta {
+            Some(backup_meta) => backup_meta,
+            None => {
+                let cluster_id = box_try!(ctx.pd.get_cluster_id());
+                let runtime = ctx.fs.get_runtime();
+                runtime.block_on(get_latest_backup_meta(&ctx.fs, cluster_id))?
+            }
+        };
+
         let mut region_progresses = HashMap::default();
         let mut store_progresses = HashMap::default();
         let mut raftdb_paths = Vec::new();
@@ -448,7 +460,7 @@ impl MergedEngine {
             store_config.raft_store.raftdb_path =
                 store_path.join("raft").to_str().unwrap().to_string();
             store_config.rfengine.lightweight_backup = false;
-            let origin = Self::setup_raft_engine(ctx, backup_meta, store).unwrap();
+            let origin = box_try!(Self::setup_raft_engine(ctx, &backup_meta, store));
             raftdb_paths.push(store_config.raft_store.raftdb_path);
             let region_peers_map = origin.get_region_peer_map();
             for (region_id, peer_id) in region_peers_map {

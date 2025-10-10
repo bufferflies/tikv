@@ -88,7 +88,7 @@ fn test_merged_engine_once() {
         security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),
         force_stop: Default::default(),
     };
-    let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone()).unwrap();
+    let mut merged_engine = MergedEngine::new(ctx.clone(), Some(backup_meta.clone())).unwrap();
     let merged_kv = merged_engine.get_kv();
     let mut keyspaces = HashMap::default();
     keyspaces.insert(keyspace_id, Bytes::new());
@@ -143,7 +143,7 @@ fn test_merged_engine_once() {
         }
     }
     merged_engine.close();
-    let mut merged_engine = MergedEngine::new(ctx.clone(), backup_meta.clone()).unwrap();
+    let mut merged_engine = MergedEngine::new(ctx.clone(), Some(backup_meta.clone())).unwrap();
     let merged_kv = merged_engine.get_kv();
     let ref_store = kv_engine_to_ref_store(&merged_kv);
     client

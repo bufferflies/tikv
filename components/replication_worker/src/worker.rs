@@ -38,10 +38,7 @@ use kvproto::{
 use log_wrappers::Value as LogValue;
 use merged_engine::{ForceStop, MergedEngine, MergedEngineContext, StoreProgress};
 use native_br::{
-    common::{
-        assemble_wal_chunks, collect_wal_chunks_with_retry, get_latest_backup_meta,
-        CollectWalChunksContext,
-    },
+    common::{assemble_wal_chunks, collect_wal_chunks_with_retry, CollectWalChunksContext},
     wal::AssembledWalData,
 };
 use pd_client::{util::get_all_stores_except_tiflash, PdClient, RegionStat};
@@ -160,11 +157,8 @@ impl ReplicationWorker {
             .get_security_mgr()
             .http_client(hyper::Client::builder())
             .unwrap();
-        let cluster_id = ctx.pd.get_cluster_id().unwrap();
         let runtime = ctx.fs.get_runtime();
-        let cluster_backup = runtime.block_on(get_latest_backup_meta(&ctx.fs, cluster_id))?;
-        let backup_ts = TimeStamp::new(cluster_backup.backup_ts);
-        let merged_engine = MergedEngine::new(ctx.clone(), cluster_backup)?;
+        let merged_engine = MergedEngine::new(ctx.clone(), None)?;
         let keyspace_ids = merged_engine.get_keyspaces();
         let mut keyspace_services = HashMap::default();
         let cdc_addrs = Arc::new(dashmap::DashMap::new());
@@ -242,7 +236,7 @@ impl ReplicationWorker {
             conn_regions: Default::default(),
             region_to_keyspace: Default::default(),
             resolved_regions: Default::default(),
-            last_update_ts: backup_ts,
+            last_update_ts: TimeStamp::zero(),
             wal_progress_targets: WalProgressTargets::default(),
             wal_cache: WalCache::default(),
             working_dir: worker_dir,
@@ -780,6 +774,11 @@ impl ReplicationWorker {
     }
 
     fn send_resolved_ts(&mut self) -> Result<()> {
+        if self.last_update_ts.is_zero() {
+            debug!("send_resolved_ts: not initialized yet");
+            return Ok(());
+        }
+
         info!("send_resolved_ts"; "last_update_time" => self.last_update_ts);
         self.resolved_regions.clear();
         for (&region_id, delegate) in &mut self.region_delegates {
