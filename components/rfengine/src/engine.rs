@@ -688,10 +688,6 @@ impl RfEngineCore {
             .set(total_offloaded_entries as i64);
         ENGINE_TOTAL_WALS_GAUGE.set(num_files as i64);
 
-        let dfs = self.dfs_statistics.record_and_reset();
-        RFENGINE_DFS_UPLOAD_BYTES.inc_by(dfs.uploaded_bytes);
-        RFENGINE_DFS_REQUESTS.inc_by(dfs.request_count);
-
         EngineStats {
             total_mem_size,
             total_mem_entries,
@@ -699,9 +695,16 @@ impl RfEngineCore {
             num_files,
             pending_compaction_wals,
             top_10_size_peers: peers_stats,
+        }
+    }
 
-            dfs_requests: dfs.request_count,
-            dfs_uploaded_bytes: dfs.uploaded_bytes,
+    pub fn take_dfs_stats(&self) -> EngineDfsStats {
+        let dfs = self.dfs_statistics.record_and_reset();
+        RFENGINE_DFS_UPLOAD_BYTES.inc_by(dfs.uploaded_bytes);
+        RFENGINE_DFS_REQUESTS.inc_by(dfs.request_count);
+        EngineDfsStats {
+            requests: dfs.request_count,
+            uploaded_bytes: dfs.uploaded_bytes,
         }
     }
 
@@ -1622,9 +1625,14 @@ pub struct EngineStats {
     pub disk_size: u64,
     pub pending_compaction_wals: u8,
     pub top_10_size_peers: Vec<PeerStats>,
+}
 
-    pub dfs_uploaded_bytes: u64,
-    pub dfs_requests: u64,
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct EngineDfsStats {
+    pub uploaded_bytes: u64,
+    pub requests: u64,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, PartialEq)]

@@ -942,12 +942,13 @@ impl PdRunner {
         STORE_ENGINE_MEM_SIZE_GAUGE_VEC
             .with_label_values(&["raft", ""])
             .set(rf_engine_stats.total_mem_size as i64);
+        let engine_dfs_stat = store_info.rf_engine.take_dfs_stats();
         let mut rf_dfs_stat = DfsStatItem::default();
         let scope = rf_dfs_stat.mut_scope();
         scope.set_component("rfengine".to_owned());
         scope.set_is_global(true);
-        rf_dfs_stat.set_write_requests(rf_engine_stats.dfs_requests);
-        rf_dfs_stat.set_written_bytes(rf_engine_stats.dfs_uploaded_bytes);
+        rf_dfs_stat.set_write_requests(engine_dfs_stat.requests);
+        rf_dfs_stat.set_written_bytes(engine_dfs_stat.uploaded_bytes);
         stats.mut_dfs().push(rf_dfs_stat);
 
         // TODO(x): set slow score
