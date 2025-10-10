@@ -238,10 +238,15 @@ pub mod local_provider {
             self.base_port + 4000 + self.keyspace_id as u16
         }
 
-        fn kill_process(&self, pid: i32) -> Result<()> {
-            if pid > 0 {
-                let pid = Pid::from_raw(pid);
-                kill(pid, Signal::SIGTERM)?;
+        fn kill_process(tag: &str, mut child: Child) -> Result<()> {
+            let pid = child.id();
+            assert!(pid > 0);
+            let pid = Pid::from_raw(pid as i32);
+            kill(pid, Signal::SIGTERM)?;
+
+            let exit_status = child.wait().unwrap();
+            if !exit_status.success() {
+                return Err(box_err!("{}: exit with error: {:?}", tag, exit_status));
             }
             Ok(())
         }
@@ -249,24 +254,23 @@ pub mod local_provider {
         pub fn destroy(&mut self) -> Result<()> {
             info!("destroy local provider");
             if let Some(cdc) = self.cdc_child.take() {
-                self.kill_process(cdc.id() as i32)?;
+                Self::kill_process("rep-cdc", cdc)?;
             }
             if let Some(pd) = self.pd_child.take() {
-                self.kill_process(pd.id() as i32)?;
+                Self::kill_process("rep-pd", pd)?;
             }
             if let Some(tidb) = self.tidb_child.take() {
-                self.kill_process(tidb.id() as i32)?;
+                Self::kill_process("rep-tidb", tidb)?;
             }
             Ok(())
         }
 
         pub fn restart_local_pd(&mut self) -> Result<()> {
             if let Some(pd) = self.pd_child.take() {
-                self.kill_process(pd.id() as i32)?;
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                Self::kill_process("rep-pd", pd)?;
             }
             self.start_local_pd();
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::thread::sleep(Duration::from_secs(1));
             Ok(())
         }
 
