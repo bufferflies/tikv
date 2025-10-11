@@ -229,7 +229,13 @@ pub trait RecoverHandler: Clone + Send {
     // Recovers from the shard's state to the state that is stored in the toState
     // property. So the Engine has a chance to execute pre-split command.
     // If toState is nil, the implementation should recovers to the latest state.
-    fn recover(&self, engine: &Engine, shard: &Arc<Shard>, info: &ShardMeta) -> Result<()>;
+    fn recover(
+        &self,
+        engine: &Engine,
+        shard: &Arc<Shard>,
+        info: &ShardMeta,
+        is_parent: bool,
+    ) -> Result<()>;
 }
 
 pub trait MetaIterator {

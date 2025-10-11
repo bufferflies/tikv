@@ -241,7 +241,7 @@ impl Engine {
                     // Ingest the parent shard before recovery, as recoverer depends on the shard
                     // existing in kvengine.
                     let normal_shard = self.insert_shard(parent_shard.clone());
-                    recoverer.recover(self, &parent_shard, parent)?;
+                    recoverer.recover(self, &parent_shard, parent, true)?;
                     parents.insert(IdVer::new(parent.id, parent.ver), parent_shard);
                     // Do not keep the parent in the engine as we only use the parent's mem-table
                     // for children.
@@ -282,7 +282,7 @@ impl Engine {
                 if let Some(parent) = parent_shard {
                     shard.add_parent_data(parent)
                 }
-                recoverer.recover(&engine, &shard, &meta).unwrap();
+                recoverer.recover(&engine, &shard, &meta, false).unwrap();
                 token_tx.send(true).unwrap();
             });
         }

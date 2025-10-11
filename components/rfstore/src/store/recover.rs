@@ -209,6 +209,7 @@ impl RecoverHandler {
         ctx: &mut ApplyContext,
         shard: &Arc<Shard>,
         meta: &ShardMeta,
+        is_parent: bool,
     ) -> kvengine::Result<()> {
         let tag = shard.tag();
         let applied_index = shard.get_write_sequence();
@@ -278,7 +279,8 @@ impl RecoverHandler {
                     let txn_file_ref = custom.get_txn_file_ref().unwrap();
                     prepare_txn_file_ref(&ctx.engine, &txn_file_ref, encryption_key.clone())?;
                 }
-                let cs = if rlog::is_engine_meta_log(custom.data) {
+                let cs = if rlog::is_engine_meta_log(custom.data) && !is_parent {
+                    // parent table may failed to apply change set, because write cf sst is mising.
                     Some(recover_change_set(
                         ctx,
                         e,
@@ -312,9 +314,10 @@ impl kvengine::RecoverHandler for RecoverHandler {
         engine: &Engine,
         shard: &Arc<Shard>,
         meta: &ShardMeta,
+        is_parent: bool,
     ) -> kvengine::Result<()> {
         let mut ctx = ApplyContext::new(engine.clone(), None);
-        self.recover_with_apply_ctx(&mut ctx, shard, meta)
+        self.recover_with_apply_ctx(&mut ctx, shard, meta, is_parent)
     }
 }
 

@@ -1201,7 +1201,13 @@ impl MetaIterator for EngineTester {
 }
 
 impl RecoverHandler for EngineTester {
-    fn recover(&self, _engine: &Engine, _shard: &Arc<Shard>, _info: &ShardMeta) -> Result<()> {
+    fn recover(
+        &self,
+        _engine: &Engine,
+        _shard: &Arc<Shard>,
+        _info: &ShardMeta,
+        _is_parent: bool,
+    ) -> Result<()> {
         Ok(())
     }
 }

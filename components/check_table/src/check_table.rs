@@ -667,7 +667,7 @@ impl BackupReader {
 pub(crate) struct NoopRecoverHandler {}
 
 impl kvengine::RecoverHandler for NoopRecoverHandler {
-    fn recover(&self, _: &Engine, _: &Arc<Shard>, _: &ShardMeta) -> kvengine::Result<()> {
+    fn recover(&self, _: &Engine, _: &Arc<Shard>, _: &ShardMeta, _: bool) -> kvengine::Result<()> {
         Ok(())
     }
 }
