@@ -2394,6 +2394,8 @@ pub trait ApplyObserver: Send {
     );
 
     fn flush(&mut self);
+
+    fn flush_region(&mut self, region_id: u64);
 }
 
 pub struct ApplyContext {
@@ -2434,6 +2436,12 @@ impl ApplyContext {
     pub fn flush_observer(&mut self) {
         if let Some(observer) = &mut self.observer {
             observer.flush();
+        }
+    }
+
+    pub fn flush_observer_region(&mut self, region_id: u64) {
+        if let Some(observer) = &mut self.observer {
+            observer.flush_region(region_id);
         }
     }
 

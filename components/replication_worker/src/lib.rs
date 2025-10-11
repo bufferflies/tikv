@@ -27,7 +27,7 @@ pub use error::{Error, Result};
 use futures::{future, SinkExt, TryFutureExt, TryStreamExt};
 use grpcio::{DuplexSink, RequestStream, RpcContext, RpcStatus, RpcStatusCode, UnarySink};
 use http::StatusCode;
-use kvengine::{table::SnapVersion, Shard, ShardMeta, WRITE_CF};
+use kvengine::{table::SnapVersion, Shard, ShardMeta, SnapAccess, WRITE_CF};
 use kvproto::{
     cdcpb,
     cdcpb::{ChangeDataEvent, ChangeDataRequest},
@@ -176,10 +176,16 @@ pub enum CdcMsg {
         request: ChangeDataRequest,
         conn_id: ConnId,
     },
+    RegisterSpawnHandler {
+        request: ChangeDataRequest,
+        conn_id: ConnId,
+        snap_access: SnapAccess,
+    },
     RegisterResult {
         event: cdcpb::Event,
         conn_id: ConnId,
         initialized: bool,
+        init_id: u64,
     },
     ScanLocksResult {
         region_id: u64,

@@ -1,12 +1,17 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fmt, mem};
+use std::{
+    fmt, mem,
+    result::Result as StdResult,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use cdc::{CdcEvent, Conn, ConnId, Sink};
 use collections::HashMap;
 use kvengine::{table::SnapVersion, IdVer, ShardTag};
 use kvproto::cdcpb;
 use log_wrappers::Value as LogValue;
+use protobuf::Message;
 use resolved_ts::Resolver;
 use tikv_util::{debug, error, info, warn};
 use txn_types::TimeStamp;
@@ -72,14 +77,76 @@ impl fmt::Debug for RequestKey {
     }
 }
 
+pub(crate) enum RequestState {
+    Initializing {
+        events: Vec<cdcpb::Event>,
+        bytes: u64,
+
+        /// The unique ID to identify an initialization.
+        ///
+        /// Other fields (e.g., snap_version + checkpoint_ts) is not safe enough
+        /// when the sink is failed and the initialization is retried, and
+        /// previous initialization is still running.
+        init_id: u64,
+    },
+    Initialized,
+}
+
+impl fmt::Debug for RequestState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RequestState::Initializing {
+                events,
+                bytes,
+                init_id,
+            } => f
+                .debug_struct("Initializing")
+                .field("events", &events.len())
+                .field("bytes", bytes)
+                .field("init_id", init_id)
+                .finish(),
+            RequestState::Initialized => write!(f, "Initialized"),
+        }
+    }
+}
+
+impl RequestState {
+    pub(crate) fn is_initializing_with_id(&self, req_init_id: u64) -> bool {
+        match self {
+            RequestState::Initializing { init_id, .. } => *init_id == req_init_id,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_initialized(&self) -> bool {
+        matches!(self, RequestState::Initialized)
+    }
+
+    pub(crate) fn must_push_pending(&mut self, event: cdcpb::Event) {
+        match self {
+            Self::Initializing { events, bytes, .. } => {
+                *bytes = bytes.saturating_add(event.compute_size() as u64);
+                events.push(event);
+            }
+            Self::Initialized => unreachable!(),
+        }
+    }
+
+    pub(crate) fn must_finish_initialize(&mut self) -> (Vec<cdcpb::Event>, u64 /* bytes */) {
+        match mem::replace(self, RequestState::Initialized) {
+            RequestState::Initializing { events, bytes, .. } => (events, bytes),
+            RequestState::Initialized => unreachable!(),
+        }
+    }
+}
+
 /// Information about a ChangeDataRequest.
 pub(crate) struct RequestInfo {
     pub(crate) region_version: u64,
     pub(crate) start_key: Vec<u8>,
     pub(crate) end_key: Vec<u8>,
     pub(crate) resolved_ts: TimeStamp,
-    pub(crate) initialized: bool,
-    pub(crate) pending_events: Vec<cdcpb::Event>,
+    pub(crate) state: RequestState,
 }
 
 impl RequestInfo {
@@ -108,20 +175,58 @@ impl std::ops::DerefMut for RegionRequests {
 }
 
 impl RegionRequests {
-    pub(crate) fn add(&mut self, request: &cdcpb::ChangeDataRequest, conn_id: ConnId) {
+    pub(crate) fn add(
+        &mut self,
+        request: &cdcpb::ChangeDataRequest,
+        conn_id: ConnId,
+    ) -> StdResult<u64 /* init_id */, String /* current_state */> {
+        lazy_static::lazy_static! {
+            static ref INIT_ID_ALLOC: AtomicU64 = AtomicU64::new(1);
+        }
+
         let request_id: RequestId = request.get_request_id().into();
+        let request_key = RequestKey::new(conn_id, request_id);
+        if let Some(request_info) = self.inner.get(&request_key) {
+            // Return string to work around for borrow check.
+            return Err(format!("{:?}", request_info.state));
+        }
+
         let region_version = request.get_region_epoch().get_version();
         let (start_key, end_key) = build_request_range(request);
+        let init_id = INIT_ID_ALLOC.fetch_add(1, Ordering::Relaxed);
         let request_info = RequestInfo {
             region_version,
             start_key,
             end_key,
             resolved_ts: TimeStamp::zero(),
-            initialized: false,
-            pending_events: vec![],
+            state: RequestState::Initializing {
+                events: vec![],
+                bytes: 0,
+                init_id,
+            },
         };
-        self.inner
-            .insert(RequestKey::new(conn_id, request_id), request_info);
+        let old = self.inner.insert(request_key, request_info);
+        debug_assert!(old.is_none());
+        Ok(init_id)
+    }
+
+    pub(crate) fn check_duplicated(
+        &self,
+        request: &cdcpb::ChangeDataRequest,
+        conn_id: ConnId,
+    ) -> Result<()> {
+        let request_id: RequestId = request.get_request_id().into();
+        let request_key = RequestKey::new(conn_id, request_id);
+        if let Some(request_info) = self.inner.get(&request_key) {
+            debug!("duplicated request";
+                "conn" => ?conn_id, "request" => %request_id, "current" => ?request_info.state);
+            Err(Error::DuplicatedRegister {
+                conn_id,
+                request_id,
+            })
+        } else {
+            Ok(())
+        }
     }
 }
 

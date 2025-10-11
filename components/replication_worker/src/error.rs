@@ -1,6 +1,8 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::ticdc_util::TiCdcError;
+use cdc::ConnId;
+
+use crate::{delegate::RequestId, ticdc_util::TiCdcError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -24,6 +26,11 @@ pub enum Error {
     StoreTimeout(String),
     #[error(transparent)]
     TiCdcError(#[from] TiCdcError),
+    #[error("duplicated register, conn: {conn_id:?}, request: {request_id}")]
+    DuplicatedRegister {
+        conn_id: ConnId,
+        request_id: RequestId,
+    },
     #[error("other error {0}")]
     OtherError(#[from] Box<dyn std::error::Error + Sync + Send>),
 

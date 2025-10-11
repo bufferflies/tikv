@@ -47,10 +47,10 @@ use rfstore::store::ApplyContext;
 use security::{HttpClient, SecurityConfig};
 use tikv_util::{
     box_err, box_try, codec, debug, error, info,
-    mpsc::{Receiver, Sender},
+    mpsc::{Receiver, SendError, Sender},
     thd_name,
     time::Instant,
-    warn,
+    trace, warn,
 };
 use txn_types::{LockType, TimeStamp};
 
@@ -389,15 +389,25 @@ impl ReplicationWorker {
                 let res = self.handle_register(request, conn_id);
                 self.handle_result(res, "register");
             }
+            CdcMsg::RegisterSpawnHandler {
+                request,
+                conn_id,
+                snap_access,
+            } => {
+                tikv_util::set_current_region(request.region_id);
+                let res = self.handler_register_spawn_handler(request, conn_id, snap_access);
+                self.handle_result(res, "register_spawn_handler");
+            }
             CdcMsg::RegisterResult {
                 event,
                 conn_id,
                 initialized,
+                init_id,
             } => {
                 tikv_util::set_current_region(event.region_id);
                 let region_id = event.region_id;
                 let request_id: RequestId = event.request_id.into();
-                let res = self.handle_register_result(event, conn_id, initialized);
+                let res = self.handle_register_result(event, conn_id, initialized, init_id);
                 if let Err(err) = &res {
                     self.deregister_region_on_error(conn_id, request_id, region_id, err);
                 }
@@ -547,13 +557,64 @@ impl ReplicationWorker {
             });
         }
 
-        delegate.requests.add(&request, conn_id);
+        if let Err(err) = delegate.requests.check_duplicated(&request, conn_id) {
+            info!("{} cdc register: ignore duplicated request", tag; "err" => ?err);
+            return Ok(());
+        }
+
+        // Flush observer for region.
+        // Otherwise, the incremental scan may get data duplicated with pending events.
+        self.apply_ctx.flush_observer_region(region_id);
+
+        if let Err(SendError(msg)) = self.tx.send(CdcMsg::RegisterSpawnHandler {
+            request,
+            conn_id,
+            snap_access,
+        }) {
+            let CdcMsg::RegisterSpawnHandler {
+                request, conn_id, ..
+            } = msg
+            else {
+                unreachable!()
+            };
+            self.send_server_is_busy(
+                conn_id,
+                &request,
+                "handle_register: send msg failed".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    fn handler_register_spawn_handler(
+        &mut self,
+        request: ChangeDataRequest,
+        conn_id: ConnId,
+        snap_access: SnapAccess,
+    ) -> Result<()> {
+        let tag = snap_access.get_tag();
+        let merged_store_id = self.merged_store_id();
+        let region_id = request.region_id;
+        let delegate = self
+            .region_delegates
+            .entry(region_id)
+            .or_insert_with(|| RegionDelegate::new(merged_store_id, region_id));
+
+        let init_id = match delegate.requests.add(&request, conn_id) {
+            Ok(init_id) => init_id,
+            Err(current_state) => {
+                info!("{} cdc register: ignore duplicate request", tag;
+                    "conn" => ?conn_id, "request" => %request.request_id, "current" => current_state);
+                return Ok(());
+            }
+        };
         self.conn_regions
             .entry(conn_id)
             .or_default()
             .insert(region_id);
         let mut register_handler =
-            RegisterHandler::new(conn_id, &request, snap_access, self.tx.clone());
+            RegisterHandler::new(conn_id, &request, snap_access, init_id, self.tx.clone());
+        debug!("{} cdc register: spawn handler", tag; "req" => ?request, "conn" => ?conn_id);
         self.runtime
             .spawn(async move { register_handler.handle_register().await });
         Ok(())
@@ -564,6 +625,7 @@ impl ReplicationWorker {
         event: Event,
         conn_id: ConnId,
         initialized: bool,
+        init_id: u64,
     ) -> cdc::Result<()> {
         let request_id: RequestId = event.get_request_id().into();
         let region_id = event.get_region_id();
@@ -579,28 +641,37 @@ impl ReplicationWorker {
             warn!("{} handle_register_result: request not found", tag; "conn" => ?conn_id, "request" => %request_id);
             return Ok(());
         };
-        request_info.initialized = initialized;
+        if !request_info.state.is_initializing_with_id(init_id) {
+            info!("{} handle_register_result: ignore stale result", tag;
+                "conn" => ?conn_id, "request" => %request_id,
+                "init_id" => init_id, "current" => ?request_info.state);
+            return Ok(());
+        }
         let Some(conn) = self.conns.get(&conn_id) else {
             warn!("{} handle_register_result: conn not found", tag; "conn" => ?conn_id, "request" => %request_id);
-            return Ok(());
+            debug_assert!(false);
+            // Unexpected conn not found. Return error to deregister for safe.
+            return Err(box_err!("conn not found: {:?}", conn_id));
         };
-        debug!("{} handle_register_result: send event {:?}", tag, event);
+        trace!("{} handle_register_result: send event {:?}", tag, event);
         let sink = conn.get_sink();
         sink.unbounded_send(CdcEvent::Event(event), false)
             .map_err(|e| cdc::Error::from(e))?;
-        if request_info.initialized {
-            let pending_events = mem::take(&mut request_info.pending_events);
-            let pending_events_count = pending_events.len();
+        if initialized {
+            let (pending_events, events_bytes) = request_info.state.must_finish_initialize();
+            let events_count = pending_events.len();
             for pending_event in pending_events {
-                debug!(
+                trace!(
                     "{} handle_register_result: send pending event {:?}",
-                    tag, pending_event
+                    tag,
+                    pending_event
                 );
                 sink.unbounded_send(CdcEvent::Event(pending_event), false)
                     .map_err(|e| cdc::Error::from(e))?;
             }
-            info!("{} handle_register_result: initialized, pending_events: {}", tag, pending_events_count;
-                 "conn" => ?conn_id, "request" => %request_id);
+            info!("{} handle_register_result: initialized", tag;
+                "count" => events_count, "bytes" => events_bytes,
+                "conn" => ?conn_id, "request" => %request_id);
         }
         Ok(())
     }
@@ -662,6 +733,12 @@ impl ReplicationWorker {
         if let Some(rep_region) = rep_region {
             epoch_not_match.mut_current_regions().push(rep_region);
         }
+        self.send_error_event(conn_id, request, error);
+    }
+
+    fn send_server_is_busy(&self, conn_id: ConnId, request: &ChangeDataRequest, reason: String) {
+        let mut error = cdcpb::Error::new();
+        error.mut_server_is_busy().set_reason(reason);
         self.send_error_event(conn_id, request, error);
     }
 
@@ -792,7 +869,7 @@ impl ReplicationWorker {
             };
             debug!("{} send_resolved_ts: ts: {}", region_id, ts);
             for (req_key, req_info) in delegate.requests.iter_mut() {
-                if req_info.resolved_ts != ts && req_info.initialized {
+                if req_info.resolved_ts != ts && req_info.state.is_initialized() {
                     debug_assert!(req_info.resolved_ts < ts);
                     self.resolved_regions
                         .entry((ts, *req_key))
@@ -816,7 +893,7 @@ impl ReplicationWorker {
             resolved_ts.set_regions(regions);
             resolved_ts.set_request_id(req_key.request_id.into_inner());
             resolved_ts.set_ts(ts.into_inner());
-            debug!("send_resolved_ts: msg: {:?}", resolved_ts; "conn" => ?req_key.conn_id);
+            trace!("send_resolved_ts: msg: {:?}", resolved_ts; "conn" => ?req_key.conn_id);
             if let Err(err) = conn
                 .get_sink()
                 .unbounded_send(CdcEvent::ResolvedTs(resolved_ts), false)
@@ -1442,7 +1519,7 @@ impl ReplicationWorker {
                         }
                     }
                 }
-                if req_info.initialized {
+                if req_info.state.is_initialized() {
                     if let Err(err) = conn
                         .get_sink()
                         .unbounded_send(CdcEvent::Event(event_to_send), false)
@@ -1456,7 +1533,7 @@ impl ReplicationWorker {
                         break 'EVENTS_LOOP;
                     }
                 } else {
-                    req_info.pending_events.push(event_to_send);
+                    req_info.state.must_push_pending(event_to_send);
                 }
             }
         }
@@ -1596,6 +1673,7 @@ struct RegisterHandler {
     checkpoint_ts: u64,
     event_rows: Vec<EventRow>,
     initialized: bool,
+    init_id: u64,
 }
 
 impl RegisterHandler {
@@ -1603,6 +1681,7 @@ impl RegisterHandler {
         conn_id: ConnId,
         request: &ChangeDataRequest,
         snap_access: SnapAccess,
+        init_id: u64,
         sender: Sender<CdcMsg>,
     ) -> Self {
         let keyspace_id = snap_access.get_keyspace_id();
@@ -1619,12 +1698,13 @@ impl RegisterHandler {
             checkpoint_ts,
             event_rows: vec![],
             initialized: false,
+            init_id,
         }
     }
 
     async fn handle_register(&mut self) {
-        let region_id = self.snap_access.get_id();
-        info!("{} cdc register", region_id; "request" => %self.request_id, "conn" => ?self.conn_id);
+        let tag = self.snap_access.get_tag();
+        info!("{} cdc register", tag; "request" => %self.request_id, "conn" => ?self.conn_id);
         let mut entries_bytes = 0;
         let keyspace_id = self.snap_access.get_keyspace_id();
         let keyspace_prefix_len = keyspace_prefix_len(keyspace_id);
@@ -1665,7 +1745,7 @@ impl RegisterHandler {
             lock_iter.next();
         }
 
-        info!("{} start incremental scan", region_id; "request" => %self.request_id, "checkpoint_ts" => self.checkpoint_ts);
+        info!("{} start incremental scan", tag; "request" => %self.request_id, "checkpoint_ts" => self.checkpoint_ts);
         // scan incremental write after checkpoint ts;
         let mut write_iter = self
             .snap_access
@@ -1708,7 +1788,7 @@ impl RegisterHandler {
             }
             event_row.set_type(EventLogType::Committed);
             entries_bytes += event_row.get_key().len() + event_row.get_value().len();
-            debug!("delta add event row {:?}", event_row);
+            trace!("{} delta add event row {:?}", tag, event_row);
             self.event_rows.push(event_row);
             if entries_bytes > MAX_INITIALIZE_SCAN_BATCH_BYTES {
                 self.send_rows();
@@ -1730,11 +1810,12 @@ impl RegisterHandler {
         new_event.set_request_id(self.request_id.into_inner());
         new_event.mut_entries().set_entries(event_rows.into());
 
-        debug!("send event {:?}", new_event);
+        trace!("{} send event {:?}", self.snap_access.get_tag(), new_event);
         let _ = self.sender.send(CdcMsg::RegisterResult {
             event: new_event,
             conn_id: self.conn_id,
             initialized: self.initialized,
+            init_id: self.init_id,
         });
     }
 }

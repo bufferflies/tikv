@@ -59,7 +59,7 @@ impl CdcApplyObserver {
         }
     }
 
-    async fn flush_region(&mut self, region_id: u64) {
+    async fn flush_region_async(&mut self, region_id: u64) {
         if let Some(handles) = self.join_handles.remove(&region_id) {
             Self::flush_region_impl(region_id, handles, self.sender.clone()).await;
         };
@@ -144,7 +144,7 @@ impl ApplyObserver for CdcApplyObserver {
             || admin.has_rollback_merge()
         {
             let tag = ShardTag::new(self.store_id, IdVer::new(region_id, region_version));
-            self.runtime.clone().block_on(self.flush_region(region_id));
+            self.flush_region(region_id);
             info!("{} on apply admin {:?}", tag, admin; "log_index" => log_index);
             let msg = CdcMsg::AppliedAdmin {
                 region_id,
@@ -159,6 +159,12 @@ impl ApplyObserver for CdcApplyObserver {
 
     fn flush(&mut self) {
         self.runtime.clone().block_on(self.flush_all());
+    }
+
+    fn flush_region(&mut self, region_id: u64) {
+        self.runtime
+            .clone()
+            .block_on(self.flush_region_async(region_id));
     }
 }
 
