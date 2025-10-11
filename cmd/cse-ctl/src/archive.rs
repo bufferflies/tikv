@@ -73,6 +73,10 @@ pub struct ArchiveArgs {
     /// The timeout for fetching WAL chunks.
     #[clap(long, default_value = "10m")]
     pub fetch_wal_timeout: ReadableDuration,
+    /// File types blacklist no need to archive, use `,` to separate multiple
+    /// file types.
+    #[clap(long, value_delimiter = ',', default_value = "col,vec")]
+    pub file_types_blacklist: Vec<String>,
 }
 
 pub fn execute_archive(args: ArchiveArgs) {
@@ -124,6 +128,7 @@ fn get_archive_config_from_args(args: &ArchiveArgs) -> ArchiveConfig {
     config.security.override_from_env();
     config.data_dir = args.data_dir.clone();
     config.fetch_wal_timeout = args.fetch_wal_timeout.0;
+    config.file_types_blacklist = args.file_types_blacklist.clone();
     config.check_data_dir();
     config
 }

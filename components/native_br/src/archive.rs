@@ -230,6 +230,7 @@ pub struct ArchiveConfig {
     pub skip_keyspace_names: Option<HashSet<String>>,
     pub dry_run: bool,
     pub fetch_wal_timeout: Duration,
+    pub file_types_blacklist: Vec<String>,
 }
 
 impl ArchiveConfig {
@@ -251,6 +252,7 @@ impl ArchiveConfig {
             skip_keyspace_names: None,
             dry_run: true,
             fetch_wal_timeout: Duration::from_secs(600), // 10 minutes
+            file_types_blacklist: vec![],
         }
     }
 
@@ -461,7 +463,11 @@ fn write_archive_packages_and_index(
     archive_backup: ArchiveBackup,
     next_day_files: &HashMap<u64, FileType>,
 ) -> Result<()> {
-    let deleted = get_sorted_deleted_files(&archive_backup.files, next_day_files);
+    let deleted = get_sorted_deleted_files(
+        &archive_backup.files,
+        next_day_files,
+        &config.file_types_blacklist,
+    );
     info!(
         "get deleted files {} on {}",
         deleted.len(),
@@ -532,15 +538,22 @@ fn write_archive_packages_and_index(
 fn get_sorted_deleted_files(
     old: &HashMap<u64, FileType>,
     new: &HashMap<u64, FileType>,
+    file_types_blacklist: &[String],
 ) -> Vec<TableFile> {
+    let file_types_blacklist = file_types_blacklist
+        .iter()
+        .map(|s| FileType::try_from(s.as_str()).unwrap())
+        .collect::<Vec<_>>();
     let mut deleted: Vec<_> = old
         .iter()
         .filter_map(|(&file_id, &ftype)| {
-            (!new.contains_key(&file_id)).then_some(TableFile {
-                id: file_id,
-                ftype,
-                shard_id: 0,
-            })
+            (!file_types_blacklist.contains(&ftype) && !new.contains_key(&file_id)).then_some(
+                TableFile {
+                    id: file_id,
+                    ftype,
+                    shard_id: 0,
+                },
+            )
         })
         .collect();
     deleted.sort_by_key(|f| f.id);
