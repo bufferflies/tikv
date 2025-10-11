@@ -43,14 +43,16 @@ const MAX_BATCH_GET_CNT: i64 = 1024;
 // 1. keyspace meta: "/pd/$cluster_id/keyspaces/"
 // 2. keyspace region label: "/pd/$cluster_id/region_label/keyspaces/"
 // 3. keyspace placement rules: "/pd/$cluster_id/rules/"
-// 4. keyspace group membership:
+// 4. rule group: "/pd/$cluster_id/rule_group/"
+// 5. keyspace group membership:
 //    "/pd/$cluster_id/tso/keyspace_groups/membership/"
-// 5. resource group information: "resource_group/" (Note: no leading slash)
-// 6. tidb worker keys: "/tidb/remote/worker/"
-const PD_KEY_SPACE_META_PATH: [(&str, bool); 6] = [
+// 6. resource group information: "resource_group/" (Note: no leading slash)
+// 7. tidb worker keys: "/tidb/remote/worker/"
+const PD_KEY_SPACE_META_PATH: [(&str, bool); 7] = [
     ("keyspaces/", true),
     ("region_label/keyspaces/", true),
     ("rules/", true),
+    ("rule_group/", true),
     ("tso/keyspace_groups/membership/", true),
     ("resource_group/", false),
     ("/tidb/remote/worker/", false),
