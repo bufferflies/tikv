@@ -351,7 +351,7 @@ impl TestSuiteBuilder {
             let cdc_ob = cdc::CdcObserver::new(scheduler.clone(), memory_quota.clone());
             obs.insert(id, cdc_ob.clone());
             sim.coprocessor_hooks.entry(id).or_default().push(Box::new(
-                move |host: &mut CoprocessorHost<RocksEngine>| {
+                move |host: &mut CoprocessorHost<kvengine::Engine>| {
                     panic!("cdc_ob.register_to(host)");
                 },
             ));
@@ -605,6 +605,15 @@ impl TestSuite {
         Self::with_extra_builder_fun(count, identity)
     }
 
+    pub fn cfg_for_cdc(cfg: &mut TikvConfig) {
+        // Increase the Raft tick interval to make this test case running reliably.
+        configure_for_lease_read(cfg, Some(100), None);
+        // Disable background renew to make timestamp predictable.
+        configure_for_causal_ts(cfg, "99999999s", 1);
+        cfg.cdc.hibernate_regions_compatible = false;
+        cfg.storage.check_backup_ts = false;
+    }
+
     pub fn with_extra_builder_fun(
         count: usize,
         ext: impl FnOnce(CloudTestSuiteBuilder) -> CloudTestSuiteBuilder,
@@ -613,12 +622,7 @@ impl TestSuite {
             .presplit_magic_keyspace()
             .num_nodes(count)
             .cfg_fun(|_id, cfg| {
-                // Increase the Raft tick interval to make this test case running reliably.
-                configure_for_lease_read(cfg, Some(100), None);
-                // Disable background renew to make timestamp predictable.
-                configure_for_causal_ts(cfg, "99999999s", 1);
-                cfg.cdc.hibernate_regions_compatible = false;
-                cfg.storage.check_backup_ts = false;
+                Self::cfg_for_cdc(cfg);
             }))
         .build()
     }
