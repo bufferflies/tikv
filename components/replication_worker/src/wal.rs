@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use pd_client::{util::get_all_stores_except_tiflash_async, PdClient};
 use rfengine::service_worker::WalProgress;
 use security::HttpClient;
-use tikv_util::{box_err, debug, error, time::Instant, warn};
+use tikv_util::{box_err, box_try_join, debug, error, time::Instant, warn};
 use tokio::task::JoinSet;
 use txn_types::TimeStamp;
 
@@ -109,7 +109,7 @@ impl WalProgressFetcher {
         }
 
         while let Some(task) = join_set.join_next().await {
-            let (store_id, res) = task.expect("task panic");
+            let (store_id, res) = box_try_join!(task);
             match res {
                 Ok(wal_progress) => {
                     progresses.insert(

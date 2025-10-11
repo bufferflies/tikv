@@ -26,6 +26,27 @@ macro_rules! box_try {
     }};
 }
 
+#[macro_export]
+macro_rules! box_join_err {
+    ($expr:expr) => {{
+        match $expr {
+            Ok(r) => Ok(r),
+            Err(e) if e.is_panic() => panic!("task panic: {}", e),
+            Err(e) => Err($crate::box_err!(e)),
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! box_try_join {
+    ($expr:expr) => {{
+        match $crate::box_join_err!($expr) {
+            Ok(r) => r,
+            Err(e) => return Err(e),
+        }
+    }};
+}
+
 /// Logs slow operations by `warn!`.
 /// The final log level depends on the given `cost` and `slow_log_threshold`
 #[macro_export]

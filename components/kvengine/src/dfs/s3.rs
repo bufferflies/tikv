@@ -28,7 +28,7 @@ use rusoto_s3::{
     CopyObjectError, DeleteObjectError, GetObjectError, GetObjectTaggingError, HeadObjectError,
     ListObjectsV2Error, PutObjectError,
 };
-use tikv_util::time::Instant;
+use tikv_util::{box_join_err, errors::BoxError, time::Instant};
 use tokio::runtime::Runtime;
 
 use crate::dfs::{
@@ -1026,7 +1026,8 @@ impl ObjectStorage for S3Fs {
         runtime.block_on(async move {
             let mut objects: Vec<(String, Bytes)> = vec![];
             while let Some(res) = join_set.join_next().await {
-                objects.push(res.expect("task panic")?);
+                let res = box_join_err!(res).map_err(|e: BoxError| e.to_string())??;
+                objects.push(res);
             }
             Ok(objects)
         })

@@ -74,7 +74,9 @@ impl CdcApplyObserver {
 
         let mut events = RegionEvents::default();
         for (idx, handle) in handles.into_iter().enumerate() {
-            let mut event_builder = handle.await.expect("task panic");
+            // It's verbose to handle the task cancelled here.
+            // Make sure the replication worker is stopped before tokio runtime shutdown.
+            let mut event_builder = handle.await.expect("task panic/cancelled");
 
             if idx == 0 {
                 events.region_version = event_builder.region_version();
@@ -106,7 +108,9 @@ impl CdcApplyObserver {
             );
         }
         while let Some(res) = join_set.join_next().await {
-            res.expect("task panic");
+            // It's verbose to handle the task cancelled here.
+            // Make sure the replication worker is stopped before tokio runtime shutdown.
+            res.expect("task panic/cancelled");
         }
     }
 }

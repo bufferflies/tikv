@@ -38,8 +38,8 @@ use rfstore::store::state::RaftState;
 use security::{SecurityConfig, SecurityManager};
 use slog_global::{error, warn};
 use tikv_util::{
-    box_err, box_try, codec::bytes::decode_bytes, debug, http::HeaderExt, info, time::Instant,
-    Either,
+    box_err, box_try, box_try_join, codec::bytes::decode_bytes, debug, http::HeaderExt, info,
+    time::Instant, Either,
 };
 
 use crate::{
@@ -1448,7 +1448,7 @@ where
 
     let mut objects = vec![];
     while let Some(res) = join_set.join_next().await {
-        let res = res.expect("task panic")?;
+        let res = box_try_join!(res)?;
         objects.push(res);
     }
     Ok(objects)

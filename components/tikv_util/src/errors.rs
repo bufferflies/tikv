@@ -2,6 +2,8 @@
 
 use std::{error, fmt, io, ops};
 
+pub type BoxError = Box<dyn std::error::Error + Sync + Send>;
+
 pub struct ErrorWithCtx<E> {
     pub inner: E,
     ctx: String,
