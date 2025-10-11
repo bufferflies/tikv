@@ -791,6 +791,7 @@ impl Delegate {
                 || filter_loop && TxnSource::is_cdc_write_source_set(row.txn_source)
                 // In next-gen, all events become `Committed` as we can always observe the value when committing.
                 // Hence `Prewrite` entries is nolonger needed by the client.
+                // `Unknown` type may be generated when rolling back a row.
                 || row.get_type() == EventLogType::Prewrite || row.get_type() == EventLogType::Unknown
             {
                 continue;
@@ -911,6 +912,7 @@ impl Delegate {
                     || TxnSource::is_lossy_ddl_reorg_source_set(v.txn_source)
                     || downstream.filter_loop && TxnSource::is_cdc_write_source_set(v.txn_source)
                     // In next-gen, all events become `Committed` as we can always observe the value when committing.
+                    // `Unknown` type may be generated when rolling back a row.
                     || v.get_type() == EventLogType::Prewrite || v.get_type() == EventLogType::Unknown
                 {
                     continue;

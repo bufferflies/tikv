@@ -11,11 +11,13 @@ use causal_ts::CausalTsProvider;
 use cdc::{recv_timeout, CdcObserver, Delegate, Task, Validate};
 use cloud_server::CdcCreationContext;
 use concurrency_manager::ConcurrencyManager;
+use engine_rocks::RocksEngine;
 use futures::executor::block_on;
 use grpcio::{
     CallOption, ChannelBuilder, ClientDuplexReceiver, ClientDuplexSender, ClientUnaryReceiver,
     Environment, MetadataBuilder,
 };
+use kvengine::WRITE_CF;
 use kvproto::{
     cdcpb::{ChangeDataClient, ChangeDataEvent, ChangeDataRequest},
     kvrpcpb::{PrewriteRequestPessimisticAction::*, *},
@@ -31,8 +33,9 @@ use test_rfstore::{spawn_recv_filter, SharedFilters};
 use tikv::config::{CdcConfig, TikvConfig};
 use tikv_util::{
     config::ReadableDuration,
+    debug, warn,
     worker::{Runnable, Scheduler},
-    HandyRwLock,
+    Either, HandyRwLock,
 };
 use txn_types::TimeStamp;
 static INIT: Once = Once::new();
@@ -209,15 +212,20 @@ impl CloudTestSuiteBuilder {
                 svc.test_export.on_cdc_creation =
                     Some(Box::new(move |ctx: CdcCreationContext<'_>| {
                         let scheduler = ctx.scheduler.clone();
-                        tx.send((
+                        let res = tx.send((
                             i,
                             scheduler,
                             cm,
                             ctx.observer.clone(),
                             send_filters,
                             recv_filters,
-                        ))
-                        .unwrap();
+                        ));
+                        if res.is_err() {
+                            // TODO? (if needed): save `tx` and provide a method to manually refresh the new started nodes.
+                            warn!("!!!!!! now the test framework losts all extra tracking to a node after its restart.\
+                                packet filters, endpoints references, etc. won't work for this node then."; 
+                                "node_id" => i);
+                        }
                         let mut updated_cfg = CdcConfig::default();
                         updated_cfg.min_ts_interval = ReadableDuration::millis(100);
                         ctx.endpoint
@@ -255,11 +263,18 @@ impl CloudTestSuiteBuilder {
         let pd_client = svc_ext.get_pd_client();
         test_util::init_log_for_test();
 
+        let mut cse_store_id_to_node_id = HashMap::default();
+        for node_id in svc_ext.get_nodes() {
+            let store_id = svc_ext.get_store_id(node_id);
+            cse_store_id_to_node_id.insert(store_id, node_id);
+        }
+
         TestSuite {
             cluster: TestCluster::CloudEngine {
                 server: svc_ext,
                 send_filters,
                 recv_filters,
+                store_id_to_node_id: cse_store_id_to_node_id,
             },
             endpoints,
             obs,
@@ -409,7 +424,52 @@ pub enum TestCluster {
         server: test_cloud_server::ServerClusterExt,
         send_filters: HashMap<u64, SharedFilters>,
         recv_filters: HashMap<u64, SharedFilters>,
+        store_id_to_node_id: HashMap<u64, u16>,
     },
+}
+
+pub fn must_get_kvengine(
+    e: &kvengine::Engine,
+    region_id: u64,
+    cf: usize,
+    key: &[u8],
+    value: Option<&[u8]>,
+) {
+    let snap = e.get_snap_access(region_id).unwrap();
+    for _ in 1..300 {
+        let res = snap.get(cf, key, u64::MAX);
+        if value.is_none() && res.is_value_empty() {
+            return;
+        }
+        if !res.is_value_empty() {
+            if let (Some(value), res) = (value, res.get_value()) {
+                assert_eq!(value, res);
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    debug!("last try to get {}", log_wrappers::hex_encode_upper(key));
+    let res = snap.get(cf, key, u64::MAX);
+    if value.is_none() && res.is_value_empty()
+        || value.is_some() && !res.is_value_empty() && value.unwrap() == res.get_value()
+    {
+        return;
+    }
+    panic!(
+        "can't get value {:?} for key {}",
+        value,
+        log_wrappers::hex_encode_upper(key)
+    )
+}
+
+pub fn must_get_equal_kvengine(
+    engine: &kvengine::Engine,
+    region_id: u64,
+    key: &[u8],
+    value: &[u8],
+) {
+    must_get_kvengine(engine, region_id, WRITE_CF, key, Some(value));
 }
 
 impl TestCluster {
@@ -425,6 +485,95 @@ impl TestCluster {
             .unwrap()
             .unwrap()
             .take_region_epoch()
+    }
+
+    pub fn get_engine(&self, store_id: u64) -> Either<RocksEngine, kvengine::Engine> {
+        match self {
+            TestCluster::Tikv(c) => Either::Left(c.get_engine(store_id)),
+            TestCluster::CloudEngine {
+                server: c,
+                store_id_to_node_id,
+                ..
+            } => {
+                let node_id = store_id_to_node_id[&store_id];
+                Either::Right(c.get_kvengine(node_id))
+            }
+        }
+    }
+
+    pub fn stop_node(&mut self, store_id: u64) {
+        match self {
+            TestCluster::Tikv(c) => {
+                c.stop_node(store_id);
+            }
+            TestCluster::CloudEngine {
+                server: c,
+                store_id_to_node_id,
+                ..
+            } => {
+                let node_id = store_id_to_node_id[&store_id];
+                c.stop_node(node_id);
+            }
+        }
+    }
+
+    pub fn run_node(&mut self, store_id: u64) {
+        match self {
+            TestCluster::Tikv(c) => {
+                c.run_node(store_id).unwrap();
+            }
+            TestCluster::CloudEngine {
+                server: c,
+                store_id_to_node_id,
+                ..
+            } => {
+                let node_id = store_id_to_node_id[&store_id];
+                c.start_node(node_id, |_, _| {});
+            }
+        }
+    }
+
+    pub fn try_merge(&mut self, source: u64, target: u64) {
+        match self {
+            TestCluster::Tikv(c) => {
+                c.try_merge(source, target);
+            }
+            TestCluster::CloudEngine { server: c, .. } => {
+                let pd = c.get_pd_client();
+                pd.merge_region(source, target);
+            }
+        }
+    }
+
+    pub fn must_merge(&mut self, source: u64, target: u64) {
+        match self {
+            TestCluster::Tikv(c) => {
+                c.must_try_merge(source, target);
+            }
+            TestCluster::CloudEngine { server: c, .. } => {
+                let pd = c.get_pd_client();
+                pd.merge_region(source, target);
+                for _ in 0..30 {
+                    let region = block_on(pd.get_region_by_id(source)).unwrap();
+                    if region.is_none() {
+                        return;
+                    }
+                    sleep_ms(100);
+                }
+                let region = block_on(pd.get_region_by_id(source)).unwrap();
+                panic!("taking too long to merge {source} to {target}; source = {region:?}")
+            }
+        }
+    }
+
+    pub fn must_put(&mut self, key: &[u8], value: &[u8]) {
+        match self {
+            TestCluster::Tikv(c) => c.must_put(key, value),
+            TestCluster::CloudEngine { server: c, .. } => {
+                let mut cli = c.cluster.new_client();
+                cli.put_kv(0..1, |_| key.to_vec(), |_| value.to_vec());
+            }
+        }
     }
 
     pub fn leader_of_region(&mut self, region_id: u64) -> Option<kvproto::metapb::Peer> {

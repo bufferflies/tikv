@@ -14,12 +14,8 @@ use crate::{new_event_feed, TestSuite};
 
 #[test]
 fn test_failed_pending_batch() {
-    test_kv_format_impl!(test_failed_pending_batch_impl<ApiV1 ApiV2>);
-}
-
-fn test_failed_pending_batch_impl<F: KvFormat>() {
     // For test that a pending cmd batch contains a error like epoch not match.
-    let mut suite = TestSuite::new(3, F::TAG);
+    let mut suite = TestSuite::new(3, ApiVersion::V2);
 
     let fp = "cdc_incremental_scan_start";
     fail::cfg(fp, "pause").unwrap();
@@ -27,7 +23,7 @@ fn test_failed_pending_batch_impl<F: KvFormat>() {
     let region = suite.cluster.get_region(&[]);
     let mut req = suite.new_changedata_request(region.get_id());
     let (mut req_tx, event_feed_wrap, receive_event) =
-        new_event_feed(suite.get_region_cdc_client(1));
+        new_event_feed(suite.get_region_cdc_client(region.id));
     block_on(req_tx.send((req.clone(), WriteFlags::default()))).unwrap();
     // Split region.
     suite.cluster.must_split(&region, b"xk0");
@@ -51,7 +47,8 @@ fn test_failed_pending_batch_impl<F: KvFormat>() {
         }
     }
     // Try to subscribe region again.
-    let region = suite.cluster.get_region(b"xk0");
+    // next-gen: split generates new regions at left side.
+    let region = suite.cluster.get_region(b"xk1");
     // Ensure it is the previous region.
     assert_eq!(req.get_region_id(), region.get_id());
     req.set_region_epoch(region.get_region_epoch().clone());
@@ -73,7 +70,7 @@ fn test_failed_pending_batch_impl<F: KvFormat>() {
 
 #[test]
 fn test_region_ready_after_deregister() {
-    test_kv_format_impl!(test_region_ready_after_deregister_impl<ApiV1 ApiV2>);
+    test_kv_format_impl!(test_region_ready_after_deregister_impl<ApiV2>);
 }
 
 fn test_region_ready_after_deregister_impl<F: KvFormat>() {
@@ -82,9 +79,10 @@ fn test_region_ready_after_deregister_impl<F: KvFormat>() {
     let fp = "cdc_incremental_scan_start";
     fail::cfg(fp, "pause").unwrap();
 
-    let req = suite.new_changedata_request(1);
+    let region = suite.cluster.get_region(b"");
+    let req = suite.new_changedata_request(region.id);
     let (mut req_tx, event_feed_wrap, receive_event) =
-        new_event_feed(suite.get_region_cdc_client(1));
+        new_event_feed(suite.get_region_cdc_client(region.id));
     block_on(req_tx.send((req, WriteFlags::default()))).unwrap();
     // Sleep for a while to make sure the region has been subscribed
     sleep_ms(200);
@@ -97,7 +95,7 @@ fn test_region_ready_after_deregister_impl<F: KvFormat>() {
         .obs
         .get(&leader.get_store_id())
         .unwrap()
-        .on_role_change(&mut context, &RoleChange::new_for_test(StateRole::Follower));
+        .on_role_change(&mut context, &RoleChange::new(StateRole::Follower));
 
     // Then CDC should not panic
     fail::remove(fp);
@@ -109,7 +107,7 @@ fn test_region_ready_after_deregister_impl<F: KvFormat>() {
 
 #[test]
 fn test_connections_register() {
-    test_kv_format_impl!(test_connections_register_impl<ApiV1 ApiV2>);
+    test_kv_format_impl!(test_connections_register_impl<ApiV2>);
 }
 
 fn test_connections_register_impl<F: KvFormat>() {
@@ -133,7 +131,7 @@ fn test_connections_register_impl<F: KvFormat>() {
     req.set_region_epoch(RegionEpoch::default());
 
     let (mut req_tx, event_feed_wrap, receive_event) =
-        new_event_feed(suite.get_region_cdc_client(1));
+        new_event_feed(suite.get_region_cdc_client(region.id));
     block_on(req_tx.send((req.clone(), WriteFlags::default()))).unwrap();
     let mut events = receive_event(false).events.to_vec();
     match events.pop().unwrap().event.unwrap() {
@@ -180,7 +178,7 @@ fn test_connections_register_impl<F: KvFormat>() {
 
 #[test]
 fn test_merge() {
-    test_kv_format_impl!(test_merge_impl<ApiV1 ApiV2>);
+    test_kv_format_impl!(test_merge_impl<ApiV2>);
 }
 
 fn test_merge_impl<F: KvFormat>() {
@@ -287,7 +285,7 @@ fn test_merge_impl<F: KvFormat>() {
 
 #[test]
 fn est_connections_registertest_deregister_pending_downstream() {
-    test_kv_format_impl!(test_deregister_pending_downstream_impl<ApiV1 ApiV2>);
+    test_kv_format_impl!(test_deregister_pending_downstream_impl<ApiV2>);
 }
 
 fn test_deregister_pending_downstream_impl<F: KvFormat>() {
@@ -295,9 +293,10 @@ fn test_deregister_pending_downstream_impl<F: KvFormat>() {
 
     let build_resolver_fp = "before_schedule_resolver_ready";
     fail::cfg(build_resolver_fp, "pause").unwrap();
-    let mut req = suite.new_changedata_request(1);
+    let region = suite.cluster.get_region(b"");
+    let mut req = suite.new_changedata_request(region.id);
     let (mut req_tx1, event_feed_wrap, receive_event) =
-        new_event_feed(suite.get_region_cdc_client(1));
+        new_event_feed(suite.get_region_cdc_client(region.id));
     block_on(req_tx1.send((req.clone(), WriteFlags::default()))).unwrap();
     // Sleep for a while to make sure the region has been subscribed
     sleep_ms(200);
@@ -306,7 +305,7 @@ fn test_deregister_pending_downstream_impl<F: KvFormat>() {
     fail::cfg(raft_capture_fp, "pause").unwrap();
 
     // Conn 2
-    let (mut req_tx2, resp_rx2) = suite.get_region_cdc_client(1).event_feed().unwrap();
+    let (mut req_tx2, resp_rx2) = suite.get_region_cdc_client(region.id).event_feed().unwrap();
     req.set_region_epoch(RegionEpoch::default());
     block_on(req_tx2.send((req.clone(), WriteFlags::default()))).unwrap();
     let _resp_rx1 = event_feed_wrap.replace(Some(resp_rx2));

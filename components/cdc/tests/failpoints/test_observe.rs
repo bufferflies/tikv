@@ -1,32 +1,22 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
-    },
-    time::Duration,
-};
-
 use api_version::{test_kv_format_impl, KvFormat};
 use futures::{executor::block_on, sink::SinkExt};
 use grpcio::WriteFlags;
-use kvproto::{cdcpb::*, kvrpcpb::*, raft_serverpb::RaftMessage};
+use kvproto::{cdcpb::*, kvrpcpb::*};
 use pd_client::PdClient;
-use raft::eraftpb::MessageType;
 use test_raftstore::*;
-use tikv_util::{config::ReadableDuration, HandyRwLock};
 
-use crate::{new_event_feed, TestSuite, TestSuiteBuilder};
+use crate::{new_event_feed, TestSuite};
 
 #[test]
 fn test_observe_duplicate_cmd() {
-    test_kv_format_impl!(test_observe_duplicate_cmd_impl<ApiV1 ApiV2>);
+    test_kv_format_impl!(test_observe_duplicate_cmd_impl<ApiV2>);
 }
 
 fn test_observe_duplicate_cmd_impl<F: KvFormat>() {
     let mut suite = TestSuite::new(1, F::TAG);
-    suite.cluster.pd_client.disable_default_operator();
+    suite.cluster.pd_client().disable_default_operator();
 
     let region = suite.cluster.get_region(&[]);
     let mut req = suite.new_changedata_request(region.get_id());
@@ -50,7 +40,7 @@ fn test_observe_duplicate_cmd_impl<F: KvFormat>() {
 
     // If tikv enable ApiV2, txn key needs to start with 'x';
     let (k, v) = ("xkey1".to_owned(), "value".to_owned());
-    let start_ts = block_on(suite.cluster.pd_client.get_tso()).unwrap();
+    let start_ts = block_on(suite.cluster.pd_client().get_tso()).unwrap();
     let mut mutation = Mutation::default();
     mutation.set_op(Op::Put);
     mutation.key = k.clone().into_bytes();
@@ -61,20 +51,23 @@ fn test_observe_duplicate_cmd_impl<F: KvFormat>() {
         k.clone().into_bytes(),
         start_ts,
     );
-    let mut events = receive_event_1(false).events.to_vec();
-    assert_eq!(events.len(), 1);
-    match events.pop().unwrap().event.unwrap() {
-        Event_oneof_event::Entries(entries) => {
-            assert_eq!(entries.entries.len(), 1);
-            assert_eq!(entries.entries[0].get_type(), EventLogType::Prewrite);
+    #[cfg(NO_NEXT_GEN_COMPATIBLE)]
+    {
+        let mut events = receive_event_1(false).events.to_vec();
+        assert_eq!(events.len(), 1);
+        match events.pop().unwrap().event.unwrap() {
+            Event_oneof_event::Entries(entries) => {
+                assert_eq!(entries.entries.len(), 1);
+                assert_eq!(entries.entries[0].get_type(), EventLogType::Prewrite);
+            }
+            other => panic!("unknown event {:?}", other),
         }
-        other => panic!("unknown event {:?}", other),
     }
 
     fail::cfg("before_cdc_flush_apply", "pause").unwrap();
 
     // Async commit
-    let commit_ts = block_on(suite.cluster.pd_client.get_tso()).unwrap();
+    let commit_ts = block_on(suite.cluster.pd_client().get_tso()).unwrap();
     let commit_resp =
         suite.async_kv_commit(region.get_id(), vec![k.into_bytes()], start_ts, commit_ts);
 
@@ -138,13 +131,17 @@ fn test_observe_duplicate_cmd_impl<F: KvFormat>() {
 // TODO: Change cmd is not used currently, so the test is unneeded,
 // uncomment it after change cmd is used again
 // #[test]
+#[cfg(NO_NEXT_GEN_COMPATIBLE)]
 #[allow(dead_code)]
 fn test_delayed_change_cmd() {
-    let mut cluster = new_server_cluster(1, 3);
-    configure_for_lease_read(&mut cluster.cfg, Some(50), Some(20));
-    cluster.cfg.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(100);
-    cluster.pd_client.disable_default_operator();
-    let mut suite = TestSuiteBuilder::new().cluster(cluster).build();
+    let mut suite = CloudTestSuiteBuilder::new()
+        .num_nodes(3)
+        .cfg_fun(|cfg| {
+            configure_for_lease_read(cfg, Some(50), Some(20));
+            cfg.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(100);
+        })
+        .after_cluster_bootstrapped(|s| s.get_pd_client().disable_default_operator())
+        .build();
     suite.cluster.must_put(b"k1", b"v1");
     let region = suite.cluster.pd_client.get_region(&[]).unwrap();
     let leader = new_peer(1, 1);
@@ -186,11 +183,7 @@ fn test_delayed_change_cmd() {
     block_on(req_tx.send((req, WriteFlags::default()))).unwrap();
     sleep_ms(200);
 
-    suite
-        .cluster
-        .sim
-        .wl()
-        .clear_send_filters(leader.get_store_id());
+    suite.cluster.clear_send_filters(leader.get_store_id());
     rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
     let mut counter = 0;

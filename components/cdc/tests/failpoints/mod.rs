@@ -5,11 +5,8 @@
 
 mod test_endpoint;
 mod test_memory_quota;
-#[cfg(NEXT_GEN_COMPATIBLE_TODO)]
 mod test_observe;
-#[cfg(NEXT_GEN_COMPATIBLE_TODO)]
 mod test_register;
-#[cfg(NEXT_GEN_COMPATIBLE_TODO)]
 mod test_resolve;
 
 #[path = "../mod.rs"]
