@@ -458,6 +458,9 @@ impl ReplicationWorker {
             }
             CdcMsg::Stop => {
                 self.stop = true;
+                if let Some(mut grpc_server) = self.grpc_server.take() {
+                    grpc_server.shutdown();
+                }
             }
         }
     }
