@@ -24,12 +24,6 @@ arrow-buffer = "53.1.0"
 async-recursion = "1.1"
 async-trait = "0.1"
 aws = { path = "../cloud/aws" }
-aws-config = { version = "1", features = [], default-features = false }
-aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
-aws-sdk-s3 = { version = "~1.40", features = ["rt-tokio"], default-features = false }
-aws-smithy-runtime = { version = "1", features = [ "client", "connector-hyper-0-14-x" ], default-features = false }
-aws-smithy-runtime-api = { version = "1", features = [], default-features = false }
-aws-smithy-types = { version = "1", features = ["byte-stream-poll-next"] }
 backtrace = "0.3"
 base64 = "0.13"
 bincode = "1.3"
@@ -56,7 +50,6 @@ fslock = "0.1.7"
 futures = { version = "0.3", features = ["thread-pool"] }
 hex = "0.4"
 http = "0.2"
-http-body-util = "0.1.3"
 hyper = "0.14"
 hyper-rustls = "0.24.2"
 hyper-tls = "0.5"
@@ -105,8 +98,6 @@ tikv_util = { path = "../tikv_util", default-features = false }
 time = "0.1"
 tipb = { workspace = true }
 tokio = { version = "1.5", features = ["full"] }
-
-tower = { version = "0.4", default-features = false }  
 tracker = { path = "../tracker" }
 txn_types = { path = "../txn_types", default-features = false }
 url = "2"
@@ -124,7 +115,6 @@ features = ["encryption"]
 
 [dev-dependencies]
 anyhow = "1.0.26"
-http-body-util = "0.1"
 proptest = "1.4"
 rstest = "0.18"
 tempfile = "3"

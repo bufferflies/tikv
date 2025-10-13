@@ -4,7 +4,6 @@ use std::{
     convert::TryFrom,
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
-    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -15,7 +14,7 @@ use bytes::{Buf, Bytes};
 use engine_traits::{GetObjectOptions, ListObjectContent, ObjectStorage};
 use fail::fail_point;
 use farmhash::fingerprint64;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use http::{header::CONTENT_RANGE, StatusCode};
 use hyper_tls::HttpsConnector;
 use regex::Regex;
@@ -30,7 +29,7 @@ use rusoto_s3::{
     ListObjectsV2Error, PutObjectError,
 };
 use tikv_util::{sys::thread::ThreadBuildWrapper, time::Instant};
-use tokio::{io::AsyncWriteExt, runtime::Runtime};
+use tokio::runtime::Runtime;
 
 use crate::dfs::{
     self, config::Config, Dfs, Error, FileType, MetricsFileType, Options, KVENGINE_DFS_LATENCY,
@@ -101,16 +100,14 @@ impl S3Fs {
     #[cfg(any(test, feature = "testexport"))]
     pub fn new_for_test(
         runtime: Runtime,
-        rusoto_s3c: rusoto_core::Client,
-        aws_s3c: aws_sdk_s3::Client,
+        s3c: rusoto_core::Client,
         bucket: String,
         prefix: String,
     ) -> Self {
         Self {
             core: Arc::new(S3FsCore::new_with_runtime_and_s3_client(
                 Arc::new(runtime),
-                rusoto_s3c,
-                aws_s3c,
+                s3c,
                 "".to_string(),
                 false,
                 "".to_string(),
@@ -131,8 +128,7 @@ impl Deref for S3Fs {
 }
 
 pub struct S3FsCore {
-    rusoto_s3c: rusoto_core::Client,
-    aws_s3c: aws_sdk_s3::Client,
+    s3c: rusoto_core::Client,
     hostname: String,
     region: Region,
     bucket: String,
@@ -144,90 +140,14 @@ pub struct S3FsCore {
     use_http: bool,
 }
 
-type RusotoProvider = Arc<dyn rusoto_credential::ProvideAwsCredentials + Send + Sync>;
-type AwsProvider = aws_credential_types::provider::SharedCredentialsProvider;
-
-// Introduce the official AWS SDK to replace rusoto (now in maintenance mode).
-// This base provider encapsulates both SDKs: existing code can continue using
-// rusoto, while new code should adopt the official AWS SDK.
-// The long-term goal is to fully migrate away from rusoto once all legacy usage
-// is retired.
-pub struct CredProviders {
-    pub rusoto: BoxedRusotoProvider,
-    pub aws: AwsProvider,
-}
-
-#[derive(Clone)]
-pub struct BoxedRusotoProvider(RusotoProvider);
-
-#[async_trait::async_trait]
-impl rusoto_credential::ProvideAwsCredentials for BoxedRusotoProvider {
-    async fn credentials(
-        &self,
-    ) -> Result<rusoto_credential::AwsCredentials, rusoto_credential::CredentialsError> {
-        self.0.credentials().await
-    }
-}
-
-fn run_async_on_fresh_thread<Fut, T>(fut: Fut) -> T
-where
-    Fut: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::sync_channel::<T>(1);
-
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio current-thread runtime");
-
-        let out = rt.block_on(fut);
-        let _ = tx.send(out);
-    });
-
-    rx.recv().expect("async thread panicked or was killed")
-}
-
 impl S3FsCore {
-    fn build_provider(endpoint: String, key_id: String, secret_key: String) -> CredProviders {
-        let rusoto: RusotoProvider = if !key_id.is_empty() {
-            Arc::new(rusoto_credential::StaticProvider::new(
-                key_id.to_owned(),
-                secret_key.to_owned(),
-                None,
-                None,
-            ))
-        } else if endpoint.contains(aliyun::DOMAIN_STRING) {
-            Arc::new(aliyun::new_credential_provider().expect("failed to get aliyun provider"))
-        } else {
-            Arc::new(aws::new_credentials_provider_rusoto_wrapper())
-        };
-
-        let aws: AwsProvider = if !key_id.is_empty() {
-            aws_credential_types::provider::SharedCredentialsProvider::new(
-                aws_credential_types::Credentials::from_keys(key_id, secret_key, None),
-            )
-        } else {
-            // use aws official default provider to handle both aliyun and aws.
-            let aws_client = aws::new_http_client();
-            aws_credential_types::provider::SharedCredentialsProvider::new(
-                aws::new_credentials_provider(aws_client),
-            )
-        };
-        CredProviders {
-            rusoto: BoxedRusotoProvider(rusoto),
-            aws,
-        }
-    }
-
     fn new_s3_client(
         endpoint: String,
         key_id: String,
         secret_key: String,
         region: String,
         bucket: String,
-    ) -> (rusoto_core::Client, aws_sdk_s3::Client, String, bool) {
+    ) -> (rusoto_core::Client, String, bool) {
         let mut config = rusoto_core::HttpConfig::new();
         config.read_buf_size(256 * 1024);
         let endpoint = if endpoint.is_empty() {
@@ -236,18 +156,37 @@ impl S3FsCore {
             endpoint
         };
         let use_tls = endpoint.starts_with("https");
+        let default_provider = aws::new_credentials_provider_rusoto_wrapper();
+        let static_provider =
+            rusoto_credential::StaticProvider::new(key_id.clone(), secret_key, None, None);
         let mut http_connector = hyper::client::connect::HttpConnector::new();
         http_connector.set_connect_timeout(Some(CONNECTION_TIMEOUT));
-        let providers = Self::build_provider(endpoint.clone(), key_id.clone(), secret_key.clone());
-        let rusoto_s3c = if use_tls {
+        let s3c = if use_tls {
             let https_connector = HttpsConnector::new_with_connector(http_connector);
             let http_client = HttpClient::from_connector_with_config(https_connector, config);
-            rusoto_core::Client::new_with(providers.rusoto, http_client)
+            if key_id.is_empty() {
+                if endpoint.contains(aliyun::DOMAIN_STRING) {
+                    let ali_provider = aliyun::new_credential_provider().unwrap();
+                    rusoto_core::Client::new_with(ali_provider, http_client)
+                } else {
+                    rusoto_core::Client::new_with(default_provider, http_client)
+                }
+            } else {
+                rusoto_core::Client::new_with(static_provider, http_client)
+            }
         } else {
             let http_client = HttpClient::from_connector_with_config(http_connector, config);
-            rusoto_core::Client::new_with(providers.rusoto, http_client)
+            if key_id.is_empty() {
+                if endpoint.contains(aliyun::DOMAIN_STRING) {
+                    let ali_provider = aliyun::new_credential_provider().unwrap();
+                    rusoto_core::Client::new_with(ali_provider, http_client)
+                } else {
+                    rusoto_core::Client::new_with(default_provider, http_client)
+                }
+            } else {
+                rusoto_core::Client::new_with(static_provider, http_client)
+            }
         };
-
         let no_schema_endpoint = endpoint
             .find("://")
             .map(|p| &endpoint[p + 3..])
@@ -261,31 +200,13 @@ impl S3FsCore {
             no_schema_endpoint.to_string()
         };
 
-        let aws_s3c = {
-            let aws_client = aws::new_http_client();
-            let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                .credentials_provider(providers.aws);
-            if !region.is_empty() {
-                loader = loader.region(aws_config::Region::new(region.clone()));
-            }
-            if !endpoint.is_empty() {
-                loader = loader.endpoint_url(endpoint.clone());
-            }
-            loader = loader.http_client(aws_client);
-            let sdk_config = run_async_on_fresh_thread(loader.load());
-            let builder =
-                aws_sdk_s3::config::Builder::from(&sdk_config).force_path_style(!virtual_host);
-            aws_sdk_s3::Client::from_conf(builder.build())
-        };
-
-        (rusoto_s3c, aws_s3c, hostname, virtual_host)
+        (s3c, hostname, virtual_host)
     }
 
     #[inline]
     fn new_with_runtime_and_s3_client(
         runtime: Arc<tokio::runtime::Runtime>,
-        rusoto_s3c: rusoto_core::Client,
-        aws_s3c: aws_sdk_s3::Client,
+        s3c: rusoto_core::Client,
         hostname: String,
         virtual_host: bool,
         endpoint: String,
@@ -302,8 +223,7 @@ impl S3FsCore {
             endpoint,
         };
         Self {
-            rusoto_s3c,
-            aws_s3c,
+            s3c,
             hostname,
             region,
             bucket,
@@ -349,7 +269,7 @@ impl S3FsCore {
         bucket: String,
         prefix: String,
     ) -> Self {
-        let (rusoto_s3, aws_s3c, hostname, virtual_host) = Self::new_s3_client(
+        let (rusoto_s3, hostname, virtual_host) = Self::new_s3_client(
             endpoint.clone(),
             key_id,
             secret_key,
@@ -359,7 +279,6 @@ impl S3FsCore {
         Self::new_with_runtime_and_s3_client(
             runtime,
             rusoto_s3,
-            aws_s3c,
             hostname,
             virtual_host,
             endpoint,
@@ -808,7 +727,7 @@ impl S3FsCore {
     ) -> Result<Response, RusotoError<E>> {
         req.set_hostname(Some(self.hostname.clone()));
         let mut resp = self
-            .rusoto_s3c
+            .s3c
             .sign_and_dispatch_timeout(req, DISPATCH_TIMEOUT)
             .await?;
         if !resp.status.is_success() {
@@ -833,37 +752,6 @@ impl S3FsCore {
             buf.extend_from_slice(chunk.chunk());
         }
         Ok(Bytes::from(buf))
-    }
-
-    pub async fn download_object(
-        &self,
-        full_key: &str,
-        dst_path: impl AsRef<Path>,
-    ) -> crate::dfs::Result<()> {
-        let resp = self
-            .aws_s3c
-            .get_object()
-            .bucket(&self.bucket)
-            .key(full_key)
-            .send()
-            .await?;
-
-        let path: &Path = dst_path.as_ref();
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let tmp_path: PathBuf = path.with_extension("part");
-
-        let mut reader = resp.body.into_async_read();
-        let mut file = tokio::fs::File::create(&tmp_path).await?;
-
-        tokio::io::copy(&mut reader, &mut file).await?;
-
-        file.flush().await?;
-
-        tokio::fs::rename(&tmp_path, path).await?;
-
-        Ok(())
     }
 
     pub async fn get_object(
@@ -1297,7 +1185,6 @@ impl S3FsCore {
     }
 }
 
-#[async_trait]
 impl ObjectStorage for S3Fs {
     fn put_objects(&self, objects: Vec<(String, Bytes)>) -> Result<(), String> {
         let put_object = |key: String, data: Bytes| {
@@ -1359,7 +1246,7 @@ impl ObjectStorage for S3Fs {
             handles.push(runtime.spawn(async move {
                 fs.get_object(full_key, key.clone(), opts)
                     .await
-                    .map_err(|err| format!("get {} failed {:?}", &key, err))
+                    .map_err(|err| format!("put {} failed {:?}", &key, err))
                     .map(|data| (key.clone(), data))
             }));
         }
@@ -1393,32 +1280,6 @@ impl ObjectStorage for S3Fs {
             .block_on(self.list(start_after, prefix, max_keys))
             .map(|v| (v.0, v.2))
             .map_err(|err| format!("list failed {:?}", err))
-    }
-
-    async fn download_objects(
-        &self,
-        items: Vec<(String, GetObjectOptions)>,
-        concurrency: usize,
-        dest_dir: PathBuf,
-    ) -> std::pin::Pin<Box<dyn Stream<Item = Result<(String, PathBuf), String>> + Send>> {
-        let s3fs = self.clone();
-
-        let s = futures::stream::iter(items.into_iter().map(move |(key, _)| {
-            let s3fs = s3fs.clone();
-            let full_key = format!("{}/{}", s3fs.prefix, key);
-            let dest_path = dest_dir.join(&s3fs.bucket).join(&full_key);
-            let dest_path_str = dest_path.to_string_lossy().into_owned();
-
-            async move {
-                match s3fs.download_object(&full_key, &dest_path_str).await {
-                    Ok(_) => Ok((key, dest_path)),
-                    Err(err) => Err(err),
-                }
-                .map_err(|err| format!("downloads {} objects failed {:?}", dest_path_str, err))
-            }
-        }))
-        .buffer_unordered(concurrency.max(1));
-        Box::pin(s)
     }
 }
 
@@ -1650,123 +1511,19 @@ fn parse_content_range<S: AsRef<str>>(content_range: Option<S>) -> Option<u64> {
 pub mod test_util {
     use std::sync::{Arc, Mutex};
 
-    use aws_sdk_s3::{config::Region, error::ConnectorError, Client as AwsS3Client};
-    use aws_smithy_runtime_api::{
-        box_error::BoxError,
-        client::{
-            http::{
-                http_client_fn, HttpConnector as SmithyHttpConnectorTrait, HttpConnectorFuture,
-                HttpConnectorSettings, SharedHttpClient, SharedHttpConnector,
-            },
-            orchestrator::{HttpRequest, HttpResponse},
-            runtime_components::RuntimeComponents,
-        },
-    };
-    use aws_smithy_types::body::SdkBody;
-    use http::{Response as HttpResp, StatusCode as HttpStatus};
-    use http_body_util::BodyExt;
     use rusoto_core::signature::SignedRequest;
     use rusoto_mock::{MockCredentialsProvider, MockRequestDispatcher};
 
     use crate::dfs::S3Fs;
 
-    #[derive(Debug)]
     struct State {
         created: bool,
         file_data: Vec<u8>,
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone)]
     struct S3TestDispatcher {
         state: Arc<Mutex<State>>,
-    }
-
-    fn cx<E>(e: E) -> ConnectorError
-    where
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        ConnectorError::other(BoxError::from(e), None)
-    }
-    fn cx_poison() -> ConnectorError {
-        cx(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "state mutex poisoned",
-        ))
-    }
-
-    impl SmithyHttpConnectorTrait for S3TestDispatcher {
-        fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
-            let state = self.state.clone();
-            let method = request.method().to_string();
-            let mut req = request;
-            let fut = async move {
-                let res = match method.as_str() {
-                    "PUT" => {
-                        let buf = req
-                            .body_mut()
-                            .collect()
-                            .await
-                            .map_err(|e| ConnectorError::io(e))?
-                            .to_bytes()
-                            .to_vec();
-                        {
-                            let mut st: std::sync::MutexGuard<'_, State> =
-                                state.lock().map_err(|_| cx_poison())?;
-                            st.created = true;
-                            st.file_data = buf;
-                        }
-
-                        HttpResp::builder()
-                            .status(HttpStatus::OK)
-                            .body(SdkBody::empty())
-                    }
-                    "HEAD" => {
-                        let created = {
-                            let st: std::sync::MutexGuard<'_, State> =
-                                state.lock().map_err(|_| cx_poison())?;
-                            st.created
-                        };
-
-                        if created {
-                            HttpResp::builder()
-                                .status(HttpStatus::OK)
-                                .body(SdkBody::empty())
-                        } else {
-                            HttpResp::builder()
-                                .status(HttpStatus::NOT_FOUND)
-                                .body(SdkBody::from("Not Found"))
-                        }
-                    }
-                    "GET" => {
-                        let (created, data) = {
-                            let st: std::sync::MutexGuard<'_, State> =
-                                state.lock().map_err(|_| cx_poison())?;
-                            (st.created, st.file_data.clone())
-                        };
-                        if created {
-                            HttpResp::builder()
-                                .status(HttpStatus::OK)
-                                .body(SdkBody::from(data))
-                        } else {
-                            HttpResp::builder()
-                                .status(HttpStatus::NOT_FOUND)
-                                .body(SdkBody::from("Not Found"))
-                        }
-                    }
-                    _ => HttpResp::builder()
-                        .status(HttpStatus::OK)
-                        .body(SdkBody::empty()),
-                };
-                let http_res = res.map_err(cx)?;
-                let status = http_res.status().into();
-                let body = http_res.into_body();
-
-                let smithy_res: HttpResponse = HttpResponse::new(status, body);
-                Ok::<HttpResponse, ConnectorError>(smithy_res)
-            };
-
-            HttpConnectorFuture::new(fut)
-        }
     }
 
     impl rusoto_core::request::DispatchSignedRequest for S3TestDispatcher {
@@ -1829,24 +1586,13 @@ pub mod test_util {
         }
     }
 
-    fn make_shared_http_client(dispatcher: S3TestDispatcher) -> SharedHttpClient {
-        http_client_fn(
-            move |_settings: &HttpConnectorSettings,
-                  _rc: &RuntimeComponents|
-                  -> SharedHttpConnector {
-                SharedHttpConnector::new(dispatcher.clone())
-            },
-        )
-    }
-
     pub fn new_test_s3fs(file_data: &[u8]) -> S3Fs {
         let state = Arc::new(Mutex::new(State {
             created: false,
             file_data: file_data.to_vec(),
         }));
         let dispatcher = S3TestDispatcher { state };
-        let rusoto_s3c = rusoto_core::Client::new_with(MockCredentialsProvider, dispatcher.clone());
-
+        let s3c = rusoto_core::Client::new_with(MockCredentialsProvider, dispatcher);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("test-s3-client")
@@ -1854,26 +1600,7 @@ pub mod test_util {
             .build()
             .unwrap();
 
-        let base = runtime.block_on(
-            aws_config::defaults(aws_sdk_s3::config::BehaviorVersion::latest())
-                .http_client(make_shared_http_client(dispatcher.clone()))
-                .region(Region::new("us-east-1"))
-                .load(),
-        );
-
-        let conf = aws_sdk_s3::config::Builder::from(&base)
-            .http_client(make_shared_http_client(dispatcher))
-            .force_path_style(true)
-            .build();
-
-        let aws_s3c = AwsS3Client::from_conf(conf);
-        S3Fs::new_for_test(
-            runtime,
-            rusoto_s3c,
-            aws_s3c,
-            "shard-db".into(),
-            "prefix".into(),
-        )
+        S3Fs::new_for_test(runtime, s3c, "shard-db".into(), "prefix".into())
     }
 }
 

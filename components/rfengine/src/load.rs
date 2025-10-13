@@ -1,13 +1,8 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    collections::VecDeque,
-    fs,
-    os::unix::fs::FileExt,
-    path::{Path, PathBuf},
-    sync::atomic::Ordering,
-};
+use std::{collections::VecDeque, fs, os::unix::fs::FileExt, path::Path, sync::atomic::Ordering};
 
+use bytes::Bytes;
 use tikv_util::{info, warn};
 
 use crate::{
@@ -154,24 +149,12 @@ impl RfEngineCore {
     // snapshot.
     pub fn replay_wal_file(
         &self,
-        chunk_mem_reader: Option<Box<dyn std::io::Read>>,
-        chunk_file_paths: Vec<PathBuf>,
+        file_data: Bytes,
         epoch_id: u32,
         end_offset: u64, // u64::MAX means replay all the chunk
         full_restore: bool,
     ) -> Result<()> {
-        assert!(chunk_mem_reader.is_some() || !chunk_file_paths.is_empty());
-
-        let mut it = if !chunk_file_paths.is_empty() {
-            WalIterator::new_from_chunks_file_and_extra_chunk(
-                chunk_file_paths,
-                chunk_mem_reader,
-                epoch_id,
-            )
-        } else {
-            WalIterator::new_from_chunks(chunk_mem_reader, epoch_id, 0)
-        };
-
+        let mut it = WalIterator::new_from_chunks(file_data, epoch_id, 0);
         it.iterate_batch(|data, offset| {
             // `offset` is the data read position after `data` be read.
             if offset > end_offset {
@@ -478,11 +461,13 @@ mod tests {
             || {
                 let (cb, fut) = tikv_util::future::paired_future_callback();
                 engine.dump_wal_chunk(epoch, start_off, end_off, cb);
-                let chunks = futures::executor::block_on(fut)
-                    .unwrap()
-                    .inspect_err(|e| info!("dump wal chunk failed: {:?}", e))
-                    .ok()
-                    .map(|(chunks, _)| Box::new(chunks.reader()) as Box<dyn std::io::Read>);
+                let chunks = match futures::executor::block_on(fut).unwrap() {
+                    Ok((chunks, _)) => chunks,
+                    Err(e) => {
+                        info!("dump wal chunk failed: {:?}", e);
+                        return false;
+                    }
+                };
                 let mut async_it = WalIterator::new_from_chunks(chunks, epoch, 0);
                 if let Err(e) = async_it.iterate_batch(|_, _| {
                     // Do nothing but verify checksum.

@@ -295,7 +295,6 @@ fn setup_raft_engine(
             full_restore: true,
             fetch_wal_timeout: Duration::from_secs(1), /* NOTE: Retry is unnecessary for full
                                                         * restoration. */
-            tmp_path: Some(PathBuf::from(conf.raft_store.raftdb_path.clone()).join("tmp_download")),
         };
         replay_wal_logs_from_backup(tag, &ctx, snap_epoch_opt.unwrap())?;
     }

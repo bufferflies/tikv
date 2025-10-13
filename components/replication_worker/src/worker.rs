@@ -38,7 +38,7 @@ use kvproto::{
 };
 use merged_engine::{MergedEngine, MergedEngineContext};
 use native_br::common::{
-    collect_wal_chunks_with_retry, get_latest_backup_meta, ChunkData, CollectWalChunksContext,
+    collect_wal_chunks_with_retry, get_latest_backup_meta, CollectWalChunksContext,
 };
 use pd_client::{PdClient, RegionStat, RpcClient};
 use resolved_ts::TsSource;
@@ -780,20 +780,9 @@ impl ReplicationWorker {
         let tag = format!("{}:{}", store_id, epoch_id);
         // there is no online chunk for this epoch.
         let (chunks, _) =
-            collect_wal_chunks_with_retry(&tag, &collect_ctx, epoch_id, epoch_id + 1, 0, None)
+            collect_wal_chunks_with_retry(&tag, &collect_ctx, epoch_id, epoch_id + 1, 0)
                 .map_err(|e| Error::from(e))?;
-        let memory_wals: Vec<Bytes> = chunks
-            .iter()
-            .filter_map(|c| {
-                if let ChunkData::InMemory(b) = c {
-                    Some(b.to_owned())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        debug_assert!(memory_wals.len() == chunks.len());
-        let wal_data = assemble_wal_chunks(memory_wals)?.freeze();
+        let wal_data = assemble_wal_chunks(chunks)?.freeze();
         let end_off = wal_data.len() as u64;
         let remained_wal_data = wal_data.slice((start_off as usize)..);
         self.merged_engine

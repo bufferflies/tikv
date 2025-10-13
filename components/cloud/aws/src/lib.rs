@@ -9,6 +9,5 @@ pub use s3::{Config, S3Storage, STORAGE_NAME, STORAGE_VENDOR_NAME_AWS};
 
 mod util;
 pub use util::{
-    new_credentials_provider, new_credentials_provider_rusoto_wrapper, new_http_client,
-    ActiveRefreshingProvider, DefaultCredentialsProvider,
+    new_credentials_provider_rusoto_wrapper, ActiveRefreshingProvider, DefaultCredentialsProvider,
 };
