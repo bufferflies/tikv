@@ -681,6 +681,28 @@ impl MergedEngine {
                 region_progress.entries = entries.clone();
             }
 
+            if region_progress.commit_index > region_progress.synced_index {
+                // Fetch committed entries for `sync_merged`.
+                let low_idx = region_progress.synced_index + 1;
+                let high_idx = region_progress.commit_index + 1;
+                debug!(
+                    "{} recover_from_merged_raft_engine: fetch committed entries: [{}, {})",
+                    tag, low_idx, high_idx; "progress" => ?region_progress);
+                if let Err(err) = fetch_raft_entries_to_region_progress(
+                    tag,
+                    merged_raft,
+                    peer_id,
+                    low_idx,
+                    high_idx,
+                    region_progress,
+                ) {
+                    panic!(
+                        "{} recover_from_merged_raft_engine: fetch raft entries failed, low: {}, high: {}, err: {}",
+                        tag, low_idx, high_idx, err
+                    );
+                }
+            }
+
             debug!(
                 "{} recover_from_merged_raft_engine", tag;
                 "region" => ?region_state,
