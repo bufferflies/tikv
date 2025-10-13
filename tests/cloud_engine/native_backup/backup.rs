@@ -305,6 +305,7 @@ fn test_periodic_backup() {
         s3fs.clone(),
         RestoreConfig::default(),
         pd_client,
+        None,
         &runtime,
         None,
         reporter,

@@ -188,7 +188,6 @@ pub fn restore_keyspace_with_cfg(
         step!("Removed keyspace {keyspace_name} tiflash replica");
         keyspace_id
     };
-
     restore_keyspace(
         keyspace_id,
         target_keyspace_id,
@@ -197,6 +196,7 @@ pub fn restore_keyspace_with_cfg(
         s3fs,
         config,
         pd_client,
+        Some(pd_control),
         runtime,
         truncate_ts,
         reporter,
@@ -245,6 +245,7 @@ pub fn restore_keyspace(
     s3fs: Arc<S3Fs>,
     config: RestoreConfig,
     pd_client: Arc<dyn PdClient>,
+    pd_control: Option<PdControl>,
     runtime: &Runtime,
     truncate_ts: Option<u64>,
     reporter: Arc<dyn ReportRestoreStepTrait>,
@@ -281,7 +282,8 @@ pub fn restore_keyspace(
         let packed = get_packed_backup_meta(&s3fs, backup_name.to_owned())?;
         let mut env = RestorePackEnv {
             dfs: s3fs.clone(),
-            pd_client,
+            pd_client: pd_client.clone(),
+            pd_control,
             target_keyspace: target_keyspace_id,
             reporter: reporter.as_ref() as &dyn ReportRestoreStepTrait,
             restore_config: config.clone(),
@@ -322,19 +324,23 @@ pub fn restore_keyspace(
         check_backup_meta_ts(&cluster_backup, truncate_ts.unwrap())?;
     }
     let truncate_ts = truncate_ts.unwrap_or(cluster_backup.backup_ts);
-    let mut cluster = BackupCluster::new(
-        &cluster_backup,
-        working_path,
-        pd_client.clone(),
-        s3fs.clone(),
-        config.clone(),
+    let opt = BackupClusterOptions {
+        cluster_meta: cluster_backup.clone(),
+        path: working_path,
+        pd_client,
+        pd_control,
+        dfs: s3fs.clone(),
+        restore_conf: config.clone(),
         keyspace_id,
         target_keyspace_id,
         truncate_ts,
-        false,
+        archiving: false,
         archive_reader,
-        false,
-    )?;
+        load_all_tables: false,
+        override_dfs: None,
+        offline_packing: false,
+    };
+    let mut cluster = BackupCluster::new_opt(opt)?;
     step!(
         "Keyspace {} restore {} shards from backup",
         keyspace_tag,
@@ -409,6 +415,14 @@ pub fn prepare_and_restore_cluster(
         ApiV2::get_keyspace_range_by_id(cluster.target_keyspace_id);
     reporter.report_step(RestoreStep::SplitRegions);
     cluster.pre_split_and_scatter_regions(&config, runtime)?;
+
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let key_range = vec![(
+        target_keyspace_start.as_slice(),
+        target_keyspace_end.as_slice(),
+    )];
+    cluster.pause_merge_and_scheduler_during_restore(&key_range, stop_rx, runtime);
+    defer! { {let _ = stop_tx.send(true);} }
 
     // Restore snapshot.
     let mut success_ranges = MergeRanges::default();
@@ -631,6 +645,7 @@ pub struct BackupClusterOptions {
     pub cluster_meta: ClusterBackupMeta,
     pub path: PathBuf,
     pub pd_client: Arc<dyn PdClient>,
+    pub pd_control: Option<PdControl>,
     pub dfs: Arc<S3Fs>,
     pub restore_conf: RestoreConfig,
     pub keyspace_id: u32,
@@ -647,6 +662,7 @@ pub struct BackupCluster {
     tag: String,
     path: PathBuf,
     pd_client: Arc<dyn PdClient>,
+    pd_control: Option<PdControl>,
     dfs: Arc<S3Fs>,
     security_conf: SecurityConfig,
     master_key: MasterKey,
@@ -759,6 +775,7 @@ impl BackupCluster {
             cluster_meta: cluster_meta.clone(),
             path,
             pd_client,
+            pd_control: None,
             dfs,
             restore_conf,
             keyspace_id,
@@ -777,6 +794,7 @@ impl BackupCluster {
             cluster_meta,
             path,
             pd_client,
+            pd_control,
             dfs,
             restore_conf,
             keyspace_id,
@@ -801,6 +819,7 @@ impl BackupCluster {
             tag: tag.clone(),
             path,
             pd_client: pd_client.clone(),
+            pd_control,
             dfs,
             security_conf,
             master_key,
@@ -967,6 +986,7 @@ impl BackupCluster {
         packed_backup: &PackedBackup,
         path: PathBuf,
         pd_client: Arc<dyn PdClient>,
+        pd_control: Option<PdControl>,
         dfs: Arc<S3Fs>,
         restore_conf: RestoreConfig,
         target_keyspace_id: u32,
@@ -981,6 +1001,7 @@ impl BackupCluster {
             tag: tag.clone(),
             path,
             pd_client: pd_client.clone(),
+            pd_control,
             dfs,
             security_conf,
             master_key,
@@ -2159,6 +2180,64 @@ impl BackupCluster {
 
     fn align_target_regions(&self, sorted_target_regions: Vec<RawRegion>) -> Vec<AlignedRegion> {
         Self::align_target_regions_impl(&self.sorted_shards, &self.shards, sorted_target_regions)
+    }
+
+    pub fn pause_merge_and_scheduler_during_restore(
+        &self,
+        key_ranges: &[(&[u8], &[u8])],
+        mut stop_rx: tokio::sync::watch::Receiver<bool>,
+        runtime: &Runtime,
+    ) {
+        if let Some(pd) = self.pd_control.clone() {
+            let rule = pd_client::pd_control::LabelRule {
+                id: uuid::Uuid::new_v4().to_string(),
+                labels: vec![pd_client::pd_control::RegionLabel {
+                    key: "schedule".into(),
+                    value: "deny".into(),
+                    ttl: "1m".into(),
+                }],
+                rule_type: "key-range".into(),
+                data: key_ranges
+                    .iter()
+                    .map(|(s, e)| {
+                        let encoded_start_key = Key::from_raw(s).into_encoded();
+                        let encoded_end_key = Key::from_raw(e).into_encoded();
+                        pd_client::pd_control::KeyRangeRule {
+                            start_key: log_wrappers::hex_encode_upper(encoded_start_key),
+                            end_key: log_wrappers::hex_encode_upper(encoded_end_key),
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            };
+            let rule_arc = Arc::new(rule);
+
+            runtime.spawn({
+                let pd = pd.clone();
+                let rule = rule_arc.clone();
+                async move {
+                    info!("start to pause pd merge and scheduler");
+                    if let Err(e) = pd.set_region_label_rule(&rule).await {
+                        error!("initial setting region label rule failed: {e:?}");
+                    }
+                    loop {
+                        tokio::select! {
+                            changed = stop_rx.changed() => {
+                                if changed.is_ok() && *stop_rx.borrow() {
+                                    info!("stop pause pd merge and scheduler");
+                                    break;
+                                }
+                            }
+                            _ = tokio::time::sleep(Duration::from_secs(20)) => {
+                                info!("pause pd merge and scheduler in the tick");
+                                if let Err(e) = pd.set_region_label_rule(&rule).await {
+                                    warn!("renew region rule failed: {e:?}");
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
     }
 
     fn pre_split_and_scatter_regions(

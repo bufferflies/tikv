@@ -31,10 +31,34 @@ const PD_SCHEDULERS_PATH: &str = "pd/api/v1/schedulers";
 const PD_OPERATORS_PATH: &str = "pd/api/v1/operators";
 const PD_STORES_PATH: &str = "pd/api/v1/stores";
 const PD_STORE_PATH: &str = "pd/api/v1/store";
+const PD_REGION_RULE_PATH: &str = "pd/api/v1/config/region-label/rule";
+const PD_REGION_RULE_ID_PATH: &str = "pd/api/v1/config/region-label/rules/ids";
 
 const EVICT_LEADER_SCHEDULER: &str = "evict-leader-scheduler";
 
 const TIFLASH_GROUP: &str = "tiflash";
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct RegionLabel {
+    pub key: String,
+    pub value: String,
+    pub ttl: String,
+}
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct KeyRangeRule {
+    pub start_key: String,
+    pub end_key: String,
+}
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct LabelRule {
+    pub id: String,
+    pub labels: Vec<RegionLabel>,
+    pub rule_type: String,
+    pub data: Vec<KeyRangeRule>,
+}
 
 #[derive(Default, Serialize, Deserialize, Debug)]
 #[serde(default)]
@@ -77,6 +101,21 @@ impl PdControl {
     pub fn new(config: Config, security_mgr: Arc<SecurityManager>) -> Result<Self> {
         let client = RestfulClient::new("pd_control", config.endpoints, security_mgr)?;
         Ok(Self { client })
+    }
+
+    pub async fn set_region_label_rule(&self, rule: &LabelRule) -> Result<()> {
+        let _: String = self.client.post(PD_REGION_RULE_PATH, rule).await?;
+        Ok(())
+    }
+
+    pub async fn get_region_label_rule(&self, rule_ids: Vec<String>) -> Result<Vec<LabelRule>> {
+        let body = Bytes::from(serde_json::to_vec(&rule_ids)?);
+        let resp = self
+            .client
+            .request(PD_REGION_RULE_ID_PATH, Method::GET, Some(body))
+            .await?;
+        let rules: Vec<LabelRule> = serde_json::from_slice(&resp)?;
+        Ok(rules)
     }
 
     pub fn set_retry_timeout(&mut self, timeout: Duration) {

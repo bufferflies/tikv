@@ -1779,6 +1779,7 @@ pub mod v1x {
                         s3fs,
                         restore_cfg,
                         pd_cli,
+                        Some(pd_control),
                         &br_cx.runtime,
                         None,
                         reporter,

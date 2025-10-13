@@ -165,6 +165,7 @@ fn test_random_all() {
     for _ in 0..RESTORE_CONCURRENCY {
         handles.push(spawn_restore_keyspace(
             cluster.get_pd_client(),
+            None,
             runtime.block_on(cluster.new_keyspace_client()),
             restore_config.clone(),
             keyspace_manager.clone(),

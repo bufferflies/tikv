@@ -124,6 +124,7 @@ impl ServerCluster {
         update_conf: F,
         pd_wrapper: PdWrapper,
         memory_capacity_ratio: f64,
+        skip_wait_pd: bool,
         before_run_server: Option<Box<dyn FnMut(u16, &mut TikvServer)>>,
     ) -> ServerCluster
     where
@@ -163,7 +164,7 @@ impl ServerCluster {
         for node_id in nodes {
             cluster.start_node(node_id, &update_conf);
         }
-        if nodes_count > 0 {
+        if nodes_count > 0 && !skip_wait_pd {
             // When there is no node, PD will not bootstrap.
             cluster.wait_pd_region_min_count(1);
         }
@@ -1206,6 +1207,7 @@ pub struct ServerClusterBuilder<F> {
     memory_capacity_ratio: f64,
     pd_server_cnt: usize,
     tikv_worker_cnt: usize,
+    skip_wait_pd: bool,
     before_run_server: Option<Box<dyn FnMut(u16, &mut TikvServer)>>,
 }
 
@@ -1218,12 +1220,18 @@ impl<F: Fn(u16, &mut TikvConfig)> ServerClusterBuilder<F> {
             memory_capacity_ratio: 1.0,
             pd_server_cnt: 0,
             tikv_worker_cnt: 0,
+            skip_wait_pd: false,
             before_run_server: None,
         }
     }
 
     pub fn pd(mut self, pd: PdWrapper) -> Self {
         self.pd = Some(pd);
+        self
+    }
+
+    pub fn skip_wait_pd(mut self, wait: bool) -> Self {
+        self.skip_wait_pd = wait;
         self
     }
 
@@ -1255,6 +1263,7 @@ impl<F: Fn(u16, &mut TikvConfig)> ServerClusterBuilder<F> {
             self.update_conf,
             pd,
             self.memory_capacity_ratio,
+            self.skip_wait_pd,
             self.before_run_server,
         )
     }
@@ -1271,6 +1280,7 @@ impl<F: Fn(u16, &mut TikvConfig)> ServerClusterBuilder<F> {
             update_conf,
             pd,
             self.memory_capacity_ratio,
+            self.skip_wait_pd,
             self.before_run_server.take(),
         );
         if self.tikv_worker_cnt > 0 {

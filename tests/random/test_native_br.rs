@@ -14,7 +14,7 @@ use native_br::{
     restore::{get_cluster_backup_meta, get_cluster_backup_meta_async, RestoreConfig},
     restore_keyspace::{self, ReportRestoreStepTrait, RestoreStep},
 };
-use pd_client::PdClient;
+use pd_client::{pd_control::PdControl, PdClient};
 use rand::Rng;
 use test_cloud_server::{
     client::ClusterClient,
@@ -37,6 +37,7 @@ const RFENGINE_HTTP_ERROR_RETRY_TIMES: usize = 20;
 
 pub(crate) fn do_restore_keyspace(
     pd_client: Arc<dyn PdClient>,
+    pd_control: Option<PdControl>,
     runtime: &Runtime,
     config: RestoreConfig,
     keyspace: u32,
@@ -62,6 +63,7 @@ pub(crate) fn do_restore_keyspace(
         s3fs,
         config,
         pd_client,
+        pd_control,
         runtime,
         truncate_ts,
         reporter,
@@ -178,6 +180,7 @@ pub(crate) fn check_br() {
 
 pub(crate) fn spawn_restore_keyspace(
     pd_client: Arc<TestPdClient>,
+    pd_control: Option<PdControl>,
     mut client: ClusterKeyspaceClient,
     restore_config: RestoreConfig,
     keyspace_manager: KeyspaceManager,
@@ -263,6 +266,7 @@ pub(crate) fn spawn_restore_keyspace(
                 // restore.
                 restored_keyspace = match do_restore_keyspace(
                     pd_client.clone(),
+                    pd_control.clone(),
                     &runtime,
                     config.clone(),
                     source_keyspace,

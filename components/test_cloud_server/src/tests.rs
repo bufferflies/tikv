@@ -436,6 +436,7 @@ fn test_pd_control() {
     let pd_ctl = Arc::new(pd_wrapper.get_pd_control().unwrap());
     let mut cluster = ServerClusterBuilder::new(node_ids, |_, _| {})
         .pd(pd_wrapper)
+        .skip_wait_pd(true)
         .build();
 
     runtime.block_on(async {
@@ -595,6 +596,37 @@ fn test_pd_control() {
         );
         let schedulers = pd_ctl.list_schedulers(None).await.unwrap();
         info!("pd_control::list_schedulers after resume: {:?}", schedulers);
+
+        let rule_id = "123".to_string();
+        let rule = pd_client::pd_control::LabelRule {
+            id: rule_id.clone(),
+            labels: vec![pd_client::pd_control::RegionLabel {
+                key: "schedule".into(),
+                value: "deny".into(),
+                ttl: format!("{}s", pause_dur.as_secs()),
+            }],
+            rule_type: "key-range".into(),
+            data: vec![pd_client::pd_control::KeyRangeRule {
+                start_key: hex::encode(""),
+                end_key: hex::encode(""),
+            }],
+        };
+        pd_ctl.set_region_label_rule(&rule).await.unwrap();
+
+        let rules = pd_ctl
+            .get_region_label_rule(vec![rule_id.clone()])
+            .await
+            .unwrap();
+        info!(
+            "pd_control::get rule after pause {:?}: {:?}",
+            pause_dur, rules
+        );
+        assert!(!rules.is_empty());
+        assert_eq!(rules[0].id, rule_id);
+
+        tokio::time::sleep(pause_dur + Duration::from_secs(1)).await;
+        let rules = pd_ctl.get_region_label_rule(vec![rule_id]).await.unwrap();
+        assert!(rules.is_empty());
     });
 
     cluster.stop();

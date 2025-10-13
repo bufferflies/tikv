@@ -237,10 +237,13 @@ impl PackContext {
             Arc::clone(&env.dfs),
             Arc::clone(&env.tmpfs),
         ));
+
         let opt = BackupClusterOptions {
             cluster_meta: backup_meta.clone(),
             path: env.work_path,
             pd_client: env.pd_client.clone(),
+            // pack backup don't need pd-ctl
+            pd_control: None,
             dfs: Arc::clone(&env.dfs),
             restore_conf: env.restore_conf,
             keyspace_id: keyspace_meta.id,
@@ -452,6 +455,7 @@ impl MigratePackEnv {
 pub struct RestorePackEnv<'a> {
     pub dfs: Arc<S3Fs>,
     pub pd_client: Arc<dyn PdClient>,
+    pub pd_control: Option<PdControl>,
     pub target_keyspace: u32,
     pub reporter: &'a dyn ReportRestoreStepTrait,
     pub restore_config: RestoreConfig,
@@ -471,6 +475,7 @@ impl<'a> RestorePackEnv<'a> {
             &packed,
             self.data_dir.to_owned(),
             self.pd_client.clone(),
+            self.pd_control.clone(),
             self.dfs.clone(),
             self.restore_config.clone(),
             self.target_keyspace,
