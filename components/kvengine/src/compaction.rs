@@ -1235,8 +1235,17 @@ impl Engine {
         let data = shard.get_data();
         let lock_cf_files = data.get_cf(LOCK_CF);
         let mut pending_gc_lock_files = vec![];
-        for lvl in lock_cf_files.levels.iter() {
-            for tbl in lvl.tables.iter() {
+        let lvl2 = lock_cf_files.get_level(2);
+        for tbl in lvl2.tables.iter() {
+            if tbl.get_max_lock_ts() < safe_ts {
+                pending_gc_lock_files.push(tbl.id());
+            }
+        }
+        if pending_gc_lock_files.len() == lvl2.tables.len() {
+            // All level 2 lock files can be deleted, so we can safely check level 1.
+            // otherwise, gc level 1 tombstone may cause some level 2 lock reappear.
+            let lvl1 = lock_cf_files.get_level(1);
+            for tbl in lvl1.tables.iter() {
                 if tbl.get_max_lock_ts() < safe_ts {
                     pending_gc_lock_files.push(tbl.id());
                 }
