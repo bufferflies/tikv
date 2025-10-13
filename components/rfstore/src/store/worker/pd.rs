@@ -49,6 +49,7 @@ use tikv_util::{
     topn::TopN,
     warn,
     worker::{Runnable, Scheduler},
+    GLOBAL_SERVER_READINESS,
 };
 use txn_types::{Key, NULL_KEYSPACE_ID};
 use yatp::Remote;
@@ -961,6 +962,14 @@ impl PdRunner {
                 Ok(_resp) => {
                     // TODO(x): UpdateReplicationMode
                     // TODO(x): support recovery plan.
+                    if GLOBAL_SERVER_READINESS
+                        .connected_to_pd
+                        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        // Log when the server readiness condition changes.
+                        info!("ServerReadiness: connected to PD");
+                    }
                 }
                 Err(e) => {
                     error!("store heartbeat failed"; "err" => ?e);

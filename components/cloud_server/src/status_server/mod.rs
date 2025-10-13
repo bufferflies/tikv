@@ -82,6 +82,7 @@ use tikv_util::{
     spawn_anonymous_thread_with,
     sys::thread::{StdThreadBuildWrapper, ThreadBuildWrapper},
     timer::GLOBAL_TIMER_HANDLE,
+    GLOBAL_SERVER_READINESS,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -2139,6 +2140,26 @@ impl StatusServer {
         Ok(resp)
     }
 
+    fn handle_ready_request(req: Request<Body>) -> hyper::Result<Response<Body>> {
+        let verbose = req
+            .uri()
+            .query()
+            .map_or(false, |query| query.contains("verbose"));
+
+        let status_code = if GLOBAL_SERVER_READINESS.is_ready() {
+            StatusCode::OK
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+
+        let body = if verbose {
+            GLOBAL_SERVER_READINESS.to_json()
+        } else {
+            "".to_string()
+        };
+        Ok(make_response(status_code, body))
+    }
+
     fn start_serve<I, C>(&mut self, builder: HyperBuilder<I>)
     where
         I: Accept<Conn = C, Error = std::io::Error> + Send + 'static,
@@ -2202,6 +2223,9 @@ impl StatusServer {
                                 Self::handle_get_metrics(req, &ctx.cfg_controller)
                             }
                             (Method::GET, "/status") => Ok(Response::default()),
+                            (Method::GET, "/ready") => {
+                                Self::handle_ready_request(req)
+                            }
                             (Method::GET, "/debug/pprof/heap_list") => {
                                 Ok(make_response(
                                     StatusCode::GONE,
