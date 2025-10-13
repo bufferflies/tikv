@@ -19,6 +19,8 @@ use futures_util::compat::Future01CompatExt;
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest};
 use protobuf::Message;
 use raft_proto::eraftpb;
+// Re-export for convenience.
+pub use raftstore::store::util::is_region_initialized;
 use slog::{Key, Record, Serializer};
 use tikv_util::{
     box_err,

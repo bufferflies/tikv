@@ -28,7 +28,12 @@ use kvengine::{
     IdVer, MetaIterator, Shard, ShardMeta, ShardTag, TERM_KEY,
 };
 use kvenginepb::ChangeSet;
-use kvproto::{metapb, metapb::Peer, raft_cmdpb::AdminRequest, raft_serverpb::StoreIdent};
+use kvproto::{
+    metapb,
+    metapb::Peer,
+    raft_cmdpb::AdminRequest,
+    raft_serverpb::{PeerState, RegionLocalState, StoreIdent},
+};
 use log_wrappers::Value as LogValue;
 use native_br::common::{
     collect_snapshot_meta_rlog_files, get_latest_backup_meta, replay_wal_logs_from_backup,
@@ -41,7 +46,7 @@ use rfengine::{iterator::WalIterator, RaftLogOp, RfEngine, WriteBatch, TRUNCATE_
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::{
     store::{
-        get_preprocess_cmd, load_last_raft_state_from_wb,
+        get_preprocess_cmd, is_region_initialized, load_last_raft_state_from_wb,
         state::{RaftApplyState, RaftState},
         write_engine_meta, Applier, ApplyContext, ApplyMsgs, MetaChangeListener, PdIdAllocator,
         PeerMsg, PeerTag, PreprocessContext, PreprocessRef, RecoverHandler, RegionIdVer, StoreMsg,
@@ -502,6 +507,11 @@ impl MergedEngine {
                 let tag = tag.with_region_version(region_version);
                 let origin_tag = origin_tag.with_region_version(region_version);
 
+                if peer_is_skippable(&region_state) {
+                    info!("{} recover_from_backup: skip peer", tag;
+                        "origin" => %origin_tag, "region_state" => ?region_state);
+                    continue;
+                }
                 let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(new_region.get_start_key())
                     .unwrap_or_default();
 
@@ -817,6 +827,7 @@ impl MergedEngine {
         end_off: u64,
         reader: R,
     ) -> Result<()> {
+        let merged_store_id = self.merged_store_id();
         if let Some(store_progress) = self.manifest.store_progresses.get(&store_id) {
             if store_progress.epoch != epoch_id || store_progress.offset != start_off {
                 let err_msg = format!(
@@ -847,25 +858,34 @@ impl MergedEngine {
                     continue;
                 }
                 tikv_util::set_current_region(region_id);
-                let tag = ShardTag::new(store_id, IdVer::new(region_id, 0));
+                let tag = ShardTag::new(merged_store_id, IdVer::new(region_id, 0));
+                let origin_tag = ShardTag::new(store_id, IdVer::new(region_id, 0));
 
                 let progress = match self.region_progresses.entry(region_id) {
                     HashMapEntry::Occupied(e) => e.into_mut(),
                     HashMapEntry::Vacant(e) => {
-                        let Some(region_local_state) = origin_wb.get_latest_peer_state(peer_id)
-                        else {
-                            info!("{} update_wal: no peer state in wb", tag);
+                        let Some(region_state) = origin_wb.get_latest_peer_state(peer_id) else {
+                            info!("{} update_wal: no peer state in wb", tag; "origin" => %origin_tag);
                             continue;
                         };
-                        let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(
-                            region_local_state.get_region().get_start_key(),
-                        )
-                        .unwrap_or_default();
+
+                        if peer_is_skippable(&region_state) {
+                            info!("{} update_wal: skip peer", tag;
+                                "origin" => %origin_tag, "region_state" => ?region_state);
+                            continue;
+                        }
+                        let new_region = region_state.get_region();
+                        let keyspace_id =
+                            ApiV2::get_u32_keyspace_id_by_key(new_region.get_start_key())
+                                .unwrap_or_default();
+                        debug!(
+                            "{} update_wal: new region: {:?}", tag, region_state;
+                            "origin" => %origin_tag, "keyspace" => keyspace_id);
                         e.insert(RegionProgress::new(keyspace_id, region_id))
                     }
                 };
                 if progress.truncated_index == TRUNCATE_ALL_INDEX {
-                    debug!("{} update_wal: truncate all", tag);
+                    debug!("{} update_wal: truncate all", tag; "origin" => %origin_tag);
                     continue;
                 }
                 if let Some(truncated_idx) = origin_wb.get_truncated_idx(peer_id) {
@@ -880,13 +900,12 @@ impl MergedEngine {
                         progress.commit_index = raft_state.get_commit();
                         debug!(
                             "{} update_wal: advance commit index {}",
-                            tag, progress.commit_index
-                        );
+                            tag, progress.commit_index; "origin" => %origin_tag);
                     }
                 }
                 origin_wb.read_peer_logs(peer_id, |logs| {
                     for log_op in logs {
-                        debug!("{} update_wal: insert log index {}", tag, log_op.index);
+                        debug!("{} update_wal: insert log index {}", tag, log_op.index; "origin" => %origin_tag);
                         progress.upsert_entry(log_op.index, log_op.term, || log_op.clone().into());
                     }
                 });
@@ -1596,4 +1615,11 @@ fn fetch_raft_entries_to_region_progress(
         });
     }
     Ok(())
+}
+
+fn peer_is_skippable(region_local_state: &RegionLocalState) -> bool {
+    // `start_key` is empty if region is not initialized, and we will get incorrect
+    // keyspace.
+    region_local_state.state == PeerState::Tombstone
+        || !is_region_initialized(region_local_state.get_region())
 }
