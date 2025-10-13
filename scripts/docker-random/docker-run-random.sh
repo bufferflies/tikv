@@ -133,9 +133,6 @@ while [[ $# -gt 0 ]]; do
 		RUN_ARGS+=("--upgrade-test-duration" "$2")
 		shift
 		;;
-	--disable-kv-engine-meta-diff)
-		RUN_ARGS+=("--disable-kv-engine-meta-diff")
-		;;
 	--disable-value-cache)
 		RUN_ARGS+=("--disable-value-cache")
 		;;

@@ -116,7 +116,6 @@ fn test_random_upgrade() {
         Servers::TikvServers(&tikv_servers),
         Servers::ServerCluster(&cluster),
         |_, conf| {
-            conf.raft_store.enable_kv_engine_meta_diff = true;
             enable_value_cache(conf);
         },
         &server_configs,
@@ -141,7 +140,6 @@ fn test_random_upgrade() {
         Servers::ServerCluster(&cluster),
         Servers::TikvServers(&tikv_servers),
         |_, conf| {
-            conf.raft_store.enable_kv_engine_meta_diff = true;
             disable_value_cache(conf);
         },
         &server_configs,
@@ -166,7 +164,6 @@ fn test_random_upgrade() {
         Servers::TikvServers(&tikv_servers),
         Servers::ServerCluster(&cluster),
         |_, conf| {
-            conf.raft_store.enable_kv_engine_meta_diff = true;
             enable_value_cache(conf);
         },
         &server_configs,
@@ -275,12 +272,10 @@ fn prepare_cluster(
         &tikv_worker_nodes,
         switches,
     );
-    // Set `enable_kv_engine_meta_diff = false` to test for upgrade from false ->
-    // true. TODO: remove after next upgrade.
     let update_conf_fn_override = |node_id: u16, conf: &mut TikvConfig| {
         update_conf_fn(node_id, conf);
-        conf.raft_store.enable_kv_engine_meta_diff = false;
-        disable_value_cache(conf); // Remove after next upgrade.
+        disable_value_cache(conf); // Remove after old version >= 069c52b.
+        conf.kvengine.gc_lock_extra_cf = false; // Remove after old version >= 18f207b
     };
     let pd_wrapper =
         PdWrapper::new_real(tc.pd.endpoints(), security_conf, PD_CLIENT_UPDATE_INTERVAL);

@@ -391,7 +391,6 @@ fn prepare_cluster(
         conf.raft_store.peer_stale_state_check_interval = ReadableDuration::secs(1);
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
-        conf.raft_store.enable_kv_engine_meta_diff = true;
 
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
         conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(96);
