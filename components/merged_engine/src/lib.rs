@@ -1123,7 +1123,7 @@ impl MergedEngine {
             let mut hs = eraftpb::HardState::default();
             hs.set_term(1);
             hs.set_vote(updated_region);
-            hs.set_commit(progress.commit_index);
+            hs.set_commit(log_index);
             preprocessor_ref.raft_state.set_hard_state(&hs);
             preprocessor_ref.raft_state.set_last_index(log_index);
             wb_encoded_len += ctx
