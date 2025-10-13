@@ -273,6 +273,7 @@ pub struct MergedEngine {
     pub recover_handler: RecoverHandler,
     preprocessors: HashMap<u64, Preprocessor>,
     appliers: HashMap<u64, Applier>,
+    delay_destroy_regions: HashSet<u64 /* region_id */>,
     peer_receiver: mpsc::Receiver<(u64, Box<PeerMsg>)>,
     _store_receiver: mpsc::Receiver<StoreMsg>, // applier never send store message.
     router: RaftRouter,
@@ -361,6 +362,7 @@ impl MergedEngine {
             recover_handler,
             preprocessors,
             appliers: HashMap::default(),
+            delay_destroy_regions: HashSet::default(),
             _store_receiver: store_receiver,
             peer_receiver,
             router,
@@ -369,6 +371,10 @@ impl MergedEngine {
 
     fn merged_store_id(&self) -> u64 {
         self.ctx.config.merged_store_id
+    }
+
+    fn get_region_tag(&self, region_id: u64, region_ver: u64) -> ShardTag {
+        ShardTag::new(self.merged_store_id(), IdVer::new(region_id, region_ver))
     }
 
     pub fn set_keyspace_states(&mut self, keyspace_id: u32, states: Bytes) -> Result<()> {
@@ -1128,21 +1134,6 @@ impl MergedEngine {
                     let last_change_set = ctx.apply_msgs.get_last_change_set();
                     let source = last_change_set.unwrap();
                     ctx.destroyed_regions.insert(source.shard_id);
-                    ctx.raft
-                        .iterate_peer_states(source.shard_id, false, |k, _| {
-                            ctx.raft_wb.set_state_bytes(
-                                source.shard_id,
-                                source.shard_id,
-                                k.clone(),
-                                Bytes::new(),
-                            );
-                            true
-                        });
-                    wb_encoded_len += ctx.raft_wb.truncate_raft_log(
-                        source.shard_id,
-                        source.shard_id,
-                        TRUNCATE_ALL_INDEX,
-                    );
                 }
             }
             entries.push(entry);
@@ -1240,8 +1231,11 @@ impl MergedEngine {
     }
 
     fn remove_dependents(&mut self, ctx: &mut SyncRegionsContext<'_>) {
-        for (parent_id, dependent_id) in ctx.remove_dependents.drain(..) {
-            self.raft.remove_dependent(parent_id, dependent_id);
+        for (parent_id, dependent_id) in mem::take(ctx.remove_dependents) {
+            let dependent_len = self.raft.remove_dependent(parent_id, dependent_id);
+            if dependent_len == 0 && self.delay_destroy_regions.remove(&parent_id) {
+                ctx.destroyed_regions.insert(parent_id);
+            }
         }
     }
 
@@ -1284,6 +1278,14 @@ impl MergedEngine {
     fn destroy_regions(&mut self, ctx: &mut SyncRegionsContext<'_>) {
         for region_id in ctx.destroyed_regions.drain() {
             tikv_util::set_current_region(region_id);
+
+            if self.raft.has_dependents(region_id) {
+                info!("{} delay destroy", self.get_region_tag(region_id, 0));
+                self.delay_destroy_regions.insert(region_id);
+                continue;
+            }
+
+            info!("{} destroy", self.get_region_tag(region_id, 0));
             self.raft.iterate_peer_states(region_id, false, |k, _| {
                 ctx.pre_ctx
                     .raft_wb
