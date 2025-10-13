@@ -1224,11 +1224,7 @@ impl BackupCluster {
         let need_initial_flush = meta.has_parent();
 
         let raft_state = load_peer_raft_state(rf, peer_id, meta.shard_ver).ok_or_else(|| -> Error {
-            let mut states = vec![];
-            rf.iterate_peer_states(peer_id, false, |k, v| {
-                states.push((k.to_vec(), v.to_vec()));
-                true
-            });
+            let states = rf.get_peer_all_states(peer_id, false);
             error!(
                 "failed to load peer raft state, store_id: {}, region_id: {}, peer_id: {}, state: {:?}",
                 store_id, region_id, peer_id, states
@@ -1509,12 +1505,12 @@ impl BackupCluster {
             // retry.
             peers.sort_by(|a, b| {
                 let term_last_a = (
-                    a.raft_state.get_hard_state().get_term(),
+                    a.raft_state.get_term(),
                     a.raft_state.get_last_index(),
                     !a.store_id,
                 );
                 let term_last_b = (
-                    b.raft_state.get_hard_state().get_term(),
+                    b.raft_state.get_term(),
                     b.raft_state.get_last_index(),
                     !b.store_id,
                 );

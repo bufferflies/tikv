@@ -3,7 +3,7 @@
 use std::{collections::HashMap, iter::FromIterator, sync::Arc};
 
 use api_version::ApiV2;
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use collections::HashSet;
 use kvengine::{
@@ -173,10 +173,10 @@ impl RecoverHandler {
         (region, raft_state.last_preprocessed_index)
     }
 
-    fn get_state_keys(&self, peer_id: u64) -> Vec<Vec<u8>> {
+    fn get_state_keys(&self, peer_id: u64) -> Vec<Bytes> {
         let mut state_keys = vec![];
         self.rf_engine.iterate_peer_states(peer_id, false, |k, _| {
-            state_keys.push(k.to_vec());
+            state_keys.push(k.clone());
             true
         });
         state_keys

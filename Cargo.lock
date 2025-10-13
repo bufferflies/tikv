@@ -4909,6 +4909,7 @@ dependencies = [
  "kvenginepb",
  "kvproto",
  "log",
+ "log_wrappers",
  "native_br",
  "pd_client",
  "protobuf",

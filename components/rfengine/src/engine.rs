@@ -438,7 +438,7 @@ impl RfEngineCore {
     /// returns false.
     pub fn iterate_peer_states<F>(&self, peer_id: u64, desc: bool, mut f: F)
     where
-        F: FnMut(&[u8], &[u8]) -> bool,
+        F: FnMut(&Bytes, &Bytes) -> bool,
     {
         let peers = self.peers.pin();
         let peer_data = peers.get(&peer_id);
@@ -450,17 +450,26 @@ impl RfEngineCore {
         let states = &peer_data.meta.states;
         if desc {
             for (k, v) in states.iter().rev() {
-                if !f(k.chunk(), v.chunk()) {
+                if !f(k, v) {
                     break;
                 }
             }
         } else {
             for (k, v) in states.iter() {
-                if !f(k.chunk(), v.chunk()) {
+                if !f(k, v) {
                     break;
                 }
             }
         }
+    }
+
+    pub fn get_peer_all_states(&self, peer_id: u64, desc: bool) -> Vec<(Bytes, Bytes)> {
+        let mut states = vec![];
+        self.iterate_peer_states(peer_id, desc, |k, v| {
+            states.push((k.clone(), v.clone()));
+            true
+        });
+        states
     }
 
     /// Iterates stats of all regions in order or in desc order if `desc` is
@@ -1171,12 +1180,15 @@ impl PeerMeta {
     }
 
     pub fn set_state(&mut self, key: &[u8], val: &[u8]) {
-        self.states_encoded_len += key.len() + val.len() + ENTRY_BASE_LEN;
-        let old = self
-            .states
-            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(val));
+        self.set_state_bytes(Bytes::copy_from_slice(key), Bytes::copy_from_slice(val))
+    }
+
+    pub fn set_state_bytes(&mut self, key: Bytes, val: Bytes) {
+        let key_len = key.len();
+        self.states_encoded_len += key_len + val.len() + ENTRY_BASE_LEN;
+        let old = self.states.insert(key, val);
         if let Some(old) = old {
-            self.states_encoded_len -= key.len() + old.len() + ENTRY_BASE_LEN;
+            self.states_encoded_len -= key_len + old.len() + ENTRY_BASE_LEN;
         }
     }
 
@@ -1670,8 +1682,8 @@ mod tests {
         for desc in [false, true] {
             let mut expect_index = if desc { 10 } else { 1 };
             engine.iterate_peer_states(1, desc, |k, v| {
-                assert_eq!(k, &[STATE_PREFIX, expect_index]);
-                assert_eq!(v, &[expect_index]);
+                assert_eq!(k.chunk(), &[STATE_PREFIX, expect_index]);
+                assert_eq!(v.chunk(), &[expect_index]);
                 if desc {
                     expect_index -= 1;
                 } else {

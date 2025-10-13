@@ -6,7 +6,6 @@ mod preprocessor;
 
 use std::{
     cmp,
-    cmp::max,
     collections::{
         hash_map::Entry as HashMapEntry, HashMap as StdHashMap, HashSet as StdHashSet, VecDeque,
     },
@@ -30,6 +29,7 @@ use kvengine::{
 };
 use kvenginepb::ChangeSet;
 use kvproto::{metapb, metapb::Peer, raft_cmdpb::AdminRequest, raft_serverpb::StoreIdent};
+use log_wrappers::Value as LogValue;
 use native_br::common::{
     collect_snapshot_meta_rlog_files, get_latest_backup_meta, replay_wal_logs_from_backup,
     ReplayWalLogsContext,
@@ -41,9 +41,10 @@ use rfengine::{iterator::WalIterator, RaftLogOp, RfEngine, WriteBatch, TRUNCATE_
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::{
     store::{
-        get_preprocess_cmd, load_last_raft_state_from_wb, state::RaftApplyState, write_engine_meta,
-        Applier, ApplyContext, ApplyMsgs, MetaChangeListener, PdIdAllocator, PeerMsg, PeerTag,
-        PreprocessContext, PreprocessRef, RecoverHandler, RegionIdVer, StoreMsg,
+        get_preprocess_cmd, load_last_raft_state_from_wb,
+        state::{RaftApplyState, RaftState},
+        write_engine_meta, Applier, ApplyContext, ApplyMsgs, MetaChangeListener, PdIdAllocator,
+        PeerMsg, PeerTag, PreprocessContext, PreprocessRef, RecoverHandler, RegionIdVer, StoreMsg,
         RAFT_INIT_LOG_INDEX,
     },
     RaftRouter,
@@ -54,7 +55,7 @@ use tikv::config::TikvConfig;
 use tikv_util::{
     box_try,
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
-    debug, error, info, mpsc, warn,
+    debug, error, info, mpsc, trace, warn,
 };
 
 use crate::{
@@ -459,7 +460,9 @@ impl MergedEngine {
             }
         };
 
+        let merged_store_id = ctx.config.merged_store_id;
         let mut region_progresses = HashMap::default();
+        let mut regions_raft_progress = RegionsRaftProgress::default();
         let mut store_progresses = HashMap::default();
         let mut raftdb_paths = Vec::new();
         for store in backup_meta.get_stores() {
@@ -482,61 +485,69 @@ impl MergedEngine {
                 if region_id == 0 {
                     continue;
                 }
+                let tag = ShardTag::new(merged_store_id, IdVer::new(region_id, 0));
+                let origin_tag = ShardTag::new(store.store_id, IdVer::new(region_id, 0));
+
+                // region state.
                 let Some(region_state) = rfstore::store::load_last_peer_state(&origin, peer_id)
                 else {
-                    let mut states = HashMap::default();
-                    origin.iterate_peer_states(peer_id, false, |k, v| {
-                        states.insert(Bytes::copy_from_slice(k), Bytes::copy_from_slice(v));
-                        true
-                    });
-                    warn!("{}:{} recover_from_backup: no peer state for region", store.store_id, region_id;
-                        "peer" => peer_id, "states" => ?states);
+                    let states = origin.get_peer_all_states(peer_id, false);
+                    warn!("{} recover_from_backup: no peer state", tag;
+                        "origin" => %origin_tag, "peer" => peer_id, "states" => ?states);
                     debug_assert!(false);
                     continue;
                 };
-                let keyspace_id =
-                    ApiV2::get_u32_keyspace_id_by_key(region_state.get_region().get_start_key())
-                        .unwrap_or_default();
-                let region_version = region_state.get_region().get_region_epoch().get_version();
-                let tag = ShardTag::new(store.store_id, IdVer::new(region_id, region_version));
-                let raft_state =
-                    rfstore::store::load_peer_raft_state(&origin, peer_id, region_version).unwrap();
+                let new_region = region_state.get_region();
+                let region_version = new_region.get_region_epoch().get_version();
+                let tag = tag.with_region_version(region_version);
+                let origin_tag = origin_tag.with_region_version(region_version);
+
+                let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(new_region.get_start_key())
+                    .unwrap_or_default();
+
+                // raft state.
+                let Some(raft_state) =
+                    rfstore::store::load_peer_raft_state(&origin, peer_id, region_version)
+                else {
+                    let states = origin.get_peer_all_states(peer_id, false);
+                    warn!("{} recover_from_backup: no raft state", tag;
+                        "origin" => %origin_tag, "peer" => peer_id, "states" => ?states);
+                    debug_assert!(false);
+                    continue;
+                };
+
                 let preprocess_index = raft_state.get_last_preprocessed_index();
                 let region_progress = region_progresses
                     .entry(region_id)
                     .or_insert(RegionProgress::new(keyspace_id, region_id));
                 let merged_commit_index = region_progress.commit_index;
 
+                debug!(
+                    "{} recover_from_backup", tag;
+                    "region" => ?region_state, "raft" => ?raft_state,
+                    "progress" => ?region_progress,
+                    "origin" => %origin_tag, "keyspace" => keyspace_id);
+
                 if raft_state.get_last_index() > preprocess_index {
                     // Fetch uncommitted entries, and insert them into region progress, so that they
                     // will be replayed when commit index advances (during sync_merged).
-                    let mut entry_buf = Vec::new();
                     let low_idx = preprocess_index + 1;
                     let high_idx = raft_state.get_last_index() + 1;
                     debug!(
                         "{} recover_from_backup: fetch uncommitted entries: [{}, {})",
-                        tag, low_idx, high_idx
-                    );
-                    if let Err(err) = origin.fetch_raft_entries_to(
+                        tag, low_idx, high_idx; "origin" => %origin_tag);
+                    if let Err(err) = fetch_raft_entries_to_region_progress(
+                        tag,
+                        &origin,
                         peer_id,
                         low_idx,
                         high_idx,
-                        None,
-                        &mut entry_buf,
+                        region_progress,
                     ) {
                         panic!(
-                            "{} fetch raft entries failed for region, low: {}, high: {}, err: {}",
-                            tag, low_idx, high_idx, err
+                            "{} recover_from_backup: fetch raft entries failed, low: {}, high: {}, err: {}, origin: {}",
+                            tag, low_idx, high_idx, err, origin_tag
                         );
-                    }
-                    for entry in entry_buf.iter() {
-                        debug!(
-                            "{} recover from backup: insert log index {}",
-                            tag, entry.index
-                        );
-                        region_progress.upsert_entry(entry.index, entry.term as u32, || {
-                            RaftLogOp::new(entry).into()
-                        });
                     }
                 }
 
@@ -546,45 +557,56 @@ impl MergedEngine {
                 if merged_commit_index >= commit {
                     continue;
                 }
-                region_progress.commit_index = commit;
-                region_progress.synced_index = preprocess_index;
-                let truncated_index = max(
-                    region_progress.truncated_index,
-                    origin
-                        .get_truncated_index(peer_id)
-                        .unwrap_or(RAFT_INIT_LOG_INDEX),
-                )
-                .max(RAFT_INIT_LOG_INDEX);
-                region_progress.truncated_index = truncated_index;
+
+                let origin_truncated_index = origin
+                    .get_truncated_index(peer_id)
+                    .unwrap_or_default()
+                    .max(RAFT_INIT_LOG_INDEX);
+
                 // merge states
                 let mut batch = rfengine::WriteBatch::new();
-                origin.iterate_peer_states(peer_id, false, |k, v| {
-                    update_peer_state(&mut batch, k, v, merged_raft.get_engine_id(), region_id);
-                    true
-                });
+                let peer_is_newer = regions_raft_progress.update(region_id, &raft_state);
+                if peer_is_newer {
+                    origin.iterate_peer_states(peer_id, false, |k, v| {
+                        trace!("{} recover_from_backup", tag;
+                            "k" => LogValue::key(k), "v" => LogValue::value(v),
+                            "origin" => %origin_tag, "peer" => peer_id,
+                        );
 
-                if batch
-                    .get_state(region_id, rfengine::KV_ENGINE_META_KEY)
-                    .is_some()
-                {
-                    for k in [
-                        rfengine::KV_ENGINE_META_DIFF_KEY,
-                        rfengine::KV_ENGINE_META_SNAP_DIFF_KEY,
-                    ] {
-                        if batch.get_state(region_id, k).is_none() {
-                            batch.set_state(region_id, region_id, k, &[]);
+                        update_peer_state(&mut batch, k, v, merged_raft.get_engine_id(), region_id);
+                        true
+                    });
+
+                    if batch
+                        .get_state(region_id, rfengine::KV_ENGINE_META_KEY)
+                        .is_some()
+                    {
+                        for k in [
+                            rfengine::KV_ENGINE_META_DIFF_KEY,
+                            rfengine::KV_ENGINE_META_SNAP_DIFF_KEY,
+                        ] {
+                            if batch.get_state(region_id, k).is_none() {
+                                batch.set_state(region_id, region_id, k, &[]);
+                            }
                         }
                     }
+
+                    region_progress.commit_index = commit;
+                    region_progress.synced_index = preprocess_index;
+                    region_progress.truncated_index = origin_truncated_index;
                 }
 
                 // merge raft logs
                 let mut entry_buf = Vec::new();
-                let low_idx = merged_commit_index.max(truncated_index) + 1;
+                let low_idx = merged_commit_index
+                    .max(origin_truncated_index)
+                    .max(region_progress.truncated_index)
+                    + 1;
                 let high_idx = commit + 1;
                 debug!(
                     "{} recover_from_backup: fetch committed entries: [{}, {})",
-                    tag, low_idx, high_idx
-                );
+                    tag, low_idx, high_idx;
+                    "origin" => %origin_tag, "progress" => ?region_progress);
                 if let Err(err) =
                     origin.fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entry_buf)
                 {
@@ -593,18 +615,20 @@ impl MergedEngine {
                         region_id, low_idx, high_idx, err
                     );
                 }
-                for entry in entry_buf.iter() {
-                    batch.append_raft_log(region_id, region_id, entry);
+                for entry in entry_buf {
+                    batch.append_raft_log(region_id, region_id, &entry);
                 }
-                batch.truncate_raft_log(region_id, region_id, truncated_index);
-                merged_raft.write(batch).unwrap();
+                batch.truncate_raft_log(region_id, region_id, region_progress.truncated_index);
+                box_try!(merged_raft.write(batch));
             }
         }
         // destroy original raft engines
         for raftdb_path in raftdb_paths {
             let raft_path = Path::new(&raftdb_path);
             // clean up dir
-            std::fs::remove_dir_all(raft_path).unwrap();
+            if let Err(e) = std::fs::remove_dir_all(raft_path) {
+                warn!("remove raft path failed: {:?}", e; "path" => ?raft_path);
+            }
         }
         Ok((region_progresses, store_progresses))
     }
@@ -1087,8 +1111,12 @@ impl MergedEngine {
                     ctx.destroyed_regions.insert(source.shard_id);
                     ctx.raft
                         .iterate_peer_states(source.shard_id, false, |k, _| {
-                            ctx.raft_wb
-                                .set_state(source.shard_id, source.shard_id, k, &[]);
+                            ctx.raft_wb.set_state_bytes(
+                                source.shard_id,
+                                source.shard_id,
+                                k.clone(),
+                                Bytes::new(),
+                            );
                             true
                         });
                     wb_encoded_len += ctx.raft_wb.truncate_raft_log(
@@ -1238,7 +1266,9 @@ impl MergedEngine {
         for region_id in ctx.destroyed_regions.drain() {
             tikv_util::set_current_region(region_id);
             self.raft.iterate_peer_states(region_id, false, |k, _| {
-                ctx.pre_ctx.raft_wb.set_state(region_id, region_id, k, &[]);
+                ctx.pre_ctx
+                    .raft_wb
+                    .set_state_bytes(region_id, region_id, k.clone(), Bytes::new());
                 true
             });
             ctx.pre_ctx
@@ -1343,26 +1373,25 @@ impl fmt::Debug for SyncRegionsContext<'_> {
 
 fn update_peer_state(
     wb: &mut rfengine::WriteBatch,
-    k: &[u8],
-    v: &[u8],
+    k: &Bytes,
+    v: &Bytes,
     store_id: u64,
     region_id: u64,
 ) {
-    // TODO: Compare and overwrite state only when it's newer.
     if k.starts_with(rfengine::REGION_META_KEY_PREFIX) {
         let mut origin_state = kvproto::raft_serverpb::RegionLocalState::new();
         origin_state.merge_from_bytes(v).unwrap();
         let region_version = origin_state.get_region().get_region_epoch().get_version();
         let merged_region_state = merge_region_local_state(&origin_state, store_id);
         let data = merged_region_state.write_to_bytes().unwrap();
-        wb.set_state(
+        wb.set_state_bytes(
             region_id,
             region_id,
-            &rfengine::region_state_key(region_version),
-            &data,
+            rfengine::region_state_key(region_version),
+            data.into(),
         );
     } else {
-        wb.set_state(region_id, region_id, k, v);
+        wb.set_state_bytes(region_id, region_id, k.clone(), v.clone());
     }
 }
 
@@ -1495,3 +1524,76 @@ impl ForceStop {
 
 #[cfg(not(feature = "testexport"))]
 pub type ForceStop = ();
+
+struct RaftProgress {
+    term: u64,
+    last_index: u64,
+    last_preprocess_index: u64,
+}
+
+impl From<&RaftState> for RaftProgress {
+    fn from(rs: &RaftState) -> Self {
+        RaftProgress {
+            term: rs.get_term(),
+            last_index: rs.get_last_index(),
+            last_preprocess_index: rs.get_last_preprocessed_index(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct RegionsRaftProgress {
+    inner: HashMap<u64, RaftProgress>,
+}
+
+impl RegionsRaftProgress {
+    fn update(&mut self, region_id: u64, rs: &RaftState) -> bool /* updated (is_newer) */ {
+        match self.inner.entry(region_id) {
+            HashMapEntry::Vacant(e) => {
+                e.insert(RaftProgress::from(rs));
+                true
+            }
+            HashMapEntry::Occupied(mut e) => {
+                let curr = e.get();
+                let is_newer = (
+                    rs.get_term(),
+                    rs.get_last_index(),
+                    rs.get_last_preprocessed_index(),
+                ) > (curr.term, curr.last_index, curr.last_preprocess_index);
+                if is_newer {
+                    e.insert(RaftProgress::from(rs));
+                }
+                is_newer
+            }
+        }
+    }
+}
+
+fn fetch_raft_entries_to_region_progress(
+    tag: ShardTag,
+    raft: &RfEngine,
+    peer_id: u64,
+    low_idx: u64,
+    high_idx: u64,
+    region_progress: &mut RegionProgress,
+) -> Result<()> {
+    let mut entry_buf = Vec::with_capacity((high_idx - low_idx) as usize);
+    box_try!(raft.fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entry_buf)
+        .map_err(|err| {
+            let stats = raft.get_peer_stats(peer_id);
+            let truncated_state = rfstore::store::load_raft_truncated_state(raft, peer_id);
+            error!("{} fetch_raft_entries failed: {:?}", tag, err;
+                "low" => low_idx, "high" => high_idx, "stats" => ?stats, "truncated_state" => ?truncated_state);
+            err
+        }));
+    for entry in entry_buf {
+        debug!(
+            "{} fetch_raft_entries: insert log index {}",
+            tag, entry.index
+        );
+        region_progress.upsert_entry(entry.index, entry.term as u32, || {
+            RaftLogOp::new(&entry).into()
+        });
+    }
+    Ok(())
+}

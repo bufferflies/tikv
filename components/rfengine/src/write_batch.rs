@@ -5,7 +5,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use kvproto::raft_serverpb::RegionLocalState;
 use protobuf::Message;
 use raft_proto::eraftpb;
@@ -48,6 +48,11 @@ impl WriteBatch {
 
     pub fn set_state(&mut self, peer_id: u64, region_id: u64, key: &[u8], val: &[u8]) {
         self.get_peer_mut(peer_id, region_id).set_state(key, val);
+    }
+
+    pub fn set_state_bytes(&mut self, peer_id: u64, region_id: u64, key: Bytes, val: Bytes) {
+        self.get_peer_mut(peer_id, region_id)
+            .set_state_bytes(key, val);
     }
 
     pub fn get_state(&self, peer_id: u64, key: &[u8]) -> Option<&[u8]> {

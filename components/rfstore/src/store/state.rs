@@ -84,6 +84,10 @@ impl RaftState {
         self.commit = hs.get_commit();
     }
 
+    pub fn get_term(&self) -> u64 {
+        self.term
+    }
+
     pub fn get_commit(&self) -> u64 {
         self.commit
     }
