@@ -10,12 +10,12 @@ use std::{
 
 use async_trait::async_trait;
 use bstr::ByteSlice;
-use bytes::{Buf, Bytes};
+use bytes::{BufMut, Bytes, BytesMut};
 use engine_traits::{GetObjectOptions, ListObjectContent, ObjectStorage};
 use fail::fail_point;
 use farmhash::fingerprint64;
 use futures::StreamExt;
-use http::{header::CONTENT_RANGE, StatusCode};
+use http::StatusCode;
 use hyper_tls::HttpsConnector;
 use regex::Regex;
 use rusoto_core::{
@@ -32,9 +32,9 @@ use tikv_util::{sys::thread::ThreadBuildWrapper, time::Instant};
 use tokio::runtime::Runtime;
 
 use crate::dfs::{
-    self, config::Config, Dfs, Error, FileType, MetricsFileType, Options, KVENGINE_DFS_LATENCY,
-    KVENGINE_DFS_LATENCY_WITH_RETRY, KVENGINE_DFS_REQUEST_COUNTER, KVENGINE_DFS_RETRY_COUNTER,
-    KVENGINE_DFS_THROUGHPUT,
+    self, config::Config, Dfs, Error, FileType, MetricsFileType, Options, ReservableWriter,
+    KVENGINE_DFS_LATENCY, KVENGINE_DFS_LATENCY_WITH_RETRY, KVENGINE_DFS_REQUEST_COUNTER,
+    KVENGINE_DFS_RETRY_COUNTER, KVENGINE_DFS_THROUGHPUT,
 };
 
 const MAX_RETRY_COUNT: u32 = 9;
@@ -738,20 +738,42 @@ impl S3FsCore {
     }
 
     async fn read_body(&self, resp: &mut Response) -> Result<Bytes, HttpDispatchError> {
+        let mut writer = BytesMut::new().writer();
+        self.read_body_to_writer(resp, &mut writer).await?;
+        Ok(writer.into_inner().freeze())
+    }
+
+    async fn read_body_to_writer<W>(
+        &self,
+        resp: &mut Response,
+        writer: &mut W,
+    ) -> Result<u64 /* read_len */, HttpDispatchError>
+    where
+        W: ReservableWriter + Send + 'static,
+    {
         let cap = resp
             .headers
             .remove("Content-Length")
-            .map(|value| value.parse::<usize>().unwrap())
+            .map(|value| value.parse::<u64>().unwrap())
             .unwrap_or_default();
-        let mut buf = Vec::with_capacity(cap);
+        writer.reserve_capacity(cap);
+        let mut read_len = 0;
         while let Some(res) = tokio::time::timeout(READ_BODY_TIMEOUT, resp.body.next())
             .await
             .map_err(|e| HttpDispatchError::new(format!("read body timeout {:?}", e)))?
         {
             let chunk = res.map_err(|e| HttpDispatchError::new(format!("{:?}", e)))?;
-            buf.extend_from_slice(chunk.chunk());
+            read_len += chunk.len() as u64;
+            writer
+                .write_all(&chunk)
+                .map_err(|e| HttpDispatchError::new(format!("write_all: {:?}", e)))?;
         }
-        Ok(Bytes::from(buf))
+        if read_len != cap {
+            warn!("content length mismatch";
+                "content_length" => cap, "read_len" => read_len);
+            debug_assert!(false);
+        }
+        Ok(read_len)
     }
 
     pub async fn get_object(
@@ -760,17 +782,22 @@ impl S3FsCore {
         file_name: String,
         opts: GetObjectOptions,
     ) -> crate::dfs::Result<Bytes> {
-        let (data, _) = self.get_object_ext(key, file_name, opts, false).await?;
-        Ok(data)
+        let mut writer = BytesMut::new().writer();
+        self.get_object_to_writer(key, file_name, opts, &mut writer)
+            .await?;
+        Ok(writer.into_inner().freeze())
     }
 
-    pub async fn get_object_ext(
+    pub async fn get_object_to_writer<W>(
         &self,
         key: String,
         file_name: String,
         opts: GetObjectOptions,
-        need_complete_length: bool,
-    ) -> crate::dfs::Result<(Bytes, Option<u64> /* complete_length */)> {
+        writer: &mut W,
+    ) -> crate::dfs::Result<u64>
+    where
+        W: ReservableWriter + Send + 'static,
+    {
         let mut retry_cnt = 0;
         let file_type = self.get_file_type_from_key(&key);
         let start_time_with_retry = Instant::now_coarse();
@@ -784,33 +811,22 @@ impl S3FsCore {
 
             if result.is_ok() {
                 let mut resp = result.unwrap();
-                let body = self.read_body(&mut resp).await;
-                match body {
-                    Ok(data) => {
+                let res = self.read_body_to_writer(&mut resp, writer).await;
+                match res {
+                    Ok(object_len) => {
                         info!(
                             "read file {}, size {}, takes {:?}, retry {}",
                             &file_name,
-                            data.len(),
+                            object_len,
                             start_time.saturating_elapsed(),
                             retry_cnt
                         );
-
-                        let complete_length = if need_complete_length {
-                            if opts.is_full_range() {
-                                Some(data.len() as u64)
-                            } else {
-                                parse_content_range(resp.headers.get(CONTENT_RANGE))
-                            }
-                        } else {
-                            None
-                        };
-
                         let duration = start_time.saturating_elapsed();
                         KVENGINE_DFS_THROUGHPUT
                             .s3
                             .get
                             .get(MetricsFileType::from(file_type))
-                            .inc_by(data.len() as u64);
+                            .inc_by(object_len);
                         KVENGINE_DFS_LATENCY
                             .get
                             .get(MetricsFileType::from(file_type))
@@ -824,8 +840,7 @@ impl S3FsCore {
                             .get
                             .get(MetricsFileType::from(file_type))
                             .inc();
-
-                        return Ok((data, complete_length));
+                        return Ok(object_len);
                     }
                     Err(err) => result = Err(err.into()),
                 }
@@ -1237,36 +1252,37 @@ impl ObjectStorage for S3Fs {
         &self,
         keys: Vec<(String, GetObjectOptions)>,
     ) -> Result<Vec<(String, Bytes)>, String> {
-        let runtime = self.get_runtime();
-        let len = keys.len();
-        let mut handles = Vec::with_capacity(len);
-        for (key, opts) in keys {
+        let get_object = |key: String, opts: GetObjectOptions| {
             let full_key = format!("{}/{}", self.prefix, key);
             let fs = self.clone();
-            handles.push(runtime.spawn(async move {
-                fs.get_object(full_key, key.clone(), opts)
-                    .await
-                    .map_err(|err| format!("put {} failed {:?}", &key, err))
-                    .map(|data| (key.clone(), data))
-            }));
-        }
-
-        let mut objects = vec![];
-        let mut errs = vec![];
-        for res in runtime.block_on(futures::future::join_all(handles)) {
-            match res.unwrap() {
-                Ok((key, data)) => {
-                    objects.push((key, data));
-                }
-                Err(err) => {
-                    errs.push(err);
+            async move {
+                match fs.get_object(full_key, key.clone(), opts).await {
+                    Ok(data) => Ok((key, data)),
+                    Err(err) => Err(format!("put {} failed {:?}", &key, err)),
                 }
             }
+        };
+
+        let runtime = self.get_runtime();
+        if keys.len() == 1 {
+            let mut keys = keys;
+            let (key, opts) = keys.pop().unwrap();
+            let res = runtime.block_on(get_object(key, opts))?;
+            return Ok(vec![res]);
         }
-        if !errs.is_empty() {
-            return Err(format!("{:?}", errs));
+
+        let mut join_set = tokio::task::JoinSet::new();
+        for (key, opts) in keys {
+            join_set.spawn_on(get_object(key, opts), runtime.handle());
         }
-        Ok(objects)
+
+        runtime.block_on(async move {
+            let mut objects: Vec<(String, Bytes)> = vec![];
+            while let Some(res) = join_set.join_next().await {
+                objects.push(res.expect("task panic")?);
+            }
+            Ok(objects)
+        })
     }
 
     fn list_objects(
@@ -1488,25 +1504,6 @@ impl Debug for Response {
     }
 }
 
-/// Ref: https://www.rfc-editor.org/rfc/rfc9110.html#section-14.4, Content-Range
-///
-/// Examples:
-///
-/// - bytes 0-499/1234
-/// - bytes 42-1233/*
-/// - bytes */1234 (when response with 416 Range Not Satisfiable)
-fn parse_content_range<S: AsRef<str>>(content_range: Option<S>) -> Option<u64> {
-    let content_range = content_range?;
-    let content_range = content_range.as_ref();
-    if content_range.starts_with("bytes ") {
-        let parts: Vec<&str> = content_range.split('/').collect();
-        if parts.len() == 2 {
-            return parts[1].parse::<u64>().ok();
-        }
-    }
-    None
-}
-
 #[cfg(any(test, feature = "testexport"))]
 pub mod test_util {
     use std::sync::{Arc, Mutex};
@@ -1567,6 +1564,10 @@ pub mod test_util {
                         };
                         if created {
                             MockRequestDispatcher::with_status(200)
+                                .with_header(
+                                    http::header::CONTENT_LENGTH.as_str(),
+                                    &file_data.len().to_string(),
+                                )
                                 .with_body(std::str::from_utf8(&file_data).unwrap())
                                 .dispatch(request, _timeout)
                                 .await
@@ -1860,20 +1861,5 @@ mod tests {
             tagging_deleted.tag_set.tag,
             Tagging::from_url_encoded("deleted=true").tag_set.tag
         );
-    }
-
-    #[test]
-    fn test_parse_content_range() {
-        let cases = [
-            (None, None),
-            (Some(""), None),
-            (Some("bytes"), None),
-            (Some("bytes 0-499/1234"), Some(1234)),
-            (Some("bytes 42-1233/*"), None),
-            (Some("bytes */1234"), Some(1234)),
-        ];
-        for (content_range, expected) in cases {
-            assert_eq!(parse_content_range(content_range), expected);
-        }
     }
 }

@@ -576,6 +576,26 @@ impl<E: Debug> From<rusoto_core::RusotoError<E>> for Error {
     }
 }
 
+pub trait ReservableWriter: std::io::Write {
+    fn reserve_capacity(&mut self, additional: u64);
+}
+
+impl ReservableWriter for Vec<u8> {
+    fn reserve_capacity(&mut self, additional: u64) {
+        self.reserve(additional as usize);
+    }
+}
+
+impl ReservableWriter for bytes::buf::Writer<bytes::BytesMut> {
+    fn reserve_capacity(&mut self, additional: u64) {
+        self.get_mut().reserve(additional as usize);
+    }
+}
+
+impl ReservableWriter for std::fs::File {
+    fn reserve_capacity(&mut self, _additional: u64) {}
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::MetadataExt;
