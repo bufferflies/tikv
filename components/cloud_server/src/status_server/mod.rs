@@ -2576,7 +2576,7 @@ impl StatusServer {
                             ));
                         }
 
-                        match (method, path.as_ref()) {
+                        let resp = match (method.clone(), path.as_ref()) {
                             (Method::GET, "/metrics") => {
                                 Self::handle_get_metrics(req, &ctx.cfg_controller)
                             }
@@ -2736,7 +2736,17 @@ impl StatusServer {
                                 Self::handle_recovery(req, &ctx.kvengine, data_dir).await
                             }
                             _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
+                        };
+                        let dur = start.saturating_elapsed();
+                        if dur > Duration::from_millis(100) {
+                            info!(
+                                "slow status request";
+                                "path" => %path,
+                                "method" => ?method,
+                                "elapsed" => ?dur,
+                            );
                         }
+                        resp
                     })
                 }))
             }
