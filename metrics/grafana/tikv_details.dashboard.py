@@ -5674,7 +5674,8 @@ def RaftEngine() -> RowPanel:
             ),
             graph_panel(
                 title="Write Duration Breakdown " + OPTIONAL_QUANTILE_INPUT,
-                description="99% duration breakdown of write operation",
+                description=OPTIONAL_QUANTILE_INPUT
+                + " duration breakdown of write operation",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 targets=[
                     target(
@@ -5683,7 +5684,17 @@ def RaftEngine() -> RowPanel:
                             "raft_engine_wal_write_duration_seconds",
                             is_optional_quantile=True,
                         ),
-                        legend_format="wal-" + OPTIONAL_QUANTILE_INPUT,
+                        legend_format="wal - " + OPTIONAL_QUANTILE_INPUT,
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.999,
+                            "raft_engine_wal_write_throttle_duration_seconds",
+                            by_labels=["type"],
+                            is_optional_quantile=True,
+                        ),
+                        legend_format="throttling - " + OPTIONAL_QUANTILE_INPUT,
                         additional_groupby=True,
                     ),
                     target(
@@ -5692,16 +5703,7 @@ def RaftEngine() -> RowPanel:
                             "raft_engine_apply_duration_seconds",
                             is_optional_quantile=True,
                         ),
-                        legend_format="apply-" + OPTIONAL_QUANTILE_INPUT,
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_histogram_quantile(
-                            0.99,
-                            "raft_engine_take_snapshot_duration_seconds",
-                            is_optional_quantile=True,
-                        ),
-                        legend_format="snapshot-" + OPTIONAL_QUANTILE_INPUT,
+                        legend_format="apply - " + OPTIONAL_QUANTILE_INPUT,
                         additional_groupby=True,
                     ),
                 ],
@@ -5718,29 +5720,30 @@ def RaftEngine() -> RowPanel:
                 hide_count=True,
             ),
             graph_panel(
-                title="Duration of WAL Operation (999%)",
-                description="999% duration breakdown of WAL write operation",
+                title="Duration of WAL Operation - " + OPTIONAL_QUANTILE_INPUT,
+                description=OPTIONAL_QUANTILE_INPUT
+                + " duration breakdown of WAL write operation",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 targets=[
                     target(
                         expr=expr_histogram_quantile(
                             0.999, "raft_engine_truncate_duration_seconds"
                         ),
-                        legend_format="truncate",
+                        legend_format="truncate - " + OPTIONAL_QUANTILE_INPUT,
                         additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.999, "raft_engine_rotate_duration_seconds"
                         ),
-                        legend_format="rotate",
+                        legend_format="rotate - " + OPTIONAL_QUANTILE_INPUT,
                         additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.999, "raft_engine_compact_wal_duration_seconds"
                         ),
-                        legend_format="compact_wal",
+                        legend_format="compact_wal - " + OPTIONAL_QUANTILE_INPUT,
                         additional_groupby=True,
                     ),
                 ],
@@ -5779,6 +5782,15 @@ def RaftEngine() -> RowPanel:
                 + " duration of operations of raft engine",
                 yaxes=yaxes(left_format=UNITS.SECONDS, log_base=2),
                 targets=[
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "raft_engine_take_snapshot_duration_seconds",
+                            is_optional_quantile=True,
+                        ),
+                        legend_format="snapshot - " + OPTIONAL_QUANTILE_INPUT,
+                        additional_groupby=True,
+                    ),
                     target(
                         expr=expr_histogram_quantile(
                             0.99,

@@ -146,10 +146,10 @@ pub fn init_keyspace_manager(pd_client: Arc<dyn PdClient>) {
 /// Convert keyspace id to keyspace name.
 /// This is the main public interface for looking up keyspace names.
 ///
-/// Returns `Some(Arc<String>)` if the keyspace name is in the cache.
-/// Returns `None` if the keyspace name is not in the cache. In this case, the
-///     keyspace name will be fetched from PD asynchronously in the background
-/// thread and then     added to the cache.
+/// - Returns `Some(Arc<String>)` if the keyspace name is in the cache.
+/// - Returns `None` if the keyspace name is not in the cache. In this case, the
+///   keyspace name will be fetched from PD asynchronously in the background
+///   thread and then added to the cache.
 pub fn to_keyspace_name(keyspace_id: u32) -> Option<Arc<String>> {
     KEYSPACE_MANAGER
         .read()

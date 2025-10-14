@@ -19,6 +19,7 @@ pub struct Config {
     /// Limit the worker io
     ///
     /// Default: "125MB"
+    #[deprecated = "The configuration has been discarded."]
     pub worker_rate_limit: ReadableSize,
 
     /// The directory to store the wal files for synchronous write.
@@ -94,6 +95,7 @@ pub struct Config {
     pub compact_bytes_per_sec: ReadableSize,
 }
 
+#[allow(deprecated)]
 impl Default for Config {
     fn default() -> Self {
         Self {
