@@ -100,6 +100,7 @@ pub struct ReplicationWorker {
     config: ReplicationWorkerConfig,
     merged_engine: MergedEngine,
     grpc_server: Option<grpcio::Server>,
+    health_service: Option<HealthService>,
     kube_api: Option<Arc<KubeApi>>,
     runtime: tokio::runtime::Runtime,
 
@@ -126,6 +127,13 @@ pub struct ReplicationWorker {
     working_dir: PathBuf,
     stop: bool,
     force_stop: ForceStop,
+}
+
+impl Drop for ReplicationWorker {
+    fn drop(&mut self) {
+        // Call shutdown again for safety (and handle the case of force stop).
+        self.shutdown();
+    }
 }
 
 impl ReplicationWorker {
@@ -225,6 +233,7 @@ impl ReplicationWorker {
             merged_engine,
             runtime,
             grpc_server: None,
+            health_service: None,
             kube_api,
             keyspaces: keyspace_services,
             cdc_addrs,
@@ -262,17 +271,27 @@ impl ReplicationWorker {
         let security_mgr = worker.ctx.pd.get_security_mgr();
         let service = ReplicationService::new(worker.merged_engine.get_kv(), tx.clone());
         let health_service = HealthService::default();
-        health_service.set_serving_status("", ServingStatus::Serving);
         let sb = ServerBuilder::new(env)
             .channel_args(channel_args)
             .register_service(create_change_data(service.clone()))
             .register_service(create_tikv(service))
-            .register_service(create_health(health_service));
+            .register_service(create_health(health_service.clone()));
         let sb = security_mgr.bind(sb, &addr.ip().to_string(), addr.port());
         let mut grpc_server = sb.build().unwrap();
         grpc_server.start();
+        health_service.set_serving_status("", ServingStatus::Serving);
         worker.grpc_server = Some(grpc_server);
+        worker.health_service = Some(health_service);
         Ok(worker)
+    }
+
+    // Note: `shutdown` will be called more than once.
+    fn shutdown(&mut self) {
+        // grpc_server should be dropped before merged_engine.
+        let _ = self.grpc_server.take();
+        if let Some(health_service) = self.health_service.take() {
+            health_service.shutdown();
+        }
     }
 
     #[inline]
@@ -458,9 +477,7 @@ impl ReplicationWorker {
             }
             CdcMsg::Stop => {
                 self.stop = true;
-                if let Some(mut grpc_server) = self.grpc_server.take() {
-                    grpc_server.shutdown();
-                }
+                self.shutdown();
             }
         }
     }
