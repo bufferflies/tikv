@@ -528,6 +528,7 @@ impl ReplicationWorker {
     fn handle_open_conn(&mut self, conn: Conn) {
         let conn_id = conn.get_id();
         self.conns.insert(conn_id, conn);
+        self.conn_regions.insert(conn_id, HashSet::default());
     }
 
     fn handle_register(&mut self, request: ChangeDataRequest, conn_id: ConnId) -> Result<()> {
@@ -598,6 +599,14 @@ impl ReplicationWorker {
         let tag = snap_access.get_tag();
         let merged_store_id = self.merged_store_id();
         let region_id = request.region_id;
+
+        let Some(conn_regions) = self.conn_regions.get_mut(&conn_id) else {
+            info!("{} cdc register: conn is closed, skip", tag;
+                "conn" => ?conn_id, "request" => %request.request_id);
+            return Ok(());
+        };
+        conn_regions.insert(region_id);
+
         let delegate = self
             .region_delegates
             .entry(region_id)
@@ -611,10 +620,6 @@ impl ReplicationWorker {
                 return Ok(());
             }
         };
-        self.conn_regions
-            .entry(conn_id)
-            .or_default()
-            .insert(region_id);
         let mut register_handler =
             RegisterHandler::new(conn_id, &request, snap_access, init_id, self.tx.clone());
         debug!("{} cdc register: spawn handler", tag; "req" => ?request, "conn" => ?conn_id);
@@ -1659,6 +1664,9 @@ impl ReplicationWorker {
     fn remove_region(&mut self, region_id: u64) {
         self.region_to_keyspace.remove(&region_id);
         self.region_delegates.remove(&region_id);
+        for conn_regions in self.conn_regions.values_mut() {
+            conn_regions.remove(&region_id);
+        }
     }
 
     fn store_working_dir(&self, store_id: u64) -> PathBuf {
