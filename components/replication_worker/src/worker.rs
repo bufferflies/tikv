@@ -1707,48 +1707,10 @@ impl RegisterHandler {
 
     async fn handle_register(&mut self) {
         let tag = self.snap_access.get_tag();
-        info!("{} cdc register", tag; "request" => %self.request_id, "conn" => ?self.conn_id);
         let mut entries_bytes = 0;
         let keyspace_id = self.snap_access.get_keyspace_id();
-        let keyspace_prefix_len = keyspace_prefix_len(keyspace_id);
-        let mut lock_iter = self
-            .snap_access
-            .new_iterator(LOCK_CF, false, false, None, false);
-        lock_iter.set_range(self.start_key.clone(), self.end_key.clone());
-        while lock_iter.valid() {
-            let mut event_row = EventRow::new();
-            let lock_key = lock_iter.key();
-            event_row.set_key(lock_key[keyspace_prefix_len..].to_vec());
-            if is_index_key(event_row.get_key()) {
-                lock_iter.next();
-                continue;
-            }
-            let lock_val = lock_iter.val();
-            let mut lock = txn_types::Lock::parse(lock_val).unwrap();
-            match lock.lock_type {
-                LockType::Put => {
-                    event_row.set_op_type(EventRowOpType::Put);
-                }
-                LockType::Delete => event_row.set_op_type(EventRowOpType::Delete),
-                _ => {
-                    lock_iter.next();
-                    continue;
-                }
-            }
-            event_row.set_start_ts(lock.ts.into_inner());
-            let val = lock.short_value.take().unwrap_or_default();
-            event_row.set_value(val);
-            event_row.set_type(EventLogType::Prewrite);
-            entries_bytes += event_row.get_key().len() + event_row.get_value().len();
-            self.event_rows.push(event_row);
-            if entries_bytes > MAX_INITIALIZE_SCAN_BATCH_BYTES {
-                self.send_rows();
-                entries_bytes = 0;
-            }
-            lock_iter.next();
-        }
-
-        info!("{} start incremental scan", tag; "request" => %self.request_id, "checkpoint_ts" => self.checkpoint_ts);
+        info!("{} start incremental scan", tag; "checkpoint_ts" => self.checkpoint_ts,
+            "request" => %self.request_id, "conn" => ?self.conn_id);
         // scan incremental write after checkpoint ts;
         let mut write_iter = self
             .snap_access

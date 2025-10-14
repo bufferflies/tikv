@@ -13,7 +13,7 @@ use rfstore::store::ApplyObserver;
 use tidb_query_datatype::codec::table::{INDEX_PREFIX_SEP, PREFIX_LEN, TABLE_PREFIX};
 use tikv_util::{error, info, mpsc::Sender, trace};
 use tokio::task::JoinHandle;
-use txn_types::{Lock, LockType};
+use txn_types::Lock;
 
 use crate::CdcMsg;
 
@@ -248,26 +248,6 @@ impl EventBuilder {
             "lock.ty" => ?lock.lock_type,
             "log_index" => self.index,
         );
-
-        let mut event_row = cdcpb::EventRow::default();
-        event_row.set_key(entry_key.to_vec());
-        event_row.set_start_ts(lock.ts.into_inner());
-        let short_value = lock.short_value.unwrap_or_default();
-        event_row.set_value(short_value);
-        match lock.lock_type {
-            LockType::Put => {
-                event_row.set_op_type(cdcpb::EventRowOpType::Put);
-            }
-            LockType::Delete => {
-                event_row.set_op_type(cdcpb::EventRowOpType::Delete);
-            }
-            LockType::Lock | LockType::Pessimistic => {
-                // ignore op_lock & pessimistic lock
-                return;
-            }
-        }
-        event_row.set_type(cdcpb::EventLogType::Prewrite);
-        self.rows.mut_entries().push(event_row);
     }
 
     async fn fetch_old_values(&mut self) {
