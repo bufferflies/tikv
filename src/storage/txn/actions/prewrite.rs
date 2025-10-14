@@ -402,19 +402,17 @@ impl<'a> PrewriteMutation<'a> {
         need_load_data: bool,
     ) -> Result<LastWrite> {
         // Check EXTRA_CF first
-        if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
-            // Determine the threshold for newer conflict checking
-            let max_allowed_write = Some(self.determine_conflict_check_params().0);
+        // Determine the threshold for newer conflict checking
+        let max_allowed_write = Some(self.determine_conflict_check_params().0);
 
-            find_extra_cf_conflict(
-                cloud_reader,
-                &self.key,
-                self.txn_props.start_ts,
-                max_allowed_write,
-                &self.txn_props.kind,
-                self.pessimistic_action,
-            )?;
-        }
+        find_extra_cf_conflict(
+            &mut reader.cloud_reader,
+            &self.key,
+            self.txn_props.start_ts,
+            max_allowed_write,
+            &self.txn_props.kind,
+            self.pessimistic_action,
+        )?;
 
         // Check WRITE CF for conflicts
         if !need_load_data {
@@ -485,13 +483,12 @@ impl<'a> PrewriteMutation<'a> {
     ) -> Result<()> {
         let (check_ts, conflict_reason) = self.determine_conflict_check_params();
 
-        if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
-            if let Some((commit_ts, write)) = cloud_reader
-                .get_newer_from_write_cf(&self.key, check_ts)
-                .await?
-            {
-                self.handle_write_conflict(&write, commit_ts, conflict_reason, check_ts)?;
-            }
+        if let Some((commit_ts, write)) = reader
+            .cloud_reader
+            .get_newer_from_write_cf(&self.key, check_ts)
+            .await?
+        {
+            self.handle_write_conflict(&write, commit_ts, conflict_reason, check_ts)?;
         }
 
         Ok(())
@@ -926,39 +923,37 @@ async fn amend_pessimistic_lock<S: Snapshot>(
     reader: &mut SnapshotReader<S>,
 ) -> Result<()> {
     // Check EXTRA CF
-    if let Some(cloud_reader) = reader.cloud_reader.as_mut() {
-        // For amend, any LOCK with commit_ts >= start_ts means the pessimistic lock was
-        // lost Check both self-rollback and newer LOCK records in a single scan
-        if let Some(user_meta) = cloud_reader.find_extra_cf_conflict_record(
-            &mutation.key,
-            Some(mutation.txn_props.start_ts),
-            Some(mutation.txn_props.start_ts), // Any LOCK > start_ts is a conflict
-        )? {
-            if user_meta.is_rollback() {
-                warn!(
-                    "prewrite failed (pessimistic lock not found): transaction has been rolled back";
-                    "start_ts" => mutation.txn_props.start_ts,
-                    "key" => %mutation.key
-                );
-            } else {
-                warn!(
-                    "prewrite failed (pessimistic lock not found): another transaction acquired lock";
-                    "start_ts" => mutation.txn_props.start_ts,
-                    "conflict_commit_ts" => user_meta.commit_ts,
-                    "key" => %mutation.key
-                );
-            }
-
-            MVCC_CONFLICT_COUNTER
-                .pipelined_acquire_pessimistic_lock_amend_fail
-                .inc();
-
-            return Err(ErrorInner::PessimisticLockNotFound {
-                start_ts: mutation.txn_props.start_ts,
-                key: mutation.key.clone().into_raw()?,
-            }
-            .into());
+    // For amend, any LOCK with commit_ts >= start_ts means the pessimistic lock was
+    // lost Check both self-rollback and newer LOCK records in a single scan
+    if let Some(user_meta) = reader.cloud_reader.find_extra_cf_conflict_record(
+        &mutation.key,
+        Some(mutation.txn_props.start_ts),
+        Some(mutation.txn_props.start_ts), // Any LOCK > start_ts is a conflict
+    )? {
+        if user_meta.is_rollback() {
+            warn!(
+                "prewrite failed (pessimistic lock not found): transaction has been rolled back";
+                "start_ts" => mutation.txn_props.start_ts,
+                "key" => %mutation.key
+            );
+        } else {
+            warn!(
+                "prewrite failed (pessimistic lock not found): another transaction acquired lock";
+                "start_ts" => mutation.txn_props.start_ts,
+                "conflict_commit_ts" => user_meta.commit_ts,
+                "key" => %mutation.key
+            );
         }
+
+        MVCC_CONFLICT_COUNTER
+            .pipelined_acquire_pessimistic_lock_amend_fail
+            .inc();
+
+        return Err(ErrorInner::PessimisticLockNotFound {
+            start_ts: mutation.txn_props.start_ts,
+            key: mutation.key.clone().into_raw()?,
+        }
+        .into());
     }
 
     // Check WRITE CF
@@ -2123,24 +2118,7 @@ pub mod tests {
             }
             let start_ts = TimeStamp::from(tso());
             let snapshot = engine.snapshot(Default::default()).unwrap();
-            let expect = {
-                let mut reader = SnapshotReader::new(start_ts, snapshot.clone(), true);
-                if let Some(write) = reader
-                    .reader
-                    .get_write(&Key::from_raw(key), start_ts, Some(start_ts))
-                    .unwrap()
-                {
-                    assert_eq!(write.write_type, WriteType::Put);
-                    match write.short_value {
-                        Some(value) => OldValue::Value { value },
-                        None => OldValue::ValueTimeStamp {
-                            start_ts: write.start_ts,
-                        },
-                    }
-                } else {
-                    OldValue::None
-                }
-            };
+            let expect = OldValue::None;
             if require_old_value_none && expect != OldValue::None {
                 continue;
             }

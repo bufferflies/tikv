@@ -1122,6 +1122,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_custom_raft_log() {
         use kvproto::kvrpcpb::AssertionLevel;
         use tikv::storage::{

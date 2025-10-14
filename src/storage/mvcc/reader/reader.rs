@@ -1,7 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 // #[PerformanceCriticalPath]
-use std::ops::Bound;
+use std::{marker::PhantomData, ops::Bound};
 
 use engine_traits::{CF_DEFAULT, CF_LOCK, CF_WRITE};
 use kvproto::{
@@ -32,101 +32,73 @@ use crate::storage::{
 /// bound (of `S`), 'snapshot' means a view of the underlying storage engine at
 /// a given point in time. This latter snapshot will include values for keys at
 /// multiple timestamps.
-pub struct SnapshotReader<S: EngineSnapshot> {
-    pub reader: MvccReader<S>,
+pub struct SnapshotReader<EngineSnapshot> {
     pub start_ts: TimeStamp,
-    pub cloud_reader: Option<CloudReader>,
+    pub cloud_reader: CloudReader,
+    // TODO: remove the EngineSnapshot generic type. That changes SnapshotReader
+    // type signature involves more changes.
+    _phantom: PhantomData<EngineSnapshot>,
+    // Currently the unit tests cannot run using rocks engine.
+    // All tests available are integration tests using kvengine.
+    // TODO: make unit tests work again!
 }
 
 impl<S: EngineSnapshot> SnapshotReader<S> {
     pub fn new(start_ts: TimeStamp, snapshot: S, fill_cache: bool) -> Self {
-        let cloud_reader = snapshot
-            .get_kvengine_snap()
-            .map(|snap| CloudReader::new(snap.clone(), fill_cache));
+        let snap = snapshot.get_kvengine_snap().unwrap();
+        let cloud_reader = CloudReader::new(snap.clone(), fill_cache);
         SnapshotReader {
-            reader: MvccReader::new(snapshot, None, fill_cache),
             start_ts,
             cloud_reader,
+            _phantom: std::marker::PhantomData,
         }
     }
 
     pub fn new_with_ctx(start_ts: TimeStamp, snapshot: S, ctx: &Context) -> Self {
-        let cloud_reader = snapshot
-            .get_kvengine_snap()
-            .map(|snap| CloudReader::new(snap.clone(), !ctx.get_not_fill_cache()));
+        let snap = snapshot.get_kvengine_snap().unwrap();
+        let cloud_reader = CloudReader::new(snap.clone(), !ctx.get_not_fill_cache());
         SnapshotReader {
-            reader: MvccReader::new_with_ctx(snapshot, None, ctx),
             start_ts,
             cloud_reader,
+            _phantom: std::marker::PhantomData,
         }
     }
 
     #[maybe_async::both]
     #[inline(always)]
     pub async fn get_txn_commit_record(&mut self, key: &Key) -> Result<TxnCommitRecord> {
-        if self.cloud_reader.is_some() {
-            return self
-                .cloud_reader
-                .as_mut()
-                .unwrap()
-                .get_txn_commit_record(key, self.start_ts)
-                .await;
-        }
-        self.reader.get_txn_commit_record(key, self.start_ts)
+        self.cloud_reader
+            .get_txn_commit_record(key, self.start_ts)
+            .await
     }
 
     #[inline(always)]
     pub fn load_lock(&mut self, key: &Key) -> Result<Option<Lock>> {
-        if self.cloud_reader.is_some() {
-            return self.cloud_reader.as_mut().unwrap().load_lock(key);
-        }
-        self.reader.load_lock(key)
+        self.cloud_reader.load_lock(key)
     }
 
     #[maybe_async::both]
     #[inline(always)]
     pub async fn key_exist(&mut self, key: &Key, ts: TimeStamp) -> Result<bool> {
-        if self.cloud_reader.is_some() {
-            return Ok(self
-                .cloud_reader
-                .as_mut()
-                .unwrap()
-                .get_write(key, ts, Some(self.start_ts))
-                .await?
-                .is_some());
-        }
         Ok(self
-            .reader
-            .get_write(key, ts, Some(self.start_ts))?
+            .cloud_reader
+            .get_write(key, ts, Some(self.start_ts))
+            .await?
             .is_some())
     }
 
     #[maybe_async::both]
     #[inline(always)]
     pub async fn get(&mut self, key: &Key, ts: TimeStamp) -> Result<Option<Value>> {
-        if self.cloud_reader.is_some() {
-            return self
-                .cloud_reader
-                .as_mut()
-                .unwrap()
-                .get(key, ts, Some(self.start_ts))
-                .await;
-        }
-        self.reader.get(key, ts, Some(self.start_ts))
+        self.cloud_reader.get(key, ts, Some(self.start_ts)).await
     }
 
     #[maybe_async::both]
     #[inline(always)]
     pub async fn get_write(&mut self, key: &Key, ts: TimeStamp) -> Result<Option<Write>> {
-        if self.cloud_reader.is_some() {
-            return self
-                .cloud_reader
-                .as_mut()
-                .unwrap()
-                .get_write(key, ts, Some(self.start_ts))
-                .await;
-        }
-        self.reader.get_write(key, ts, Some(self.start_ts))
+        self.cloud_reader
+            .get_write(key, ts, Some(self.start_ts))
+            .await
     }
 
     #[maybe_async::both]
@@ -136,26 +108,16 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
         key: &Key,
         ts: TimeStamp,
     ) -> Result<Option<(Write, TimeStamp)>> {
-        if self.cloud_reader.is_some() {
-            return match self
-                .cloud_reader
-                .as_mut()
-                .unwrap()
-                .seek_write(key, ts)
-                .await?
-            {
-                Some((commit_ts, write)) => Ok(match write.write_type {
-                    WriteType::Put => Some((write, commit_ts)),
-                    WriteType::Delete => None,
-                    _ => {
-                        panic!("unexpected write type: key={:?}, write={:?}", key, write);
-                    }
-                }),
-                None => Ok(None),
-            };
+        match self.cloud_reader.seek_write(key, ts).await? {
+            Some((commit_ts, write)) => Ok(match write.write_type {
+                WriteType::Put => Some((write, commit_ts)),
+                WriteType::Delete => None,
+                _ => {
+                    panic!("unexpected write type: key={:?}, write={:?}", key, write);
+                }
+            }),
+            None => Ok(None),
         }
-        self.reader
-            .get_write_with_commit_ts(key, ts, Some(self.start_ts))
     }
 
     #[maybe_async::both]
@@ -165,23 +127,12 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
         key: &Key,
         ts: TimeStamp,
     ) -> Result<Option<(TimeStamp, Write)>> {
-        if self.cloud_reader.is_some() {
-            return self
-                .cloud_reader
-                .as_mut()
-                .unwrap()
-                .seek_write(key, ts)
-                .await;
-        }
-        self.reader.seek_write(key, ts)
+        self.cloud_reader.seek_write(key, ts).await
     }
 
     #[inline(always)]
-    pub fn load_data(&mut self, key: &Key, write: Write) -> Result<Value> {
-        if self.cloud_reader.is_some() {
-            return Ok(write.short_value.unwrap());
-        }
-        self.reader.load_data(key, write)
+    pub fn load_data(&mut self, _key: &Key, write: Write) -> Result<Value> {
+        Ok(write.short_value.unwrap())
     }
 
     #[maybe_async::both]
@@ -190,42 +141,24 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
         &mut self,
         key: &Key,
         ts: TimeStamp,
-        prev_write_loaded: bool,
+        _prev_write_loaded: bool,
         prev_write: Option<Write>,
     ) -> Result<OldValue> {
-        if self.cloud_reader.is_some() {
-            return self
-                .cloud_reader
-                .as_mut()
-                .unwrap()
-                .get_old_value(key, ts, prev_write)
-                .await;
-        }
-        self.reader
-            .get_old_value(key, ts, prev_write_loaded, prev_write)
+        self.cloud_reader.get_old_value(key, ts, prev_write).await
     }
 
     #[inline(always)]
     pub fn take_statistics(&mut self) -> Statistics {
-        if self.cloud_reader.is_some() {
-            return std::mem::take(&mut self.cloud_reader.as_mut().unwrap().statistics);
-        }
-        std::mem::take(&mut self.reader.statistics)
+        std::mem::take(&mut self.cloud_reader.statistics)
     }
 
-    pub fn scan_values_in_default(&mut self, key: &Key) -> Result<Vec<(TimeStamp, Value)>> {
-        if self.cloud_reader.is_some() {
-            return Ok(vec![]);
-        }
-        self.reader.scan_values_in_default(key)
+    pub fn scan_values_in_default(&mut self, _key: &Key) -> Result<Vec<(TimeStamp, Value)>> {
+        Ok(vec![])
     }
 
     // TODO: support async.
     pub fn seek_ts(&mut self, ts: TimeStamp) -> Result<Option<Key>> {
-        if let Some(reader) = &mut self.cloud_reader {
-            return reader.seek_ts(ts);
-        }
-        self.reader.seek_ts(ts)
+        self.cloud_reader.seek_ts(ts)
     }
 
     pub fn scan_locks<F>(
@@ -238,11 +171,7 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
     where
         F: Fn(&Lock) -> bool,
     {
-        if let Some(reader) = &mut self.cloud_reader {
-            reader.scan_locks(start, end, filter, limit)
-        } else {
-            self.reader.scan_locks(start, end, filter, limit)
-        }
+        self.cloud_reader.scan_locks(start, end, filter, limit)
     }
 }
 
@@ -464,6 +393,7 @@ impl<S: EngineSnapshot> MvccReader<S> {
     /// this function.
     ///
     /// Note that this function does not check for locks on `key`.
+    #[allow(dead_code)]
     fn get(
         &mut self,
         key: &Key,
@@ -558,6 +488,7 @@ impl<S: EngineSnapshot> MvccReader<S> {
         }
     }
 
+    #[allow(dead_code)]
     fn get_txn_commit_record(&mut self, key: &Key, start_ts: TimeStamp) -> Result<TxnCommitRecord> {
         // It's possible a txn with a small `start_ts` has a greater `commit_ts` than a
         // txn with a greater `start_ts` in pessimistic transaction.
@@ -824,6 +755,7 @@ impl<S: EngineSnapshot> MvccReader<S> {
     /// Read the old value for key for CDC.
     /// `prev_write` stands for the previous write record of the key
     /// it must be read in the caller and be passed in for optimization
+    #[allow(dead_code)]
     fn get_old_value(
         &mut self,
         key: &Key,

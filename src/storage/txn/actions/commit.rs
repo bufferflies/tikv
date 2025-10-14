@@ -26,7 +26,7 @@ pub async fn commit<S: Snapshot>(
         crate::storage::mvcc::txn::make_txn_error(err, &key, reader.start_ts,).into()
     ));
 
-    let mut lock = match reader.load_lock(&key)? {
+    let lock = match reader.load_lock(&key)? {
         Some(mut lock) if lock.ts == reader.start_ts => {
             let mut min_commit_ts = lock.min_commit_ts;
             let mut reject_by_backup_ts = false;
@@ -116,14 +116,10 @@ pub async fn commit<S: Snapshot>(
             };
         }
     };
-    let short_value = match reader.cloud_reader {
-        Some(_) => None, // cloud reader doesn't need to put short value to commit entry.
-        None => lock.short_value.take(),
-    };
     let mut write = Write::new(
         WriteType::from_lock_type(lock.lock_type).unwrap(),
         reader.start_ts,
-        short_value,
+        None,
     )
     .set_last_change(lock.last_change_ts, lock.versions_to_last_change)
     .set_txn_source(lock.txn_source);
