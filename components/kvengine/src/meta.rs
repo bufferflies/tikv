@@ -11,6 +11,7 @@ use api_version::{
     ApiV2,
 };
 use bytes::{Buf, Bytes};
+use fail::fail_point;
 use kvenginepb as pb;
 use kvenginepb::{get_any_snap_from_changeset, SchemaMeta, TxnFileRef, VectorIndex};
 use protobuf::Message;
@@ -265,6 +266,7 @@ impl ShardMeta {
             return;
         }
         if cs.has_flush() {
+            fail_point!("skip_apply_flush_shard_meta", |_| {});
             self.apply_flush(cs);
             return;
         }

@@ -16,6 +16,8 @@ mod test_split_region;
 mod test_transaction;
 mod test_trim_over_bound;
 
+mod test_local_file_gc;
+
 pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
 use tidb_query_datatype::codec::table;
 

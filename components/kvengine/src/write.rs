@@ -7,6 +7,7 @@ use bytes::{Buf, BytesMut};
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
 use slog_global::info;
+use tikv_util::defer;
 
 use crate::{
     metrics::*,
@@ -203,6 +204,15 @@ impl Engine {
             let tag = ShardTag::new(self.get_engine_id(), IdVer::new(wb.shard_id, 0));
             panic!("{} unable to get shard", tag);
         });
+        let sequence = wb.sequence;
+        defer! {
+            // Untrack pending txn files.
+            // Both txn file and normal writes will execute this cleanup step. This is safe
+            // for performance because unapplied_pending_files is empty in most cases, making
+            // the cleanup operation very lightweight. The cleanup ensures no memory leaks
+            // even when previous operations were aborted abnormally.
+            self.cleanup_unapplied_pending_files(&shard, sequence, PendingFileType::TxnFile)
+        }
         let version = shard.get_base_version() + wb.sequence;
         self.update_write_batch_version(wb, version);
         let mut data = shard.get_data();

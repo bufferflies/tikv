@@ -2025,7 +2025,7 @@ impl<'a> PreprocessRef<'a> {
                 check_key_in_region(&encode_key(file.get_biggest()), self.region)?;
             }
         }
-        if let Some(kv) = ctx.kv.as_ref() {
+        if let Some(kv) = ctx.kv {
             // `ctx.kv` is `None` only in restore. In which we don't need `meta_committed`.
             kv.meta_committed(&cs, rejected);
         }
@@ -2550,9 +2550,17 @@ impl<'a> PreprocessRef<'a> {
         }
         let kv = ctx.kv.unwrap();
         let chunk_manager = kv.get_txn_chunk_manager();
-        if chunk_manager.all_chunks_exists(txn_file_ref.get_chunk_ids()) {
+        #[allow(unused_mut)] // Make clippy happy when failpoint disabled
+        let mut all_chunks_exist = chunk_manager.all_chunks_exists(txn_file_ref.get_chunk_ids());
+        (|| {
+            fail_point!("skip_check_txn_file_exists_when_preprocess", |_| {
+                all_chunks_exist = false;
+            })
+        })();
+        if all_chunks_exist {
             return Ok(());
         }
+
         ctx.apply_msgs.msgs.push(ApplyMsg::PrepareTxnFile {
             txn_file_ref,
             commit_index: entry.index,

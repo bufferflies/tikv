@@ -417,8 +417,8 @@ impl SsTableCore {
             .expect("load old index")
     }
 
-    pub fn expire_cache(&self, level: usize) {
-        self.file.expire_open_file();
+    pub fn expire_cache(&self, level: usize, file_ttl: u64) {
+        self.file.expire_open_file(file_ttl);
         self.filter.expire(FILTER_TTL_LEVELS[level]);
         self.idx.expire(IDX_TTL_LEVELS[level]);
         self.old_idx.expire(IDX_TTL_LEVELS[level]);

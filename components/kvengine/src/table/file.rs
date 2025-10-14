@@ -16,9 +16,6 @@ use memmap2::Mmap;
 
 use crate::{error::IoContext, ia::types::FileSegmentIdent, table::table};
 
-// 30 minutes idle file would be closed.
-const FILE_TTL: u64 = 30 * 60;
-
 #[async_trait::async_trait]
 pub trait File: Sync + Send {
     // id returns the id of the file.
@@ -74,7 +71,7 @@ pub trait File: Sync + Send {
     /// `expire_open_file` closes the file if it's idle for a long time.
     ///
     /// It will be reopened and cached on next read.
-    fn expire_open_file(&self) {}
+    fn expire_open_file(&self, _ttl: u64) {}
 
     fn is_open(&self) -> bool {
         false
@@ -180,8 +177,8 @@ impl File for LocalFile {
         Ok(())
     }
 
-    fn expire_open_file(&self) {
-        self.fd.expire(FILE_TTL)
+    fn expire_open_file(&self, ttl: u64) {
+        self.fd.expire(ttl)
     }
 
     fn is_open(&self) -> bool {

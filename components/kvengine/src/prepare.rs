@@ -17,6 +17,7 @@ use std::{
 use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use dashmap::mapref::entry::Entry;
+use fail::fail_point;
 use file_system::IoType;
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
@@ -220,6 +221,15 @@ impl EngineCore {
             });
         }
 
+        (|| fail_point!("before_track_pending_files", |_| {}))();
+        // Track pending files to avoid GC mistakenly deleting them before they are
+        // applied to KvEngine. Will be untracked in the KvEngine::apply_change_set().
+        self.track_unapplied_pending_files(
+            cs.shard_id,
+            cs.sequence,
+            PendingFileType::ChangeSet,
+            &ids,
+        );
         info!(
             "{} is preparing change set, loading file by ids", tag;
             "ids" => ?ids.keys(),
@@ -250,6 +260,11 @@ impl EngineCore {
             );
         }
         cs.schema_file = schema_file;
+
+        (|| {
+            fail_point!("after_load_local_files", cs.flush.is_some(), |_| {});
+        })();
+
         Ok(cs)
     }
 

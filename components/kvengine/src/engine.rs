@@ -21,6 +21,7 @@ use cloud_encryption::{EncryptionKeyManager, MasterKey};
 use collections::HashSet;
 use crossbeam::channel::RecvTimeoutError;
 use dashmap::{mapref::entry::Entry, DashMap};
+use fail::fail_point;
 use file_system::IoRateLimiter;
 use fslock;
 use security::SecurityManager;
@@ -834,6 +835,93 @@ impl EngineCore {
 
     pub fn unblock_keyspace_compaction(&self) {
         self.send_compact_msg(CompactMsg::UnblockKeyspace);
+    }
+
+    // Track pending (newly created) files from a changeset that have been
+    // preprocessed but not yet applied. This helps prevent mistakenly deleting
+    // files that are still being processed.
+    //
+    // Note: Some old files may also be tracked (e.g., files that are moved down
+    // during compaction), but it's harmless —— no correctness or performance
+    // affects.
+    pub fn track_unapplied_pending_files(
+        &self,
+        shard_id: u64,
+        seq: u64,
+        file_type: PendingFileType,
+        file_ids: &HashMap<u64, FileMeta>,
+    ) {
+        if file_ids.is_empty() {
+            return;
+        }
+
+        let Some(shard) = self.get_shard(shard_id) else {
+            // Shard may not exist due to concurrent operations (e.g., region split/merge/
+            // destroy happened after prepare_change_set started but before we reach here).
+            // This is safe to ignore - the subsequent apply_change_set will fail with
+            // ShardNotFound, which is the expected behavior for destroyed regions.
+            return;
+        };
+        let mut pending_files = shard.unapplied_pending_files.lock().unwrap();
+        pending_files.insert(
+            seq,
+            PendingFileInfo {
+                file_type,
+                file_ids: file_ids.keys().cloned().collect(),
+            },
+        );
+    }
+
+    // Similar to track_unapplied_pending_files, but used to track txn files.
+    pub fn track_unapplied_pending_files_txn_file(
+        &self,
+        shard_id: u64,
+        seq: u64,
+        file_type: PendingFileType,
+        file_ids: Vec<u64>,
+    ) {
+        if file_ids.is_empty() {
+            return;
+        }
+
+        let Some(shard) = self.get_shard(shard_id) else {
+            // Safe to ignore if shard doesn't exist. See track_unapplied_pending_files
+            // for detailed explanation.
+            return;
+        };
+        let mut pending_files = shard.unapplied_pending_files.lock().unwrap();
+        pending_files.insert(
+            seq,
+            PendingFileInfo {
+                file_type,
+                file_ids,
+            },
+        );
+    }
+
+    // Cleanup unapplied pending files
+    pub fn cleanup_unapplied_pending_files(
+        &self,
+        shard: &Shard,
+        seq: u64,
+        file_type: PendingFileType,
+    ) {
+        let mut pending_files = shard.unapplied_pending_files.lock().unwrap();
+        if pending_files.is_empty() {
+            return;
+        }
+        fail_point!("before_cleanup_unapplied_pending_files", |_| {});
+
+        pending_files.retain(|s, info| {
+            let keep = *s > seq || info.file_type != file_type;
+            if !keep {
+                debug!(
+                    "cleanup unapplied pending files: seq {} -> files: {:?}",
+                    s, info.file_ids
+                );
+            }
+            keep
+        });
     }
 
     // meta_committed should be called when a change set is committed in the raft

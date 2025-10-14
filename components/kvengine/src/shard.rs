@@ -2,13 +2,13 @@
 
 use std::{
     cmp,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     iter::Iterator,
     ops::Deref,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering::*, *},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
 };
 
@@ -66,6 +66,18 @@ impl ShardPendingOperations {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingFileType {
+    ChangeSet,
+    TxnFile,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingFileInfo {
+    pub file_type: PendingFileType,
+    pub file_ids: Vec<u64>,
+}
+
 pub struct Shard {
     pub engine_id: u64,
     pub id: u64,
@@ -121,6 +133,25 @@ pub struct Shard {
 
     #[cfg(any(test, feature = "testexport"))]
     pub(crate) max_used_gc_safe_point: RwLock<TimeStamp>,
+
+    /// Tracks files that are being processed but not yet applied. The key is
+    /// the raft log sequence number, and the value contains file type
+    /// (ChangeSet/TxnFile) and file IDs.
+    ///
+    /// Insert timing:
+    /// - During prepare of ChangeSet/TxnFile, before downloading files
+    ///
+    /// Cleanup timing:
+    /// - After successful apply of ChangeSet/TxnFile
+    /// - During apply of subsequent operations (cleans up files from aborted
+    ///   ChangeSet/TxnFile operations), files with sequence numbers <= current
+    ///   operation's sequence are cleaned
+    ///
+    /// This tracking is critical for:
+    /// 1. Protecting files from GC during the download -> apply lifecycle
+    /// 2. Performance impact is minimal as the map is usually empty in normal
+    ///    cases
+    pub(crate) unapplied_pending_files: Mutex<BTreeMap<u64, PendingFileInfo>>,
 }
 
 // Note: when add new property, consider whether to add it to following process:
@@ -250,6 +281,7 @@ impl Shard {
             checked_schema_ver: Default::default(),
             #[cfg(any(test, feature = "testexport"))]
             max_used_gc_safe_point: RwLock::new(0.into()),
+            unapplied_pending_files: Mutex::new(BTreeMap::new()),
         };
         {
             let mut pending_ops = shard.pending_ops.write().unwrap();
@@ -810,6 +842,17 @@ impl Shard {
     pub fn get_all_vec_idx_files(&self) -> Vec<u64> {
         let data = self.get_data();
         data.get_all_vec_idx_files()
+    }
+
+    pub fn get_unapplied_pending_files(&self) -> HashSet<u64> {
+        let pending_files = self.unapplied_pending_files.lock().unwrap();
+        let mut all_files = HashSet::new();
+
+        for info in pending_files.values() {
+            all_files.extend(&info.file_ids);
+        }
+
+        all_files
     }
 
     #[inline]

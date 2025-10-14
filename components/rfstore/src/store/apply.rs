@@ -21,8 +21,9 @@ use kvengine::{
     encode_extra_txn_status_key, encryption_key_from_shard_properties, mvcc,
     table::{memtable::WriteBatchEntry, InnerKey},
     util::PropertiesHelper,
-    ChangeSet, Engine, SnapAccess, UserMeta, WriteBatch, ENCRYPTION_KEY, ENCRYPTION_META_KEY,
-    EXTRA_CF, LOCK_CF, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF, WRITE_CF,
+    ChangeSet, Engine, PendingFileType, SnapAccess, UserMeta, WriteBatch, ENCRYPTION_KEY,
+    ENCRYPTION_META_KEY, EXTRA_CF, LOCK_CF, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
+    WRITE_CF,
 };
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use kvproto::{
@@ -1968,12 +1969,21 @@ impl Applier {
         let region_id = self.region_id();
         let peer_id = self.id();
         let worker_pool = txn_chunk_manager.worker_pool().clone();
+        let engine = ctx.engine.clone();
         let start = Instant::now();
         worker_pool.spawn_blocking(move || {
             tikv_util::set_current_region(region_id);
             PREPARE_TASK_WAIT_TIME_HISTOGRAM
                 .with_label_values(&["txn"])
                 .observe(duration_to_sec(start.saturating_elapsed()));
+            // Track pending txn files to avoid GC mistakenly deleting them before they are
+            // applied to KvEngine. Will be untracked in KvEngine::Write().
+            engine.track_unapplied_pending_files_txn_file(
+                region_id,
+                entry_index,
+                PendingFileType::TxnFile,
+                txn_file_ref.get_chunk_ids().to_vec(),
+            );
             if let Err(err) =
                 txn_chunk_manager.prepare_txn_chunks(txn_file_ref.chunk_ids.clone(), encryption_key)
             {
@@ -1983,6 +1993,7 @@ impl Applier {
                     tag, err, txn_file_ref, entry_index
                 );
             }
+            fail_point!("after_load_local_txn_files");
             router.send(
                 region_id,
                 PeerMsg::PrepareTxnFileResult {

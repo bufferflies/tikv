@@ -1295,6 +1295,7 @@ impl TikvServer {
                 warn!("get disk size of local dir failed: {:?}", err; "path" => ?kv_opts.local_dir);
                 0
             });
+        kv_opts.file_ttl = conf.kvengine.file_ttl;
 
         let opts = Arc::new(kv_opts);
         let id_allocator = Arc::new(PdIdAllocator::new(pd.clone()));

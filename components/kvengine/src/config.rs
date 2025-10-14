@@ -92,6 +92,15 @@ pub struct Config {
     /// concurrency per core for loading dfs files.
     pub dfs_load_concurrency_per_core: usize,
 
+    /// Open-file cache TTL (seconds).
+    /// Controls how long an idle opened file (FD) is kept in the
+    /// kvengine file cache to avoid reopen overhead; once a file is idle
+    /// longer than this (and not pinned by snapshot/recovery), background
+    /// maintenance may close it and reclaim local resources. This does NOT
+    /// delete data files; it only evicts/closes cached open handles.
+    /// Default: 1800s (30 minutes).
+    pub file_ttl: u64,
+
     pub checksum_type: ChecksumType,
 
     pub block_cache_type: BlockCacheType,
@@ -141,6 +150,7 @@ impl Default for Config {
             ignore_columnar_table_load: false,
             build_columnar: false,
             read_columnar: false,
+            file_ttl: 1800, // 1800s, i.e., 30 minutes
         }
     }
 }

@@ -103,6 +103,9 @@ pub struct Options {
     /// Threshold of low available space. Reject some requests when available
     /// space is lower than this.
     pub low_space_threshold: u64,
+
+    /// File TTL in seconds for idle file expiration.
+    pub file_ttl: u64,
 }
 
 impl Default for Options {
@@ -139,6 +142,7 @@ impl Default for Options {
             build_columnar: AtomicBool::new(false),
             read_columnar: false,
             low_space_threshold: 0,
+            file_ttl: 1800, // 30 minutes
         }
     }
 }

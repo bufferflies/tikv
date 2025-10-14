@@ -588,7 +588,7 @@ impl super::Shard {
                     if cf == WRITE_CF {
                         tombs += cf_tbl.tombs as usize;
                         kv_size += cf_tbl.kv_size;
-                        cf_tbl.expire_cache(0);
+                        cf_tbl.expire_cache(0, self.opt.file_ttl);
                         if cf_tbl.has_open_file() {
                             open_files += 1;
                         }
@@ -618,7 +618,7 @@ impl super::Shard {
                 level_stats.level = l.level;
                 level_stats.num_tables = l.tables.len();
                 for t in l.tables.as_slice() {
-                    t.expire_cache(l.level);
+                    t.expire_cache(l.level, self.opt.file_ttl);
                     if t.has_open_file() {
                         open_files += 1;
                     }

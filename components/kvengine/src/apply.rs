@@ -12,6 +12,7 @@ use bytes::Buf;
 use cloud_encryption::EncryptionKey;
 use kvenginepb as pb;
 use schema::schema::StorageClass;
+use tikv_util::defer;
 
 use crate::{
     context::PrepareType,
@@ -318,6 +319,10 @@ impl EngineCore {
                 cs.sequence
             );
             return Ok(());
+        }
+        defer! {
+            // Untrack pending files after change set applied.
+            self.cleanup_unapplied_pending_files(&shard, cs.sequence, PendingFileType::ChangeSet)
         }
         if cs.has_flush() {
             self.apply_flush(&shard, cs);
