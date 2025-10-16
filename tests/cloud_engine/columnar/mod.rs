@@ -30,12 +30,12 @@ use kvengine::{
         columnar,
         columnar::{
             filter::TableScanCtx, new_int_handle_column_info, new_version_column_info,
-            ColumnarFilterReader,
+            ColumnarFilterReader, ColumnarMetaCache,
         },
         schema_file::{build_schema_file, Schema, SchemaBuf},
         sstable::{BlockCache, BlockCacheType},
     },
-    ColumnarStatusResp, Engine, SnapAccess, STORAGE_CLASS_KEY, WRITE_CF,
+    ColumnarIndexStats, ColumnarStatusResp, Engine, SnapAccess, STORAGE_CLASS_KEY, WRITE_CF,
 };
 use kvproto::coprocessor::DelegateResponse;
 use pd_client::PdClient;
@@ -681,6 +681,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
         prepare_type: PrepareType::All,
         read_columnar: true,
         meta_file_cache: new_meta_file_cache(1024 * 1024),
+        columnar_meta_cache: ColumnarMetaCache::default(),
     };
     let mem_limiter = MemoryLimiter::new(u64::MAX, None);
     let snap_access = dfs
@@ -1148,6 +1149,7 @@ fn test_columnar_ia_file() {
         prepare_type: PrepareType::All,
         read_columnar: true,
         meta_file_cache: new_meta_file_cache(1024 * 1024),
+        columnar_meta_cache: ColumnarMetaCache::default(),
     };
     let mem_limiter = MemoryLimiter::new(u64::MAX, None);
     let snap_access = runtime
@@ -1469,6 +1471,33 @@ async fn send_collect_columnar_status_request(
         .unwrap();
     let columnar_status: ColumnarStatusResp = serde_json::from_slice(&body).unwrap();
     columnar_status
+}
+
+async fn send_collect_columnar_index_stats_request(
+    status_addr: &str,
+    keyspace_id: u32,
+) -> Vec<ColumnarIndexStats> {
+    let request = hyper::http::Request::builder()
+        .method(http::method::Method::GET)
+        .uri(format!(
+            "http://{}/kvengine/columnar_index_stats?keyspace_id={}",
+            status_addr, keyspace_id,
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let http_client = hyper::client::Client::new();
+    let resp = http_client.request(request).await.unwrap();
+    assert!(resp.status().is_success());
+    let mut body = vec![];
+    resp.into_body()
+        .try_for_each(|bytes| {
+            body.extend(bytes);
+            ok(())
+        })
+        .await
+        .unwrap();
+    let columnar_index_stats: Vec<ColumnarIndexStats> = serde_json::from_slice(&body).unwrap();
+    columnar_index_stats
 }
 
 async fn create_keyspace_and_split_tables(

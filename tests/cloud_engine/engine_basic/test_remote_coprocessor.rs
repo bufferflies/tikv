@@ -11,7 +11,10 @@ use kvengine::{
         manager::IaManager,
         util::{IaCapacity, IaManagerOptionsBuilder},
     },
-    table::sstable::{BlockCache, BlockCacheType},
+    table::{
+        columnar::ColumnarMetaCache,
+        sstable::{BlockCache, BlockCacheType},
+    },
     txn_chunk_manager::{with_pool_size, TxnChunkManager, TxnChunkManagerConfig},
     ShardStats, SnapAccess, WRITE_CF,
 };
@@ -2456,6 +2459,7 @@ impl<'a> DagTest<'a> {
             prepare_type: PrepareType::All,
             read_columnar: true,
             meta_file_cache: new_meta_file_cache(1024 * 1024),
+            columnar_meta_cache: ColumnarMetaCache::default(),
         };
         let mem_limiter = MemoryLimiter::new(u64::MAX, None);
 

@@ -23,7 +23,10 @@ use kvengine::{
     dfs::{S3Fs, DFS_REMOTE_CACHE_ADDR_HEADER},
     local_compact,
     metrics::ENGINE_REMOTE_COMPACT_EXCEED_MEMORY_LIMIT_COUNTER,
-    table::{file::File, schema_file::SchemaFile, sstable::BlockCache, ChecksumType},
+    table::{
+        columnar::ColumnarMetaCache, file::File, schema_file::SchemaFile, sstable::BlockCache,
+        ChecksumType,
+    },
     txn_chunk_manager::TxnChunkManager,
     CompactionCtx, CompactionRequest, CompactionType, IdAllocator, SnapAccess,
     CURRENT_COMPACTOR_VERSION, INCOMPATIBLE_COMPACTOR_ERROR_CODE,
@@ -78,6 +81,7 @@ pub(crate) struct Context {
     pub master_key: MasterKey,
     pub quota_limiter: Arc<QuotaLimiter>,
     pub block_cache: BlockCache,
+    pub columnar_meta_cache: ColumnarMetaCache,
     pub schema_files: Option<Arc<DashMap<u64, SchemaFile>>>,
     pub worker_limiter: WorkerLimiter,
     pub memory_limiter: MemoryLimiter,
@@ -105,6 +109,7 @@ impl Context {
             dfs,
             master_key: self.master_key.clone(),
             block_cache: self.block_cache.clone(),
+            columnar_meta_cache: self.columnar_meta_cache.clone(),
             vector_index_cache: None,
             columnar_file_cache: None,
             schema_files: self.schema_files.clone(),
@@ -637,6 +642,7 @@ async fn handle_remote_compaction(
         local_dirs: vec![],
         for_restore: false,
         checksum_type,
+        columnar_meta_cache: ctx.columnar_meta_cache.clone(),
     };
     let task = thread_pool.spawn(tikv_util::init_task_local(async move {
         tikv_util::set_current_region(comp_ctx.req.shard_id);

@@ -2030,6 +2030,7 @@ pub mod tests {
                 },
                 columnar::ColumnarFile,
                 reader::{ColumnarMvccReader, ColumnarReader, ColumnarTableReader},
+                ColumnarMetaCache,
             },
             file::{File, InMemFile},
             memtable::{CfTable, WriteBatch},
@@ -2309,9 +2310,11 @@ pub mod tests {
     fn test_columnar_builder() {
         init_log_for_test();
         for common_handle in [true, false] {
+            let columnar_meta_cache = ColumnarMetaCache::default();
             let schema = new_schema(1, common_handle);
             let (file, ref_rows) = build_table(1, &schema, 100, 150, 100);
-            let columnar_file = ColumnarFile::open(file, None).unwrap();
+            let columnar_file =
+                ColumnarFile::open(file, None, columnar_meta_cache.clone()).unwrap();
             let mut reader = ColumnarTableReader::new(&columnar_file, schema.clone(), None, None);
             block_on(reader.seek(&0u64.to_le_bytes())).unwrap();
             let mut block = Block::new(&schema);
@@ -2327,8 +2330,10 @@ pub mod tests {
         encryption_key: Option<EncryptionKey>,
     ) -> ColumnarMvccReader {
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
+        let columnar_meta_cache = ColumnarMetaCache::default();
         for file in files {
-            let columnar_file = ColumnarFile::open(file.clone(), None).unwrap();
+            let columnar_file =
+                ColumnarFile::open(file.clone(), None, columnar_meta_cache.clone()).unwrap();
             let reader = ColumnarTableReader::new(
                 &columnar_file,
                 schema.clone(),
@@ -2347,9 +2352,11 @@ pub mod tests {
         files: &[Arc<dyn File>],
         safe_ts: u64,
     ) -> ColumnarCompactReader {
+        let columnar_meta_cache = ColumnarMetaCache::default();
         let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];
         for file in files {
-            let columnar_file = ColumnarFile::open(file.clone(), None).unwrap();
+            let columnar_file =
+                ColumnarFile::open(file.clone(), None, columnar_meta_cache.clone()).unwrap();
             if !columnar_file.has_table(schema.table_id) {
                 continue;
             }
@@ -2514,12 +2521,13 @@ pub mod tests {
         ) {
             init_log_for_test();
             let schema = new_schema(1, common_handle);
+            let columnar_meta_cache = ColumnarMetaCache::default();
             let (file_1, ref_1) = build_table(1, &schema, 100, 150, 100);
             let (file_2, ref_2) = build_table(2, &schema, 160, 190, 100);
             let (file_3, ref_3) = build_table(3, &schema, 191, 240, 100);
             let files = vec![file_1, file_2, file_3];
             let ref_rows = vec![ref_1, ref_2, ref_3];
-            let col_files: Vec<ColumnarFile> = files.iter().map(|f| ColumnarFile::open(f.clone(), None).unwrap()).collect();
+            let col_files: Vec<ColumnarFile> = files.iter().map(|f| ColumnarFile::open(f.clone(), None, columnar_meta_cache.clone()).unwrap()).collect();
             for _ in 0..50 {
                 let mut rng = rand::thread_rng();
                 let start_handle = rng.gen_range(90i64..170i64);

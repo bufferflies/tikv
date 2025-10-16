@@ -20,7 +20,7 @@ use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
     ia::{manager::IaManager, util::IaConfig},
     table::{
-        columnar::{Block, ColumnarFilterReader, GLOBAL_COMMON_HANDLE_END},
+        columnar::{Block, ColumnarFilterReader, ColumnarMetaCache, GLOBAL_COMMON_HANDLE_END},
         file::FdCache,
         schema_file::{Schema, SchemaFile},
         sstable::BlockCache,
@@ -106,10 +106,12 @@ pub(crate) fn execute_check_columnar(args: CheckColumnarArgs) {
         .worker_threads(worker_threads)
         .build()
         .unwrap();
+    let columnar_meta_cache = ColumnarMetaCache::default();
 
     let ctx = Arc::new(SchemaMgrContext {
         s3fs: s3fs.clone(),
         pd: pd_client,
+        columnar_meta_cache,
     });
     let security_mgr = Arc::new(SecurityManager::new(&config.security).unwrap());
     let mut schema_mgr_config = SchemaManagerConfig::default();
@@ -434,6 +436,7 @@ async fn request_snapshot_from_shard(
         ia_ctx: IaCtx::Enabled(ia_mgr, Arc::new(vec![working_dir.to_path_buf()])),
         prepare_type,
         read_columnar: true,
+        columnar_meta_cache: ctx.columnar_meta_cache.clone(),
     };
     let mut delegate_resp = DelegateResponse::default();
     delegate_resp.merge_from_bytes(resp.as_ref()).unwrap();
@@ -631,7 +634,7 @@ fn check_biggest_handle(snap: &SnapAccess) -> Result<bool, String> {
         let Some(schema) = schema_file.get_table(biggest_table_id) else {
             continue;
         };
-        let Some(mut last_handle) = file.get_table_last_handle(biggest_table_id) else {
+        let Some(last_handle) = file.get_table_last_handle(biggest_table_id) else {
             continue;
         };
         let is_common_handle = schema.is_common_handle();
@@ -651,7 +654,7 @@ fn check_biggest_handle(snap: &SnapAccess) -> Result<bool, String> {
             }
         } else {
             let handle_in_biggest_key = decode_int_handle(biggest_key.as_ref()).unwrap();
-            let biggest_handle = last_handle.get_i64_le() - 1;
+            let biggest_handle = last_handle.as_slice().get_i64_le() - 1;
             if handle_in_biggest_key != biggest_handle {
                 error!(
                     "keyspace_id: {}, shard: {}, file_id: {}, last handle mismatch: {}, {}",

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::table::{columnar::VectorIndexDef, SnapVersion};
 
 /// Statistics about the columnar index coverage for a specific table and index
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColumnarIndexStats {
     pub table_id: i64,
@@ -70,13 +70,13 @@ impl super::Shard {
     /// is not fully synced.
     /// On the other hand, even if an index or table is deleted in TiDB, it may
     /// still be here.
-    pub fn collect_columnar_index_stats(&self) -> ColumnarIndexStatsByTableIndex {
+    pub fn collect_columnar_index_stats(&self) -> crate::Result<ColumnarIndexStatsByTableIndex> {
         let mut result = ColumnarIndexStatsByTableIndex(HashMap::new());
 
         let data = self.get_data();
         let schema_file = data.schema_file.as_ref();
         let Some(schema_file) = schema_file else {
-            return result;
+            return Ok(result);
         };
 
         // TODO: Update to support other indexes
@@ -112,10 +112,11 @@ impl super::Shard {
 
         for col_level in &data.col_levels.levels {
             for file in &col_level.files {
-                for (&table_id, table_meta) in file.iter_tables() {
+                for &table_id in file.iter_tables() {
                     if !table_indexes.contains_key(&table_id) {
                         continue;
                     }
+                    let table_meta = file.try_get_table(table_id)?;
                     let row_count = table_meta.handle_column.rows();
                     for &index_id in table_indexes[&table_id].keys() {
                         // For each index in the table, total_columnar_rows is the same.
@@ -157,6 +158,6 @@ impl super::Shard {
             }
         }
 
-        result
+        Ok(result)
     }
 }

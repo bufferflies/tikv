@@ -425,6 +425,7 @@ impl Shard {
                         ctx.vector_index_cache.clone(),
                         ctx.columnar_file_cache.clone(),
                         encryption_key.clone(),
+                        ctx.columnar_meta_cache.clone(),
                     )?;
                     added_files.insert(*id);
                 }
@@ -476,6 +477,7 @@ impl Shard {
                         ctx.vector_index_cache.clone(),
                         ctx.columnar_file_cache.clone(),
                         encryption_key.clone(),
+                        ctx.columnar_meta_cache.clone(),
                     )?;
                     if fm.is_schema_file() {
                         if let Some(schema_files) = ctx.schema_files.as_ref() {

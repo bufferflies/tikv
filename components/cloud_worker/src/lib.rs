@@ -35,6 +35,7 @@ use kvengine::{
     dfs::{DFSConfig, Dfs, S3Fs},
     ia::{manager::IaManager, util::IaConfig},
     table::{
+        columnar::ColumnarMetaCache,
         sstable::{BlockCache, BlockCacheType},
         ChecksumType,
     },
@@ -198,6 +199,7 @@ fn start_server_impl(
         config.cop_block_cache_size.0,
         config.cop_block_size.0 as usize,
     );
+    let columnar_meta_cache = ColumnarMetaCache::default();
 
     let addr = config.addr.parse().expect("Unable to parse socket address");
 
@@ -350,6 +352,7 @@ fn start_server_impl(
         quota_limiter: Arc::new(QuotaLimiter::default()),
         memory_limiter,
         block_cache,
+        columnar_meta_cache,
         schema_files: Some(Arc::new(DashMap::new())),
         worker_limiter,
         txn_chunk_manager,

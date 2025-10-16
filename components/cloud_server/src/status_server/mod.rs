@@ -87,6 +87,7 @@ use tikv_util::{
     config::{AbsoluteOrPercentSize, ReadableSize},
     future::paired_future_callback,
     http::{HeaderExt, CONTENT_TYPE_PROTOBUF},
+    init_task_local_sync,
     logger::set_log_level,
     metrics::{dump, dump_to},
     store::find_peer,
@@ -641,7 +642,7 @@ impl StatusServer {
     /// indexes in the keyspace
     async fn collect_columnar_index_stats(
         req: Request<Body>,
-        engine: &kvengine::Engine,
+        ctx: &StatusContext,
     ) -> hyper::Result<Response<Body>> {
         let query = req.uri().query().unwrap_or("");
         let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -655,9 +656,31 @@ impl StatusServer {
             Ok(id) => id,
             Err(err) => return Ok(make_response(StatusCode::BAD_REQUEST, err.to_string())),
         };
-
-        let stats = engine.collect_columnar_index_stats(keyspace_id);
-        let stats_json = serde_json::to_string_pretty(&stats).unwrap();
+        // collect_columnar_index_stats may have blocking IO, so run it in a blocking
+        // thread pool
+        let engine = ctx.kvengine.clone();
+        let join_handle = ctx.thread_pool.spawn_blocking(move || {
+            init_task_local_sync(|| {
+                engine
+                    .collect_columnar_index_stats(keyspace_id)
+                    .map(|stats| serde_json::to_string_pretty(&stats).unwrap())
+            })
+        });
+        let stats_json = match join_handle.await {
+            Ok(Ok(json)) => json,
+            Ok(Err(err)) => {
+                return Ok(make_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to collect columnar index stats: {}", err),
+                ));
+            }
+            Err(err) => {
+                return Ok(make_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to collect columnar index stats: {}", err),
+                ));
+            }
+        };
         Ok(Response::builder()
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(stats_json))
@@ -2650,7 +2673,7 @@ impl StatusServer {
                                 } else if path.starts_with("/kvengine/columnar_status") {
                                     Self::collect_columnar_status(req, &ctx).await
                                 } else if path.starts_with("/kvengine/columnar_index_stats") {
-                                    Self::collect_columnar_index_stats(req, &ctx.kvengine).await
+                                    Self::collect_columnar_index_stats(req, &ctx).await
                                 } else if path.starts_with("/kvengine/meta/") {
                                     Self::dump_kvengine_meta(req, &ctx.kvengine).await
                                 } else {

@@ -10,7 +10,10 @@ use crate::{
     dfs,
     ia::manager::IaManager,
     table::{
-        columnar::ColumnarFileCache, file::File, schema_file::SchemaFile, sstable::BlockCache,
+        columnar::{ColumnarFileCache, ColumnarMetaCache},
+        file::File,
+        schema_file::SchemaFile,
+        sstable::BlockCache,
         vector_index::VectorIndexCache,
     },
     txn_chunk_manager::TxnChunkManager,
@@ -29,6 +32,7 @@ pub struct SnapCtx {
     pub prepare_type: PrepareType,
     pub read_columnar: bool,
     pub meta_file_cache: Arc<Cache<u64, Arc<dyn File>, MetaFileCacheWeighter>>,
+    pub columnar_meta_cache: ColumnarMetaCache,
 }
 
 const ESTIMATED_META_FILE_SIZE: u64 = 64 * 1024; // 64KB

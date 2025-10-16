@@ -18,6 +18,7 @@ use crate::{
                 TableOffsets, ENCODING_TYPE_NONE, PACK_FORMAT, PROP_KEY_BIGGEST,
                 PROP_KEY_MAX_VERSION, PROP_KEY_SMALLEST, PROP_KEY_SNAP_VERSION,
             },
+            columnar_meta_cache::ColumnarMetaCache,
             ColumnarFileCache, PROP_KEY_ESTIMATED_KV_SIZE,
         },
         file::File,
@@ -143,6 +144,7 @@ impl HandleIndex {
 
 pub(crate) struct TableMeta {
     pub(crate) table_id: i64,
+    pub(crate) size: u64,
     pub(crate) handle_index: HandleIndex,
     pub(crate) handle_column: Arc<ColumnMeta>,
     pub(crate) version_column: Arc<ColumnMeta>,
@@ -151,6 +153,7 @@ pub(crate) struct TableMeta {
 
 impl TableMeta {
     pub(crate) fn parse(table_id: i64, mut buf: &[u8]) -> Self {
+        let mut size = buf.len();
         let num_cols = buf.get_u32_le();
         let (handle_column, remained) = ColumnMeta::parse(buf);
         buf = remained;
@@ -177,12 +180,20 @@ impl TableMeta {
             handle_column.nullable,
         );
         decompress_pack(compressed_handle_idx_buf, &mut uncompressed_buf);
+        // refine the size
+        let column_meta_mem_size = std::mem::size_of::<ColumnMeta>();
+        let self_mem_size = std::mem::size_of::<TableMeta>();
+        size += column_meta_mem_size * num_cols as usize;
+        size += self_mem_size;
+        size += uncompressed_buf.len();
+        size -= compressed_handle_idx_buf.len();
         handle_index_buf.parse(&uncompressed_buf);
         let handle_index = HandleIndex::new(handle_index_buf);
         let _table_props_len = buf.get_u32_le() as usize;
         let _properties = &buf[.._table_props_len];
         Self {
             table_id,
+            size: size as u64,
             handle_index,
             handle_column: Arc::new(handle_column),
             version_column: Arc::new(version_column),
@@ -651,6 +662,7 @@ impl ColumnarFile {
     pub fn open(
         file: Arc<dyn File>,
         cache: Option<ColumnarFileCache>,
+        columnar_meta_cache: ColumnarMetaCache,
     ) -> crate::table::Result<Self> {
         if let Some(ref cache) = cache {
             if let Some(columnar_file) = cache.get(&file.id()) {
@@ -701,12 +713,9 @@ impl ColumnarFile {
         let index_offset = table_offsets.index_offset();
         for i in 0..footer.number_tables as usize {
             let (idx_start, idx_end) = table_offsets.get_index_range(i);
-            let table_index_buf = file.read_table_meta(
-                (index_offset + idx_start) as u64,
-                (idx_end - idx_start) as usize,
-            )?;
-            let table_meta = TableMeta::parse(table_offsets.table_ids[i], &table_index_buf);
-            tables.insert(table_offsets.table_ids[i], Arc::new(table_meta));
+            let off = (index_offset + idx_start) as u64;
+            let len = (idx_end - idx_start) as usize;
+            tables.insert(table_offsets.table_ids[i], (off, len));
         }
 
         let file_id = file.id();
@@ -718,6 +727,7 @@ impl ColumnarFile {
                 max_version,
                 snap_version,
                 tables,
+                columnar_meta_cache,
                 encryption_ver,
                 index_offset,
                 estimated_kv_size,
@@ -730,22 +740,34 @@ impl ColumnarFile {
     }
 
     pub(crate) fn get_table(&self, table_id: i64) -> Arc<TableMeta> {
-        self.core.tables.get(&table_id).unwrap().clone()
+        self.try_get_table(table_id).unwrap()
     }
 
-    pub(crate) fn iter_tables(&self) -> impl Iterator<Item = (&i64, &Arc<TableMeta>)> {
-        self.core.tables.iter()
+    pub(crate) fn try_get_table(&self, table_id: i64) -> crate::table::Result<Arc<TableMeta>> {
+        self.core
+            .columnar_meta_cache
+            .try_get_with(self.id(), table_id, || {
+                let (off, len) = self.core.tables.get(&table_id).cloned().unwrap();
+                let buf = self.core.file.read_table_meta(off, len)?;
+                let table_meta = TableMeta::parse(table_id, &buf);
+                Ok(Arc::new(table_meta))
+            })
+    }
+
+    pub(crate) fn iter_tables(&self) -> impl Iterator<Item = &i64> {
+        self.core.tables.keys()
     }
 
     pub(crate) fn has_table(&self, table_id: i64) -> bool {
         self.core.tables.contains_key(&table_id)
     }
 
-    pub fn get_table_last_handle(&self, table_id: i64) -> Option<&[u8]> {
-        self.core
-            .tables
-            .get(&table_id)
-            .map(|table| table.get_last_handle())
+    pub fn get_table_last_handle(&self, table_id: i64) -> Option<Vec<u8>> {
+        if !self.has_table(table_id) {
+            return None;
+        }
+        let table_meta = self.get_table(table_id);
+        Some(table_meta.get_last_handle().to_vec())
     }
 
     pub fn get_file(&self) -> Arc<dyn File> {
@@ -834,7 +856,9 @@ struct ColumnarFileCore {
     biggest_key: Vec<u8>,
     max_version: u64,
     snap_version: Option<SnapVersion>,
-    tables: HashMap<i64, Arc<TableMeta>>,
+    // table_id -> (table_meta_off, table_meta_len)
+    tables: HashMap<i64, (u64, usize)>,
+    columnar_meta_cache: ColumnarMetaCache,
     encryption_ver: u32,
     index_offset: u32,
     estimated_kv_size: usize,

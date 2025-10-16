@@ -24,7 +24,7 @@ use kvengine::{
     table::{
         columnar::{
             new_common_handle_column_info, new_int_handle_column_info, new_version_column_info,
-            VectorIndexDef,
+            ColumnarMetaCache, VectorIndexDef,
         },
         file::{File, LocalFile},
         schema_file,
@@ -339,6 +339,7 @@ impl Default for SchemaManagerConfig {
 pub struct SchemaMgrContext {
     pub s3fs: Arc<S3Fs>,
     pub pd: Arc<dyn PdClient>,
+    pub columnar_meta_cache: ColumnarMetaCache,
 }
 
 impl From<Arc<Context>> for SchemaMgrContext {
@@ -346,6 +347,7 @@ impl From<Arc<Context>> for SchemaMgrContext {
         Self {
             s3fs: ctx.s3fs.clone(),
             pd: ctx.pd.clone(),
+            columnar_meta_cache: ctx.columnar_meta_cache.clone(),
         }
     }
 }

@@ -332,6 +332,7 @@ impl EngineCore {
                     None,
                     None,
                     encryption_key.clone(),
+                    self.columnar_meta_cache.clone(),
                 )?;
                 continue;
             }
@@ -451,6 +452,7 @@ impl EngineCore {
             None,
             None,
             encryption_key,
+            self.columnar_meta_cache.clone(),
         )?;
         Ok(())
     }

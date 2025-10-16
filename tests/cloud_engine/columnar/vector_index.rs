@@ -19,7 +19,7 @@ use kvengine::{
     table::{
         columnar::{
             new_int_handle_column_info, new_version_column_info, Block, ColumnarFilterReader,
-            VectorIndexDef,
+            ColumnarMetaCache, VectorIndexDef,
         },
         schema_file::{build_schema_file, Schema, SchemaBuf},
         sstable::BlockCache,
@@ -49,9 +49,13 @@ use txn_types::Key;
 
 use crate::{
     alloc_node_id,
-    columnar::{create_keyspace_and_split_tables, send_schema_file_request, DelegateResponse},
+    columnar::{
+        create_keyspace_and_split_tables, send_collect_columnar_index_stats_request,
+        send_schema_file_request, DelegateResponse,
+    },
     info, request_dump_snapshot_on_store,
 };
+
 #[test]
 fn test_build_vector_index() {
     test_util::init_log_for_test();
@@ -246,6 +250,7 @@ fn test_build_vector_index() {
         prepare_type: PrepareType::All,
         read_columnar: true,
         meta_file_cache: new_meta_file_cache(1024 * 1024),
+        columnar_meta_cache: ColumnarMetaCache::default(),
     };
     let mem_limiter = MemoryLimiter::new(u64::MAX, None);
     let remote_snap = dfs
@@ -318,6 +323,13 @@ fn test_build_vector_index() {
     }
     let stats = vector_index_cache.stats();
     assert!(stats.cache_hit.load(Ordering::Relaxed) > 0);
+    let rt = dfs.get_runtime();
+    let columnar_index_stats = rt.block_on(send_collect_columnar_index_stats_request(
+        &status_addr,
+        keyspace_id,
+    ));
+    assert_eq!(columnar_index_stats.len(), 1);
+    assert!(columnar_index_stats[0].indexed_columnar_rows > 0);
     cluster.stop();
     oss.shutdown();
 }
@@ -490,7 +502,13 @@ fn test_build_vector_index_with_all_rows_deleted() {
         10,
         || "failed to wait vector index snap version".to_string(),
     );
-
+    let rt = dfs.get_runtime();
+    let columnar_index_stats = rt.block_on(send_collect_columnar_index_stats_request(
+        &status_addr,
+        keyspace_id,
+    ));
+    assert_eq!(columnar_index_stats.len(), 1);
+    assert!(columnar_index_stats[0].indexed_columnar_rows > 0);
     cluster.stop();
     oss.shutdown();
 }
@@ -840,6 +858,14 @@ fn test_read_distance_from_vector_index_and_table() {
             _ => {}
         }
     }
+    let rt = dfs.get_runtime();
+    let columnar_index_stats = rt.block_on(send_collect_columnar_index_stats_request(
+        &status_addr,
+        keyspace_id,
+    ));
+    assert_eq!(columnar_index_stats.len(), 1);
+    assert!(columnar_index_stats[0].indexed_columnar_rows > 0);
+    cluster.stop();
 }
 
 #[test]
@@ -1055,6 +1081,14 @@ fn test_read_distance_from_vector_index() {
         );
         assert_eq!(topn[i].distance, *distance);
     }
+    let rt = dfs.get_runtime();
+    let columnar_index_stats = rt.block_on(send_collect_columnar_index_stats_request(
+        &status_addr,
+        keyspace_id,
+    ));
+    assert_eq!(columnar_index_stats.len(), 1);
+    assert!(columnar_index_stats[0].indexed_columnar_rows > 0);
+    cluster.stop();
 }
 
 #[test]
@@ -1179,6 +1213,12 @@ fn test_drop_vector_index() {
         10,
         || "failed to drop vector index file".to_string(),
     );
+    let rt = dfs.get_runtime();
+    let columnar_index_stats = rt.block_on(send_collect_columnar_index_stats_request(
+        &status_addr,
+        keyspace_id,
+    ));
+    assert!(columnar_index_stats.is_empty());
     cluster.stop();
     oss.shutdown();
 }

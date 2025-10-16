@@ -9,6 +9,7 @@ use schema::schema::{
     StorageClass, StorageClassSpec, STORAGE_CLASS_SPEC_STR_AUTO, STORAGE_CLASS_TIER_IA,
 };
 use serde::Deserialize;
+use tikv_util::set_current_region;
 
 use crate::{
     metrics::{
@@ -274,16 +275,20 @@ impl super::Engine {
     }
 
     /// Returns the aggregated stats about columnar indexes for all shards.
-    pub fn collect_columnar_index_stats(&self, keyspace_id: u32) -> Vec<super::ColumnarIndexStats> {
+    pub fn collect_columnar_index_stats(
+        &self,
+        keyspace_id: u32,
+    ) -> crate::Result<Vec<super::ColumnarIndexStats>> {
         let mut res_map = super::ColumnarIndexStatsByTableIndex::default();
         if let Some(shard_ids) = self.get_keyspace_shards(keyspace_id) {
-            shard_ids.iter().for_each(|shard_id| {
+            for shard_id in shard_ids.iter() {
                 if let Some(shard) = self.get_shard(*shard_id) {
                     if shard.is_active() {
-                        res_map.merge_from(shard.collect_columnar_index_stats());
+                        set_current_region(*shard_id);
+                        res_map.merge_from(shard.collect_columnar_index_stats()?);
                     }
                 }
-            });
+            }
         }
         // Just take out map values as a vector and return the vector.
         // We cannot return the map directly because map key is a tuple and cannot be
@@ -294,7 +299,7 @@ impl super::Engine {
                 .cmp(&b.table_id)
                 .then(a.index_id.cmp(&b.index_id))
         });
-        res_vec
+        Ok(res_vec)
     }
 }
 

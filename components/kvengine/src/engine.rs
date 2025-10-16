@@ -37,6 +37,7 @@ use crate::{
     meta::ShardMeta,
     metrics::ENGINE_FREE_MEM_BYTES_HISTOGRAM,
     table::{
+        columnar::ColumnarMetaCache,
         file::FdCache,
         memtable::{CfTable, CfTableCore},
         schema_file::SchemaFile,
@@ -117,6 +118,8 @@ impl Engine {
         } else {
             None
         };
+        let columnar_meta_cache =
+            ColumnarMetaCache::new(config.columnar_meta_cache_capacity.as_memory_size());
         let (flush_tx, flush_rx) = mpsc::unbounded();
         let (compact_tx, compact_rx) = mpsc::unbounded();
         let (free_tx, free_rx) = mpsc::unbounded();
@@ -149,6 +152,7 @@ impl Engine {
             cache,
             fd_cache,
             value_cache,
+            columnar_meta_cache: columnar_meta_cache.clone(),
             comp_client: CompactionClient::new(
                 fs.clone(),
                 opts.remote_compactor_addr.clone(),
@@ -160,6 +164,7 @@ impl Engine {
                 security_mgr,
                 opts.local_dirs.clone(),
                 opts.for_restore,
+                columnar_meta_cache,
             ),
             id_allocator,
             managed_safe_ts: AtomicU64::new(0),
@@ -377,6 +382,7 @@ pub struct EngineCore {
     pub(crate) cache: BlockCache,
     pub(crate) fd_cache: FdCache,
     pub(crate) value_cache: Option<ValueCache>,
+    pub(crate) columnar_meta_cache: ColumnarMetaCache,
     pub comp_client: CompactionClient,
     pub(crate) id_allocator: Arc<dyn IdAllocator>,
     pub(crate) managed_safe_ts: AtomicU64,

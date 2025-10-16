@@ -120,6 +120,9 @@ pub struct Config {
     /// the capacity of value cache.
     pub value_cache_capacity: AbsoluteOrPercentSize,
 
+    /// the capacity of table meta cache.
+    pub columnar_meta_cache_capacity: AbsoluteOrPercentSize,
+
     /// The panic regions threshold of the table to auto blacklist.
     pub table_auto_blacklist_threshold: u64,
 
@@ -170,6 +173,7 @@ impl Default for Config {
             dfs_load_concurrency_per_request: 16,
             fd_cache_capacity: DEFAULT_FD_CACHE_CAPCITY,
             value_cache_capacity: 0.into(),
+            columnar_meta_cache_capacity: AbsoluteOrPercentSize::Percent(0.2),
             checksum_type: ChecksumType::Crc32,
             block_cache_type: BlockCacheType::Quick,
             blob_table_build_options: Default::default(),

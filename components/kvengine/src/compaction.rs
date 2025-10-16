@@ -55,9 +55,9 @@ use crate::{
         },
         columnar::{
             Block, ColumnarCompactReader, ColumnarConcatReader, ColumnarFileBuilder,
-            ColumnarFilterReader, ColumnarMergeReader, ColumnarReader, ColumnarRowTableReader,
-            ColumnarTableBuildOptions, ColumnarTableBuilder, ColumnarTruncateTsReader,
-            GLOBAL_COMMON_HANDLE_END,
+            ColumnarFilterReader, ColumnarMergeReader, ColumnarMetaCache, ColumnarReader,
+            ColumnarRowTableReader, ColumnarTableBuildOptions, ColumnarTableBuilder,
+            ColumnarTruncateTsReader, GLOBAL_COMMON_HANDLE_END,
         },
         file::{File, InMemFile, LocalFile},
         get_local_dir,
@@ -134,6 +134,7 @@ pub struct CompactionClient {
     local_dirs: Vec<PathBuf>,
     // Whether the compaction client is used during restore (trim over bound & truncate ts).
     for_restore: bool,
+    columnar_meta_cache: ColumnarMetaCache,
 }
 
 impl CompactionClient {
@@ -148,6 +149,7 @@ impl CompactionClient {
         security_mgr: Arc<SecurityManager>,
         local_dirs: Vec<PathBuf>,
         for_restore: bool,
+        columnar_meta_cache: ColumnarMetaCache,
     ) -> Self {
         let remote_compactors = RemoteCompactors::new(remote_url);
         let client = security_mgr
@@ -164,6 +166,7 @@ impl CompactionClient {
             master_key,
             local_dirs,
             for_restore,
+            columnar_meta_cache,
         }
     }
 
@@ -257,6 +260,7 @@ impl CompactionClient {
             encryption_key,
             local_dirs: self.local_dirs.clone(),
             for_restore: self.for_restore,
+            columnar_meta_cache: self.columnar_meta_cache.clone(),
         };
         let req = &ctx.req;
         let mut remote_compactor = self.get_remote_compactor();
@@ -2643,10 +2647,13 @@ fn files_to_tables(
         .collect()
 }
 
-fn files_to_columnar_tables(files: Vec<Arc<dyn File>>) -> Vec<ColumnarFile> {
+fn files_to_columnar_tables(
+    files: Vec<Arc<dyn File>>,
+    columnar_meta_cache: ColumnarMetaCache,
+) -> Vec<ColumnarFile> {
     files
         .into_iter()
-        .map(|f| ColumnarFile::open(f, None).unwrap())
+        .map(|f| ColumnarFile::open(f, None, columnar_meta_cache.clone()).unwrap())
         .collect()
 }
 
@@ -2688,6 +2695,7 @@ pub struct CompactionCtx {
     pub encryption_key: Option<EncryptionKey>,
     pub local_dirs: Vec<PathBuf>,
     pub for_restore: bool,
+    pub columnar_meta_cache: ColumnarMetaCache,
 }
 
 fn merge_table_change(
@@ -3060,7 +3068,8 @@ async fn compact_destroy_range_for_columnar(
     columnar_table_ids.sort();
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
-        let columnar_file = ColumnarFile::open(file, None).unwrap();
+        let columnar_file =
+            ColumnarFile::open(file, None, ctx.columnar_meta_cache.clone()).unwrap();
         let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
@@ -3320,7 +3329,8 @@ async fn compact_truncate_ts_for_columnar(
     columnar_table_ids.sort();
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
-        let columnar_file = ColumnarFile::open(file, None).unwrap();
+        let columnar_file =
+            ColumnarFile::open(file, None, ctx.columnar_meta_cache.clone()).unwrap();
         let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
@@ -3571,7 +3581,8 @@ async fn compact_trim_over_bound_for_columnar(
     columnar_table_ids.sort();
     for &(id, level) in files.iter() {
         let file = columnar_files.remove(&id).unwrap();
-        let columnar_file = ColumnarFile::open(file, None).unwrap();
+        let columnar_file =
+            ColumnarFile::open(file, None, ctx.columnar_meta_cache.clone()).unwrap();
         let mut delete = pb::ColumnarDelete::new();
         delete.set_id(id);
         delete.set_level(level);
@@ -4522,7 +4533,7 @@ async fn columnar_major_compact_for_clear_tables(
         deletes.push(tbl_delete);
 
         let file = columnar_files.remove(&file_id).unwrap();
-        let columnar_table = ColumnarFile::open(file, None)?;
+        let columnar_table = ColumnarFile::open(file, None, ctx.columnar_meta_cache.clone())?;
         let mut overlap_tables = schema_file
             .overlap_columnar_tables(columnar_table.get_smallest(), columnar_table.get_biggest());
         if overlap_tables.is_empty() {
@@ -4857,7 +4868,7 @@ async fn compact_columnar_l0_files(
         false,
     )
     .await?;
-    let col_tbls = files_to_columnar_tables(col_files);
+    let col_tbls = files_to_columnar_tables(col_files, ctx.columnar_meta_cache.clone());
     let snap_version = col_tbls
         .iter()
         .map(|f| f.get_snap_version().unwrap())
@@ -4985,7 +4996,7 @@ async fn compact_columnar_l1_files(
     if l1_tbl_files.is_empty() {
         return Ok(ret);
     }
-    let l1_tbls = files_to_columnar_tables(l1_tbl_files);
+    let l1_tbls = files_to_columnar_tables(l1_tbl_files, ctx.columnar_meta_cache.clone());
     let mut smallest = l1_tbls.iter().map(|f| f.get_smallest()).min().unwrap();
     let mut biggest = l1_tbls.iter().map(|f| f.get_biggest()).max().unwrap();
     for tbl in &l1_tbls {
@@ -5003,7 +5014,7 @@ async fn compact_columnar_l1_files(
         false,
     )
     .await?;
-    let mut l2_tbls = files_to_columnar_tables(l2_tbl_files);
+    let mut l2_tbls = files_to_columnar_tables(l2_tbl_files, ctx.columnar_meta_cache.clone());
     l2_tbls.sort_by(|a, b| a.get_smallest().cmp(&b.get_smallest()));
     for tbl in &l2_tbls {
         smallest = smallest.min(tbl.get_smallest());
@@ -5142,7 +5153,7 @@ async fn compact_all_columnar_files(
     for (&level, tbl_ids) in &col_file_ids {
         let tbl_files =
             load_table_files(tbl_ids, fs.clone(), opts, ctx.local_dirs.as_ref(), false).await?;
-        let mut tbls = files_to_columnar_tables(tbl_files);
+        let mut tbls = files_to_columnar_tables(tbl_files, ctx.columnar_meta_cache.clone());
         if level == 2 {
             tbls.sort_by(|a, b| a.get_smallest().cmp(&b.get_smallest()));
         }
@@ -5280,7 +5291,7 @@ async fn update_vector_index(
     .await?;
     let mut columnar_files = vec![];
     for file in files {
-        let columnar_file = ColumnarFile::open(file, None)?;
+        let columnar_file = ColumnarFile::open(file, None, ctx.columnar_meta_cache.clone())?;
         columnar_files.push(columnar_file);
     }
     let mut readers: Vec<Box<dyn ColumnarReader>> = vec![];

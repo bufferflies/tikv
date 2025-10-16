@@ -29,8 +29,8 @@ use crate::{
                 build_table, i_to_common_handle, merge_refs, new_schema, new_schema_with_nullable,
                 verify_with_ref_rows,
             },
-            Block, ColumnarFile, ColumnarFilterReader, ColumnarLevels, ColumnarReader,
-            ColumnarRowTableReader, MinMaxIndex,
+            Block, ColumnarFile, ColumnarFilterReader, ColumnarLevels, ColumnarMetaCache,
+            ColumnarReader, ColumnarRowTableReader, MinMaxIndex,
         },
         file::{File, InMemFile},
         schema_file::{build_schema_file, SchemaFile},
@@ -95,13 +95,32 @@ fn test_columnar_l0_compaction() {
             .unwrap()
     }
 
+    let columnar_meta_cache = ColumnarMetaCache::default();
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0, None).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1, None).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2, None).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_3, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1, None).unwrap());
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_2, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_3, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
@@ -214,15 +233,36 @@ fn test_columnar_l1_compaction() {
             .block_on(fs.create(file.id(), file.read(0, file.size() as usize).unwrap(), opts))
             .unwrap()
     }
-
+    let columnar_meta_cache = ColumnarMetaCache::default();
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_3, None).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0, None).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1, None).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_2, None).unwrap());
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_2, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_3, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        2,
+        ColumnarFile::open(l2_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        2,
+        ColumnarFile::open(l2_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        2,
+        ColumnarFile::open(l2_tbl_2, None, columnar_meta_cache.clone()).unwrap(),
+    );
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
@@ -807,15 +847,40 @@ fn test_columnar_destroy_range() {
             .unwrap()
     }
 
+    let columnar_meta_cache = ColumnarMetaCache::default();
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0, None).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1, None).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2, None).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0, None).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1, None).unwrap());
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_2, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_2, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        2,
+        ColumnarFile::open(l2_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        2,
+        ColumnarFile::open(l2_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
     builder.set_columnar_levels(col_levels);
@@ -893,16 +958,40 @@ fn test_columnar_truncate_ts() {
             .block_on(fs.create(file.id(), file.read(0, file.size() as usize).unwrap(), opts))
             .unwrap()
     }
-
+    let columnar_meta_cache = ColumnarMetaCache::default();
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0, None).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1, None).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2, None).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0, None).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1, None).unwrap());
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_2, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_2, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        2,
+        ColumnarFile::open(l2_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        2,
+        ColumnarFile::open(l2_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
     builder.set_columnar_levels(col_levels);
@@ -984,16 +1073,40 @@ fn test_columnar_trim_over_bound() {
             .block_on(fs.create(file.id(), file.read(0, file.size() as usize).unwrap(), opts))
             .unwrap()
     }
-
+    let columnar_meta_cache = ColumnarMetaCache::default();
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0, None).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1, None).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_2, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_0, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_1, None).unwrap());
-    col_levels.add_file(1, ColumnarFile::open(l1_tbl_2, None).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_0, None).unwrap());
-    col_levels.add_file(2, ColumnarFile::open(l2_tbl_1, None).unwrap());
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_2, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        1,
+        ColumnarFile::open(l1_tbl_2, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        2,
+        ColumnarFile::open(l2_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        2,
+        ColumnarFile::open(l2_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));
@@ -1220,10 +1333,16 @@ fn test_columnar_not_nullable_to_nullable() {
             .block_on(fs.create(file.id(), file.read(0, file.size() as usize).unwrap(), opts))
             .unwrap()
     }
-
+    let columnar_meta_cache = ColumnarMetaCache::default();
     let mut col_levels = ColumnarLevels::new();
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_0, None).unwrap());
-    col_levels.add_file(0, ColumnarFile::open(l0_tbl_1, None).unwrap());
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_0, None, columnar_meta_cache.clone()).unwrap(),
+    );
+    col_levels.add_file(
+        0,
+        ColumnarFile::open(l0_tbl_1, None, columnar_meta_cache.clone()).unwrap(),
+    );
 
     let mut builder = ShardDataBuilder::new(shard.get_data());
     builder.set_schema(schema_file.get_version(), 0, Some(schema_file));

@@ -2201,6 +2201,7 @@ mod tests {
         shard::ShardDataBuilder,
         table::{
             self,
+            columnar::ColumnarMetaCache,
             file::InMemFile,
             memtable::CfTable,
             sstable::{test_util::build_test_table_with_kvs, BlockCache},
@@ -2438,6 +2439,7 @@ mod tests {
                 prepare_type: PrepareType::All,
                 read_columnar: true,
                 meta_file_cache: new_meta_file_cache(1024),
+                columnar_meta_cache: ColumnarMetaCache::default(),
             };
             let mut snap_pb = kvenginepb::Snapshot::default();
             snap_pb.set_inner_key_off(KEYSPACE_PREFIX_LEN as u32);
