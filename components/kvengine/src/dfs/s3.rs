@@ -582,12 +582,16 @@ impl S3FsCore {
     where
         W: ReservableWriter + Send + 'static,
     {
+        // Some interfaces may not return Content-Length header, e.g. ListObjects.
         let cap = resp
             .headers
-            .remove("Content-Length")
-            .map(|value| value.parse::<u64>().unwrap())
+            .get("Content-Length")
+            .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or_default();
-        writer.reserve_capacity(cap);
+        debug!("headers: {:?}, cap: {}", resp.headers, cap);
+        if cap > 0 {
+            writer.reserve_capacity(cap);
+        }
         let mut read_len = 0;
         while let Some(res) = tokio::time::timeout(self.opts.read_body_timeout.0, resp.body.next())
             .await
@@ -599,7 +603,7 @@ impl S3FsCore {
                 .write_all(&chunk)
                 .map_err(|e| HttpDispatchError::new(format!("write_all: {:?}", e)))?;
         }
-        if read_len != cap {
+        if cap > 0 && read_len != cap {
             warn!("content length mismatch";
                 "content_length" => cap, "read_len" => read_len);
             debug_assert!(false);
