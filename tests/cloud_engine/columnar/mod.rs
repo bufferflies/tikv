@@ -5,7 +5,10 @@ mod fts_index;
 mod vector_index;
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -67,6 +70,41 @@ use crate::{alloc_node_id, destroy_range, request_dump_snapshot_on_store};
 
 const SEGMENT_SIZE: i64 = 64;
 const FREQ_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Helper struct to manage background writer thread lifecycle.
+/// Automatically stops the thread when dropped.
+struct BackgroundWriter {
+    handle: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl BackgroundWriter {
+    fn new<F>(task: F) -> Self
+    where
+        F: FnOnce(Arc<AtomicBool>) + Send + 'static,
+    {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+
+        let handle = std::thread::spawn(move || {
+            task(stop_clone);
+        });
+
+        BackgroundWriter {
+            handle: Some(handle),
+            stop,
+        }
+    }
+}
+
+impl Drop for BackgroundWriter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 #[test]
 fn test_schema_file() {
@@ -835,6 +873,151 @@ fn test_region_merge_with_columnar() {
         let columns = block.get_columns();
         assert_eq!(columns[0].get_not_null_value(i).get_i64_le(), i as i64);
         let str_val = gen_str_val(i);
+        assert_eq!(columns[1].get_not_null_value(i), &str_val);
+    }
+}
+
+#[test]
+fn test_region_merge_with_unconverted_l0() {
+    test_util::init_log_for_test();
+    let node_id = alloc_node_id();
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.kvengine
+            .columnar_table_build_options
+            .max_columnar_table_size = 1024;
+        conf.kvengine
+            .columnar_table_build_options
+            .pack_max_row_count = 9;
+        conf.kvengine.build_columnar = true;
+        conf.kvengine.read_columnar = true;
+    });
+    let dfs = cluster.get_dfs().unwrap();
+    let (keyspace_id, table_ids) = dfs
+        .get_runtime()
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
+    let table_id = table_ids[1];
+    let schemas = build_schemas(vec![table_id]);
+    let schema = schemas[0].clone();
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
+    let schema_file_id = 100;
+    let opts = dfs::Options::default().with_type(FileType::Schema);
+    dfs.get_runtime()
+        .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
+        .unwrap();
+    let status_addr = cluster.status_addr(node_id);
+
+    let kvengine = cluster.get_kvengine(node_id);
+    must_wait(
+        || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                schema_file_id,
+            ));
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    if shard.get_schema_file().is_some() {
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build schema file".to_string(),
+    );
+    let mut client = cluster.new_client();
+    let ctx = Mutex::new(EvalContext::default());
+    let pd_client = cluster.get_pd_client();
+    let regions_count = pd_client.get_regions_number();
+    let split_key = gen_row_key(keyspace_id, table_id, 500);
+    client.split(&split_key);
+    cluster.wait_pd_region_count(regions_count + 1);
+
+    client.put_kv(
+        400..500,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    client.put_kv(
+        500..600,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    must_wait(
+        || {
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            let mut columnar_count = 0;
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    if shard.get_columnar_table_ids().contains(&table_id) {
+                        columnar_count += 1;
+                        if columnar_count == 2 {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build columnar file".to_string(),
+    );
+    // spawn a thread to put_kv in background
+    let mut new_client = cluster.new_client();
+    let _bg_writer = BackgroundWriter::new(move |stop| {
+        let ctx = Mutex::new(EvalContext::default());
+        while !stop.load(Ordering::Relaxed) {
+            new_client.put_kv(
+                0..10,
+                |i: usize| gen_row_key(keyspace_id, table_id, i),
+                |i: usize| gen_row_val(&ctx, i),
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+
+    client.try_merge(&gen_row_key(keyspace_id, table_id, 0), &split_key);
+    client.put_kv(
+        300..400,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    client.put_kv(
+        600..700,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    cluster.wait_pd_region_count(regions_count);
+
+    let shard_id = pd_client
+        .get_region(&encode_bytes(&split_key))
+        .unwrap()
+        .get_id();
+    let shard = kvengine.get_shard(shard_id).unwrap();
+    let snap_access = shard.new_snap_access();
+    let ts = client.get_ts().into_inner();
+    let mut columnar_reader = snap_access
+        .new_columnar_mvcc_reader(schema.table_id, &schema.columns, None, ts, None)
+        .unwrap()
+        .unwrap();
+    block_on(columnar_reader.set_int_handle_range(400, Some(600))).unwrap();
+    let mut block = columnar::Block::new(&schema);
+    info!("read block from columnar");
+    let read_rows = block_on(columnar_reader.read_block(&mut block, 200)).unwrap();
+    info!("read block from columnar done, read_rows: {}", read_rows);
+    assert_eq!(read_rows, 200);
+    for i in 0..200 {
+        let handle = block.get_handle_buf().get_int_handle_value(i);
+        assert_eq!(handle, (i + 400) as i64);
+        let columns = block.get_columns();
+        assert_eq!(
+            columns[0].get_not_null_value(i).get_i64_le(),
+            (i + 400) as i64
+        );
+        let str_val = gen_str_val(i + 400);
         assert_eq!(columns[1].get_not_null_value(i), &str_val);
     }
 }

@@ -3517,7 +3517,23 @@ impl Peer {
                     return Err(Error::ProposalInMergingMode(self.region_id));
                 }
                 let cs = custom_log.get_change_set().unwrap();
-                if !cs.has_initial_flush() {
+                let has_pending_convert_l0 = if cs.has_columnar_compaction() {
+                    let row_l0s = cs
+                        .get_columnar_compaction()
+                        .get_row_l0s()
+                        .iter()
+                        .collect::<HashSet<_>>();
+                    let unconverted_l0s = self
+                        .get_store()
+                        .shard_meta
+                        .as_ref()
+                        .map(|shard_meta| shard_meta.unconverted_l0s.iter().collect::<HashSet<_>>())
+                        .unwrap_or_default();
+                    !row_l0s.is_empty() && row_l0s.eq(&unconverted_l0s)
+                } else {
+                    false
+                };
+                if !cs.has_initial_flush() && !has_pending_convert_l0 {
                     return Err(Error::ProposalInMergingMode(self.region_id));
                 }
             }
