@@ -439,6 +439,10 @@ impl TxnFileLocks {
     }
 }
 
+pub fn estimated_entries_by_table_count(table_count: usize) -> u64 {
+    table_count as u64 * 100_000
+}
+
 #[cfg(any(test, feature = "testexport"))]
 pub mod test_util {
     use std::sync::Mutex;

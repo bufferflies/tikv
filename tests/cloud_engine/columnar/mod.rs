@@ -1024,6 +1024,76 @@ fn test_region_merge_with_unconverted_l0() {
 }
 
 #[test]
+fn test_region_split_by_max_columnar_tables() {
+    test_util::init_log_for_test();
+
+    let node_id = alloc_node_id();
+    let mut cluster = ServerCluster::new(vec![node_id], |_, conf| {
+        conf.kvengine
+            .columnar_table_build_options
+            .max_columnar_table_size = 1024;
+        conf.kvengine
+            .columnar_table_build_options
+            .pack_max_row_count = 9;
+        conf.kvengine.build_columnar = true;
+        conf.kvengine.read_columnar = true;
+        conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(1));
+        conf.coprocessor.region_max_keys = Some(10000);
+        conf.coprocessor.region_split_keys = Some(10000);
+    });
+    let dfs = cluster.get_dfs().unwrap();
+    let (keyspace_id, table_ids) = dfs
+        .get_runtime()
+        .block_on(create_keyspace_and_split_tables(&mut cluster));
+    let schemas = build_schemas(vec![table_ids[0]]);
+    let schema = schemas[0].clone();
+    let schema_version = 10;
+    let schema_file_data = build_schema_file(keyspace_id, schema_version, schemas, 0);
+    let schema_file_id = 100;
+    let opts = dfs::Options::default().with_type(FileType::Schema);
+    dfs.get_runtime()
+        .block_on(dfs.create(schema_file_id, schema_file_data.into(), opts))
+        .unwrap();
+    let status_addr = cluster.status_addr(node_id);
+    let kvengine = cluster.get_kvengine(node_id);
+    must_wait(
+        || {
+            dfs.get_runtime().block_on(send_schema_file_request(
+                &status_addr,
+                keyspace_id,
+                schema_file_id,
+            ));
+            let all_id_vers = kvengine.get_all_shard_id_vers();
+            for id_ver in all_id_vers {
+                if let Ok(shard) = kvengine.get_shard_with_ver(id_ver.id, id_ver.ver) {
+                    if shard.get_schema_file().is_some() {
+                        return true;
+                    }
+                }
+            }
+            false
+        },
+        10,
+        || "failed to build schema file".to_string(),
+    );
+    let table_id = schema.table_id;
+    let kvengine = cluster.get_kvengine(node_id);
+    let mut client = cluster.new_client();
+    let ctx = Mutex::new(EvalContext::default());
+    client.put_kv(
+        0..5000,
+        |i: usize| gen_row_key(keyspace_id, table_id, i),
+        |i: usize| gen_row_val(&ctx, i),
+    );
+    let _shard_id = wait_columnar_built(&kvengine, table_id);
+    let shards_count = kvengine.get_all_shard_stats().len();
+
+    fail::cfg("max_columnar_tables_threshold", "return(0)").unwrap();
+    // Enable estimated entries by table count which is larger than region_max_keys.
+    cluster.wait_pd_region_min_count(shards_count + 1);
+}
+
+#[test]
 fn test_columnar_ia_file() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();

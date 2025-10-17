@@ -19,7 +19,7 @@ use kvengine::{
     ia::ia_auto_file::report_transitions, table::schema_file::SchemaFile,
     table_id::is_table_boundary_key, CheckMergeResult, IdVer, Shard, DEL_PREFIXES_KEY,
     MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE,
-    MANUAL_MAJOR_COMPACTION_ENABLE_COLUMNAR, TERM_KEY,
+    MANUAL_MAJOR_COMPACTION_ENABLE_COLUMNAR, MAX_COLUMNAR_TABLES_IN_SHARD, TERM_KEY,
 };
 use kvproto::{
     import_sstpb::SwitchMode,
@@ -1296,13 +1296,24 @@ impl<'a> PeerMsgHandler<'a> {
             raftstore::coprocessor::metrics::REGION_SIZE_HISTOGRAM.observe(estimated_size as f64);
             raftstore::coprocessor::metrics::REGION_KEYS_HISTOGRAM
                 .observe(estimated_entries as f64);
-            if estimated_size >= region_max_size || estimated_entries >= region_max_entries {
+
+            let table_count = shard.get_columnar_table_ids().len();
+            let max_tables_threshold = fail::eval("max_columnar_tables_threshold", |t| {
+                t.and_then(|s: String| s.parse::<usize>().ok())
+            })
+            .flatten()
+            .unwrap_or(MAX_COLUMNAR_TABLES_IN_SHARD * 3 / 2);
+            if estimated_size >= region_max_size
+                || estimated_entries >= region_max_entries
+                || table_count > max_tables_threshold
+            {
                 if let Some(k) = shard.get_suggest_split_key(self.ctx.cfg.region_bucket_size.0) {
                     info!(
-                        "region {} split, estimated size {}, estimated entries {}, max_size {}",
+                        "region {} split, estimated size {}, estimated entries {}, table count {}, max_size {}",
                         self.peer.tag(),
                         estimated_size,
                         estimated_entries,
+                        table_count,
                         region_max_size,
                     );
                     self.schedule_ask_split(vec![Key::from_raw(k.chunk()).into_encoded()]);

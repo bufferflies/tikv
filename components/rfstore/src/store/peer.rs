@@ -15,8 +15,11 @@ use collections::{HashMap, HashSet};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvengine::{
-    get_shard_property, metrics::ENGINE_DUPLICATED_CHANGE_SET_COUNTER, set_shard_property,
-    util::PropertiesHelper, FilePrepareType, ShardMeta, ENCRYPTION_KEY, STORAGE_CLASS_KEY,
+    get_shard_property,
+    metrics::ENGINE_DUPLICATED_CHANGE_SET_COUNTER,
+    set_shard_property,
+    util::{estimated_entries_by_table_count, PropertiesHelper},
+    FilePrepareType, ShardMeta, ENCRYPTION_KEY, MAX_COLUMNAR_TABLES_IN_SHARD, STORAGE_CLASS_KEY,
 };
 use kvproto::{
     disk_usage::DiskUsage,
@@ -1521,6 +1524,24 @@ impl Peer {
                 create_time: buckets.create_time,
             }
         });
+        // If the number of columnar tables in the shard is greater than
+        // MAX_COLUMNAR_TABLES_IN_SHARD, set the approximate keys to (table_count *
+        // 100_000) to avoid pd scheduling merge region.
+        // NOTE: as a side effect, if the table count is greater than
+        // MAX_COLUMNAR_TABLES_IN_SHARD, the approximate keys is inaccurate.
+        let approximate_keys = self
+            .raft_group
+            .store()
+            .shard_meta
+            .as_ref()
+            .map(|shard_meta| {
+                if shard_meta.columnar_table_ids.len() > MAX_COLUMNAR_TABLES_IN_SHARD {
+                    estimated_entries_by_table_count(shard_meta.columnar_table_ids.len())
+                } else {
+                    self.peer_stat.approximate_keys
+                }
+            })
+            .unwrap_or(self.peer_stat.approximate_keys);
         let task = PdTask::Heartbeat(HeartbeatTask {
             term: self.term(),
             region: self.region().clone(),
@@ -1530,7 +1551,7 @@ impl Peer {
             written_bytes: self.peer_stat.written_bytes,
             written_keys: self.peer_stat.written_keys,
             approximate_size: self.peer_stat.approximate_size,
-            approximate_keys: self.peer_stat.approximate_keys,
+            approximate_keys,
             approximate_kv_size: self.peer_stat.approximate_kv_size,
             approximate_columnar_size: self.peer_stat.approximate_columnar_size,
             approximate_columnar_kv_size: self.peer_stat.approximate_columnar_kv_size,
