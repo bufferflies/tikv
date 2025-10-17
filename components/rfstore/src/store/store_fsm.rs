@@ -38,6 +38,7 @@ use raftstore::{
         util::{is_initial_msg, is_region_initialized},
     },
 };
+use resource_control::ResourceController;
 use rfengine::{REGION_META_KEY_BYTE, TRUNCATE_ALL_INDEX};
 use sst_importer::SstImporter;
 use tikv_util::{
@@ -112,6 +113,7 @@ impl RaftBatchSystem {
         mut coprocessor_host: CoprocessorHost<kvengine::Engine>,
         importer: Arc<SstImporter>,
         concurrency_manager: ConcurrencyManager,
+        mut resource_controller: ResourceController,
     ) -> Result<()> {
         assert!(self.workers.is_none());
         // TODO: we can get cluster meta regularly too later.
@@ -194,6 +196,7 @@ impl RaftBatchSystem {
             workers.pd_worker.remote(),
             ctx.engines.kv.clone(),
             raft_cpu_util_collector,
+            resource_controller.get_transfer_leader_limiter().unwrap(),
         );
         assert!(workers.pd_worker.start(pd_runner));
         self.workers = Some(workers);

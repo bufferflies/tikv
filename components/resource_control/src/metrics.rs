@@ -4,7 +4,7 @@ use lazy_static::*;
 use prometheus::*;
 
 lazy_static! {
-    pub static ref ACTIVE_KEYSPACE_READ_BYTES: IntCounterVec = register_int_counter_vec!(
+    pub static ref ACTIVE_KEYSPACE_READ_BYTES: IntGaugeVec = register_int_gauge_vec!(
         "tikv_active_keyspace_read_bytes",
         "Total bytes read by active keyspace",
         &["keyspace_id"]

@@ -7175,6 +7175,7 @@ dependencies = [
  "raft-proto",
  "raftstore",
  "rand 0.8.5",
+ "resource_control",
  "rfengine",
  "schema",
  "serde",

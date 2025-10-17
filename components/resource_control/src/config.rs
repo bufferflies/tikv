@@ -33,10 +33,15 @@ pub struct Config {
     pub severity_threshold_exhausted: f64,
     pub whitelist_keyspace_ids: String,
     pub ignore_keyspace_ids: String,
+    // read
+    pub read_enabled: bool,
     pub max_read_cpu_ratio: f64,
     pub max_read_bytes_factor: f64,
     pub max_read_bytes_per_core_per_second: ReadableSize,
     pub max_read_wait_time: ReadableDuration,
+    // transfer leader
+    pub transfer_leader_enabled: bool,
+    pub max_transfer_leader_per_second: u64,
 }
 
 impl Default for Config {
@@ -48,7 +53,7 @@ impl Default for Config {
             debug: false,
             window_size: ReadableDuration::minutes(1),
             stats_interval: ReadableDuration::secs(1),
-            limiter_timeout: ReadableDuration::secs(5),
+            limiter_timeout: ReadableDuration::secs(2),
             limiter_stats_interval: ReadableDuration::secs(1),
             smoothing_factor: 0.9,
             active_quota_ratio: 0.8,
@@ -61,10 +66,13 @@ impl Default for Config {
             severity_threshold_exhausted: severity_threshold.exhausted,
             whitelist_keyspace_ids: "[]".to_string(),
             ignore_keyspace_ids: "[]".to_string(),
+            read_enabled: false,
             max_read_cpu_ratio: 0.6,
             max_read_bytes_factor: 1.0,
             max_read_bytes_per_core_per_second: ReadableSize::mb(64),
             max_read_wait_time: ReadableDuration::millis(MAX_WAIT_TIME.as_millis() as u64),
+            transfer_leader_enabled: false,
+            max_transfer_leader_per_second: 64,
         }
     }
 }
@@ -117,7 +125,18 @@ impl Config {
         if self.max_read_wait_time.0 < Duration::from_millis(1) {
             return Err("max-read-wait-time cannot be less than 1 milliseconds".into());
         }
+        if self.max_transfer_leader_per_second == 0 {
+            return Err("max-transfer-leader-per-second cannot be 0".into());
+        }
         Ok(())
+    }
+
+    pub fn get_read_enabled(&self) -> bool {
+        self.enabled && self.read_enabled
+    }
+
+    pub fn get_transfer_leader_enabled(&self) -> bool {
+        self.enabled && self.transfer_leader_enabled
     }
 }
 

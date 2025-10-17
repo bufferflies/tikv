@@ -42,7 +42,7 @@ impl InstantUsages {
     pub(crate) fn qps(&self) -> usize {
         let dur = self.duration();
         if !dur.is_zero() {
-            return self.total() / dur.as_secs() as usize;
+            return (self.total() as f64 / dur.as_secs_f64()) as usize;
         }
         0
     }

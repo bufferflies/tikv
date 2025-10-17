@@ -57,7 +57,10 @@ use raftstore::{
     },
     RegionInfoAccessor,
 };
-use resource_control::{CpuType, ReadLimiter, ReadSubscriber, ResourceController, ResourceType};
+use resource_control::{
+    CpuType, ReadLimiter, ReadSubscriber, ResourceController, ResourceType, TransferLeaderLimiter,
+    TransferLeaderSubscriber,
+};
 use rfengine::{RfEngine, STORE_IDENT_KEY};
 use rfstore::{
     store::{
@@ -803,6 +806,7 @@ impl TikvServer {
             self.coprocessor_host.clone().unwrap(),
             importer.clone(),
             self.concurrency_manager.clone(),
+            self.resource_controller.clone(),
         )
         .unwrap_or_else(|e| panic!("failed to start node: {:?}", e));
 
@@ -1380,6 +1384,8 @@ impl TikvServer {
 
     fn init_resource_controller(config: &TikvConfig) -> ResourceController {
         let mut resource_controller = ResourceController::new(config.resource_control.clone());
+
+        // Read
         let read_limiter = ReadLimiter::new(config.resource_control.clone());
         resource_controller.set_read_limiter(read_limiter.clone());
         let read_subscriber = ReadSubscriber::new(read_limiter, config.resource_control.clone());
@@ -1391,6 +1397,17 @@ impl TikvServer {
         );
         resource_controller
             .register_subscriber(ResourceType::Read, Box::new(read_subscriber.clone()));
+
+        // Transfer Leader
+        let transfer_leader_limiter = TransferLeaderLimiter::new(config.resource_control.clone());
+        resource_controller.set_transfer_leader_limiter(transfer_leader_limiter.clone());
+        let transfer_leader_subscriber =
+            TransferLeaderSubscriber::new(transfer_leader_limiter, config.resource_control.clone());
+        resource_controller.register_subscriber(
+            ResourceType::TransferLeader,
+            Box::new(transfer_leader_subscriber.clone()),
+        );
+
         resource_controller
     }
 }

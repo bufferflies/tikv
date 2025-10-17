@@ -6,7 +6,8 @@ use tikv_util::{info, mpsc};
 
 use crate::{
     Config, EventHub, EventPublisher, ReadLimiter, ResourceCollector, ResourceEvent, ResourceHub,
-    ResourcePublisher, ResourceSubscriber, ResourceType, ResourceUsage, MAX_BATCH_SIZE,
+    ResourcePublisher, ResourceSubscriber, ResourceType, ResourceUsage, TransferLeaderLimiter,
+    MAX_BATCH_SIZE,
 };
 
 #[derive(Clone)]
@@ -14,6 +15,7 @@ pub struct ResourceController {
     pub(crate) publisher: Arc<dyn ResourcePublisher>,
     pub(crate) event_hub: EventHub,
     pub(crate) read_limiter: Option<ReadLimiter>,
+    pub(crate) transfer_leader_limiter: Option<TransferLeaderLimiter>,
     pub(crate) dir: String,
     pub(crate) for_test: bool,
 }
@@ -32,6 +34,7 @@ impl ResourceController {
             publisher,
             event_hub,
             read_limiter: None,
+            transfer_leader_limiter: None,
             dir: String::new(),
             for_test: false,
         }
@@ -55,6 +58,14 @@ impl ResourceController {
 
     pub fn get_read_limiter(&mut self) -> Option<ReadLimiter> {
         self.read_limiter.clone()
+    }
+
+    pub fn set_transfer_leader_limiter(&mut self, transfer_leader_limiter: TransferLeaderLimiter) {
+        self.transfer_leader_limiter = Some(transfer_leader_limiter)
+    }
+
+    pub fn get_transfer_leader_limiter(&mut self) -> Option<TransferLeaderLimiter> {
+        self.transfer_leader_limiter.clone()
     }
 
     pub fn register_subscriber(

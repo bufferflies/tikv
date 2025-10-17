@@ -48,6 +48,7 @@ raft = { version = "0.7.0", default-features = false, features = ["protobuf-code
 raft-proto = { version = "0.7.0", default-features = false }
 raftstore = { path = "../raftstore" }
 rand = "0.8"
+resource_control = { path = "../resource_control", default-features = false }
 rfengine = { path = "../rfengine" }
 schema = { workspace = true }
 serde = "1.0"

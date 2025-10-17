@@ -1,5 +1,7 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::time::Duration;
+
 use tikv_util::error;
 
 #[derive(Debug, Clone, Copy)]
@@ -7,6 +9,7 @@ pub enum ResourceValue {
     Num { value: u64 },
     CpuTime { value: f64 },
     Bytes { value: u64 },
+    Nanos { value: u64 },
 }
 
 impl ResourceValue {
@@ -33,6 +36,14 @@ impl ResourceValue {
     }
 
     #[allow(dead_code)]
+    pub(crate) fn duration(&self) -> Duration {
+        match self {
+            ResourceValue::Nanos { value } => Duration::from_nanos(*value),
+            _ => Duration::from_nanos(0),
+        }
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn add(&self, rhs: &Self) -> Self {
         match self {
             ResourceValue::Num { value } => {
@@ -55,6 +66,13 @@ impl ResourceValue {
                     new_value += *rhs_value;
                 }
                 ResourceValue::Bytes { value: new_value }
+            }
+            ResourceValue::Nanos { value } => {
+                let mut new_value = *value;
+                if let ResourceValue::Nanos { value: rhs_value } = rhs {
+                    new_value += *rhs_value;
+                }
+                ResourceValue::Nanos { value: new_value }
             }
         }
     }
@@ -83,6 +101,13 @@ impl ResourceValue {
                 }
                 ResourceValue::Bytes { value: new_value }
             }
+            ResourceValue::Nanos { value } => {
+                let mut new_value = *value;
+                if let ResourceValue::Nanos { value: rhs_value } = rhs {
+                    new_value -= *rhs_value;
+                }
+                ResourceValue::Nanos { value: new_value }
+            }
         }
     }
 
@@ -109,6 +134,13 @@ impl ResourceValue {
                     new_value *= *rhs_value;
                 }
                 ResourceValue::Bytes { value: new_value }
+            }
+            ResourceValue::Nanos { value } => {
+                let mut new_value = *value;
+                if let ResourceValue::Nanos { value: rhs_value } = rhs {
+                    new_value *= *rhs_value;
+                }
+                ResourceValue::Nanos { value: new_value }
             }
         }
     }
@@ -158,6 +190,20 @@ impl ResourceValue {
                 }
                 ResourceValue::Bytes { value: new_value }
             }
+            ResourceValue::Nanos { value } => {
+                let mut new_value = *value;
+                if let ResourceValue::Nanos { value: rhs_value } = rhs {
+                    if *rhs_value != 0 {
+                        new_value /= *rhs_value;
+                    } else {
+                        error!(
+                            "resource value Nanos {}/{} err, division by zero",
+                            new_value, *rhs_value
+                        )
+                    }
+                }
+                ResourceValue::Nanos { value: new_value }
+            }
         }
     }
 }
@@ -181,6 +227,7 @@ pub enum ResourceType {
     PendingCompactionWal,
     MemTable,
     L0Table,
+    TransferLeader,
     #[default]
     Unknown,
 }
@@ -205,6 +252,7 @@ pub enum Resource {
     PendingCompactionWal { count: u64 },
     MemTable { bytes: u64 },
     L0Table { bytes: u64 },
+    TransferLeader { dur: Duration },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -266,6 +314,12 @@ impl Resource {
             Resource::L0Table { bytes } => Usage {
                 resource_type: ResourceType::L0Table,
                 resource_value: ResourceValue::Bytes { value: *bytes },
+            },
+            Resource::TransferLeader { dur } => Usage {
+                resource_type: ResourceType::TransferLeader,
+                resource_value: ResourceValue::Nanos {
+                    value: dur.as_nanos() as u64,
+                },
             },
         }
     }

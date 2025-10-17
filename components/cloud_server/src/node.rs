@@ -11,6 +11,7 @@ use raftstore::{
     coprocessor::dispatcher::CoprocessorHost,
     store::{initial_region, FlowStatsReporter},
 };
+use resource_control::ResourceController;
 use resource_metering::ResourceTagFactory;
 use rfstore::store::{
     self, store_fsm::StoreMeta, Config as StoreConfig, Engines, PdTask, RaftBatchSystem, Transport,
@@ -167,6 +168,7 @@ impl Node {
         coprocessor_host: CoprocessorHost<kvengine::Engine>,
         importer: Arc<SstImporter>,
         concurrency_manager: ConcurrencyManager,
+        resource_controller: ResourceController,
     ) -> Result<()> {
         let store_id = self.id();
         store_meta.store_id = Some(store_id);
@@ -195,6 +197,7 @@ impl Node {
             coprocessor_host,
             importer,
             concurrency_manager,
+            resource_controller,
         )?;
 
         Ok(())
@@ -361,6 +364,7 @@ impl Node {
         coprocessor_host: CoprocessorHost<kvengine::Engine>,
         importer: Arc<SstImporter>,
         concurrency_manager: ConcurrencyManager,
+        resource_controller: ResourceController,
     ) -> Result<()> {
         let store_id = store_meta.store_id.unwrap();
         info!("start raft store thread"; "store_id" => store_id);
@@ -385,6 +389,7 @@ impl Node {
             coprocessor_host,
             importer,
             concurrency_manager,
+            resource_controller,
         )?;
         Ok(())
     }

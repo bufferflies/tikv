@@ -9,7 +9,8 @@ use tikv_util::{info, sys::SysQuota};
 
 use crate::{
     usage::{KeyspaceInstantUsages, Usages},
-    Config, ReadLimiter, ResourceEvent, Severity, SeverityThreshold, ACTIVE_KEYSPACE_READ_BYTES,
+    Config, ReadLimiter, ResourceEvent, Severity, SeverityThreshold, TransferLeaderLimiter,
+    ACTIVE_KEYSPACE_READ_BYTES,
 };
 
 #[async_trait::async_trait]
@@ -49,14 +50,10 @@ impl ReadSubscriberData {
         self.max_read_bytes = (new_config.max_read_bytes_per_core_per_second.0 as f64
             * cpu_cores
             * window_secs) as u64;
-        let severity_threshold = SeverityThreshold {
-            stressed: new_config.severity_threshold_stressed,
-            critical: new_config.severity_threshold_critical,
-            exhausted: new_config.severity_threshold_exhausted,
-        };
-        self.severity_threshold = severity_threshold;
-        if self.config.enabled != new_config.enabled {
-            self.read_limiter.update_enabled(new_config.enabled);
+        self.severity_threshold = SeverityThreshold::from_config(new_config);
+        if self.config.get_read_enabled() != new_config.get_read_enabled() {
+            self.read_limiter
+                .update_enabled(new_config.get_read_enabled());
         }
         if self.config.limiter_timeout != new_config.limiter_timeout {
             self.read_limiter
@@ -100,6 +97,7 @@ impl ReadSubscriberData {
                     self.cpu_severity
                 );
                 if !self.cpu_severity.is_abnormal() || self.usages.total() == 0 {
+                    self.read_limiter.clear_all_limiter();
                     return;
                 }
 
@@ -122,7 +120,7 @@ impl ReadSubscriberData {
                 for (keyspace_id, bytes, _) in keyspace_usages.iter() {
                     ACTIVE_KEYSPACE_READ_BYTES
                         .with_label_values(&[&keyspace_id.to_string()])
-                        .inc_by(*bytes);
+                        .set(*bytes as i64);
                     active_bytes += *bytes;
                     active_pos += 1;
                     if active_bytes > active_quota_read_bytes {
@@ -165,12 +163,19 @@ impl ReadSubscriberData {
                     if idx > active_pos {
                         break;
                     }
-                    let mut target_bytes = (*bytes as f64 * self.config.smoothing_factor
-                        + keyspace_read_bytes_quota as f64 * (1.0 - self.config.smoothing_factor))
-                        / window_secs;
-                    let qps = *qps as f64 * factor;
-                    target_bytes =
-                        target_bytes.max(min_read_bytes_quota as f64 / window_secs) * factor;
+                    let (qps, target_bytes) = if *bytes > keyspace_read_bytes_quota {
+                        let mut target_bytes = (*bytes as f64 * self.config.smoothing_factor
+                            + keyspace_read_bytes_quota as f64
+                                * (1.0 - self.config.smoothing_factor))
+                            / window_secs;
+
+                        let qps = *qps as f64 * factor;
+                        target_bytes =
+                            target_bytes.max(min_read_bytes_quota as f64 / window_secs) * factor;
+                        (qps, target_bytes)
+                    } else {
+                        (f64::INFINITY, f64::INFINITY)
+                    };
                     info!(
                         "read subscriber active read quota, keyspace_id: {}, qps: {}, target_bytes: {}",
                         keyspace_id, qps, target_bytes
@@ -217,6 +222,116 @@ impl ReadSubscriber {
 
 #[async_trait::async_trait]
 impl ResourceSubscriber for ReadSubscriber {
+    fn on_event(&mut self, event: &ResourceEvent) {
+        match event {
+            ResourceEvent::DispatchUsages(usages) => {
+                self.on_usages(usages);
+            }
+            ResourceEvent::UpdateConfig(config) => self.update_config(config),
+            _ => {}
+        }
+    }
+}
+
+pub struct TransferLeaderSubscriberData {
+    pub(crate) config: Config,
+    pub(crate) max_transfer_leader: u64,
+    pub(crate) severity_threshold: SeverityThreshold,
+    #[allow(dead_code)]
+    pub(crate) transfer_leader_severity: Severity,
+    pub(crate) usages: KeyspaceInstantUsages,
+    pub(crate) transfer_leader_limiter: TransferLeaderLimiter,
+}
+
+impl TransferLeaderSubscriberData {
+    pub fn new(transfer_leader_limiter: TransferLeaderLimiter, config: Config) -> Self {
+        let mut subscriber = TransferLeaderSubscriberData {
+            config: config.clone(),
+            max_transfer_leader: Default::default(),
+            severity_threshold: Default::default(),
+            transfer_leader_severity: Default::default(),
+            usages: Default::default(),
+            transfer_leader_limiter,
+        };
+        subscriber.update_config(&config);
+        subscriber
+    }
+
+    pub fn update_config(&mut self, new_config: &Config) {
+        let window_secs = new_config.window_size.as_secs_f64();
+        self.max_transfer_leader =
+            (new_config.max_read_bytes_per_core_per_second.0 as f64 * window_secs) as u64;
+        self.severity_threshold = SeverityThreshold::from_config(new_config);
+        if self.config.get_transfer_leader_enabled() != new_config.get_transfer_leader_enabled() {
+            self.transfer_leader_limiter
+                .update_enabled(new_config.get_transfer_leader_enabled());
+        }
+        if self.config.limiter_stats_interval != new_config.limiter_stats_interval {
+            self.transfer_leader_limiter
+                .update_stats_interval(new_config.limiter_stats_interval.0);
+        }
+        if self.config.max_transfer_leader_per_second != new_config.max_transfer_leader_per_second {
+            self.transfer_leader_limiter
+                .update_limit(new_config.max_transfer_leader_per_second);
+        }
+        self.config = new_config.clone()
+    }
+
+    pub fn on_usages(&mut self, usages: &Usages) {
+        // TODO: Collect metrics affected by transfer leader to dynamically adjust the
+        // transfer leader speed.
+        match usages {
+            Usages::Global { usages } => {
+                info!(
+                    "transfer leader subscriber on_usages Global {:?} {:?}",
+                    usages.resource_type,
+                    usages.total(),
+                );
+            }
+            Usages::Keyspace { usages } => {
+                self.usages = usages.clone();
+                info!(
+                    "transfer leader subscriber on_usages Keyspace {:?} {:?}",
+                    usages.resource_type,
+                    usages.total(),
+                );
+            }
+        };
+        self.transfer_leader_limiter
+            .update_limit(self.max_transfer_leader);
+    }
+}
+
+#[derive(Clone)]
+pub struct TransferLeaderSubscriber {
+    pub(crate) data: Arc<Mutex<TransferLeaderSubscriberData>>,
+}
+
+impl TransferLeaderSubscriber {
+    pub fn new(transfer_leader_limiter: TransferLeaderLimiter, config: Config) -> Self {
+        let mut subscriber = TransferLeaderSubscriber {
+            data: Arc::new(Mutex::new(TransferLeaderSubscriberData::new(
+                transfer_leader_limiter,
+                config.clone(),
+            ))),
+        };
+        subscriber.update_config(&config);
+        subscriber
+    }
+
+    pub fn update_config(&mut self, config: &Config) {
+        let mut data = self.data.lock().unwrap();
+        data.update_config(config);
+    }
+
+    pub fn on_usages(&mut self, usages: &Usages) {
+        let mut data = self.data.lock().unwrap();
+        data.on_usages(usages);
+    }
+}
+
+#[async_trait::async_trait]
+impl ResourceSubscriber for TransferLeaderSubscriber {
     fn on_event(&mut self, event: &ResourceEvent) {
         match event {
             ResourceEvent::DispatchUsages(usages) => {

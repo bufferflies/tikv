@@ -40,6 +40,16 @@ impl Default for SeverityThreshold {
     }
 }
 
+impl SeverityThreshold {
+    pub(crate) fn from_config(config: &Config) -> SeverityThreshold {
+        SeverityThreshold {
+            stressed: config.severity_threshold_stressed,
+            critical: config.severity_threshold_critical,
+            exhausted: config.severity_threshold_exhausted,
+        }
+    }
+}
+
 impl Severity {
     pub(crate) fn get_severity(ratio: f64, severity_threshold: SeverityThreshold) -> Severity {
         let mut severity = Severity::Normal;

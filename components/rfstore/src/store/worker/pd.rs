@@ -38,6 +38,7 @@ use pd_client::{merge_bucket_stats, metrics::*, BucketStat, PdClient, RegionStat
 use prometheus::local::LocalHistogram;
 use raft::{eraftpb::ConfChangeType, StateRole};
 use raftstore::store::{util, util::ConfChangeKind, ReadStats, TxnExt, WriteStats};
+use resource_control::TransferLeaderLimiter;
 use tikv_util::{
     codec::bytes::decode_bytes,
     debug, error, info,
@@ -409,6 +410,7 @@ pub struct PdRunner {
     remote: Remote<yatp::task::future::TaskCell>,
     kv: kvengine::Engine,
     raft_cpu_collector: CpuUtilCollector,
+    transfer_leader_limiter: TransferLeaderLimiter,
 }
 
 const HOTSPOT_KEY_RATE_THRESHOLD: u64 = 128;
@@ -452,6 +454,7 @@ impl PdRunner {
         remote: Remote<yatp::task::future::TaskCell>,
         kv: kvengine::Engine,
         raft_cpu_collector: CpuUtilCollector,
+        transfer_leader_limiter: TransferLeaderLimiter,
     ) -> PdRunner {
         // TODO(x): support stats monitor.
         let cluster_id = pd_client.get_cluster_id().unwrap();
@@ -472,6 +475,7 @@ impl PdRunner {
             remote,
             kv,
             raft_cpu_collector,
+            transfer_leader_limiter,
         }
     }
 
@@ -1063,6 +1067,7 @@ impl PdRunner {
     fn schedule_heartbeat_receiver(&mut self) {
         let router = self.router.clone();
         let store_id = self.store_id;
+        let transfer_leader_limiter = self.transfer_leader_limiter.clone();
 
         let fut = self.pd_client
             .handle_region_heartbeat_response(store_id, Box::new(move |mut resp: pdpb::RegionHeartbeatResponse| {
@@ -1103,11 +1108,22 @@ impl PdRunner {
                     let req = new_change_peer_v2_request(change_peer_v2.take_changes().into());
                     send_admin_request(&router, region_id, epoch, peer, req, Callback::None);
                 } else if resp.has_transfer_leader() {
+                    let mut transfer_leader = resp.take_transfer_leader();
+                    if !transfer_leader_limiter.allow(){
+                        let rate = transfer_leader_limiter.rate();
+                        info!(
+                            "reject transfer leader";
+                            "region" => tag,
+                            "from_peer" => ?peer,
+                            "to_peer" => ?transfer_leader.get_peer(),
+                            "rate" => rate,
+                        );
+                        return;
+                    }
                     PD_HEARTBEAT_COUNTER_VEC
                         .with_label_values(&["transfer leader"])
                         .inc();
 
-                    let mut transfer_leader = resp.take_transfer_leader();
                     info!(
                         "try to transfer leader";
                         "region" => tag,

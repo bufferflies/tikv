@@ -3,7 +3,7 @@
 use std::{
     ops::{Add, Deref, Sub},
     sync::{
-        atomic::{AtomicBool, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering, Ordering::Relaxed},
         Arc,
     },
     time::{Duration, Instant},
@@ -53,7 +53,7 @@ impl ReadLimiterCore {
         let timeout = config.limiter_timeout.0;
         let stats_interval = config.limiter_stats_interval.0;
         Self {
-            enabled: AtomicBool::from(config.enabled),
+            enabled: AtomicBool::from(config.get_read_enabled()),
             timeout: AtomicDuration::new(timeout, TimeUnit::Millisecond),
             stats_interval: AtomicDuration::new(stats_interval, TimeUnit::Millisecond),
             max_wait_time: AtomicDuration::new(MAX_WAIT_TIME, TimeUnit::Millisecond),
@@ -93,6 +93,9 @@ impl ReadLimiter {
     }
 
     pub(crate) fn clear_all_limiter(&self) {
+        if self.keyspace_limiters.is_empty() {
+            return;
+        }
         self.keyspace_limiters.iter().for_each(|keyspace_limiter_ref|{
             let keyspace_id = *keyspace_limiter_ref.key();
             let keyspace_label = keyspace_id.to_string();
@@ -114,13 +117,19 @@ impl ReadLimiter {
         if !self.get_enabled() {
             return;
         }
+        if req_speed_limit.unwrap_or_default().is_infinite()
+            && bytes_speed_limit.unwrap_or_default().is_infinite()
+        {
+            self.remove_limiter(keyspace_id);
+            return;
+        }
         self.keyspace_limiters
             .entry(keyspace_id)
             .and_modify(|(ts, keyspace_read_limiter)| {
                 *ts = instant;
-                keyspace_read_limiter.set_speed_limit(req_speed_limit, bytes_speed_limit);
                 keyspace_read_limiter.update_stats_interval(self.stats_interval.load());
                 keyspace_read_limiter.update_max_wait_time(self.max_wait_time.load());
+                keyspace_read_limiter.set_speed_limit(req_speed_limit, bytes_speed_limit);
             })
             .or_insert_with(|| {
                 let keyspace_read_limiter = KeyspaceReadLimiter::new(
@@ -171,6 +180,7 @@ pub struct KeyspaceReadLimiterCore {
     keyspace_id: u32,
     req_limiter: tikv_util::time::Limiter,
     bytes_limiter: tikv_util::time::Limiter,
+    waiting_cnt: AtomicI64,
     allowed_time: AtomicTime, // Requests after the allowed time do not need to wait.
     last_time: AtomicTime,
     stats_interval: AtomicDuration,
@@ -194,6 +204,7 @@ impl KeyspaceReadLimiterCore {
             keyspace_id,
             req_limiter,
             bytes_limiter,
+            waiting_cnt: AtomicI64::default(),
             allowed_time: AtomicTime::new(start, TimeUnit::Microsecond),
             last_time: AtomicTime::new(start, TimeUnit::Millisecond),
             stats_interval: AtomicDuration::new(stats_interval, TimeUnit::Millisecond),
@@ -270,6 +281,7 @@ impl KeyspaceReadLimiter {
     }
 
     pub async fn wait(&self) -> Duration {
+        self.waiting_cnt.fetch_add(1, Relaxed);
         let mut wait_time = Duration::default();
         loop {
             let dur = self.wait_time();
@@ -278,10 +290,18 @@ impl KeyspaceReadLimiter {
             }
             tokio::time::sleep(dur).await;
             wait_time = wait_time.add(dur);
-            if wait_time >= self.max_wait_time.load() {
+            let avg_wait_time = Duration::from_secs_f64(
+                self.allowed_time
+                    .load()
+                    .duration_since(Instant::now())
+                    .as_secs_f64()
+                    / self.waiting_cnt.load(Relaxed) as f64,
+            );
+            if wait_time >= avg_wait_time.min(self.max_wait_time.load()) {
                 break;
             }
         }
+        self.waiting_cnt.fetch_add(-1, Relaxed);
         wait_time
     }
 
@@ -378,5 +398,218 @@ impl KeyspaceReadLimiter {
 
     fn update_max_wait_time(&self, max_wait_time: Duration) {
         self.max_wait_time.store(max_wait_time);
+    }
+}
+
+#[derive(Clone)]
+pub struct TransferLeaderLimiter {
+    pub(crate) core: Arc<TransferLeaderLimiterCore>,
+}
+
+pub struct TransferLeaderLimiterCore {
+    pub(crate) enabled: AtomicBool,
+    rate_limiter: UniformLimiter,
+    last_time: AtomicTime,
+    stats_interval: AtomicDuration,
+    last_rate: AtomicU64,
+}
+
+impl Deref for TransferLeaderLimiter {
+    type Target = TransferLeaderLimiterCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl TransferLeaderLimiterCore {
+    pub fn new(config: Config) -> Self {
+        let rate_limiter = UniformLimiter::new(config.max_transfer_leader_per_second);
+        Self {
+            enabled: AtomicBool::from(config.get_transfer_leader_enabled()),
+            last_time: AtomicTime::new(Instant::now(), TimeUnit::Millisecond),
+            stats_interval: AtomicDuration::new(
+                config.limiter_stats_interval.0,
+                TimeUnit::Millisecond,
+            ),
+            rate_limiter,
+            last_rate: AtomicU64::default(),
+        }
+    }
+}
+
+impl TransferLeaderLimiter {
+    pub fn new(config: Config) -> Self {
+        Self {
+            core: Arc::new(TransferLeaderLimiterCore::new(config)),
+        }
+    }
+
+    pub(crate) fn update_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Relaxed);
+    }
+
+    pub(crate) fn get_enabled(&self) -> bool {
+        self.enabled.load(Relaxed)
+    }
+
+    pub(crate) fn update_stats_interval(&self, stats_interval: Duration) {
+        self.stats_interval.store(stats_interval);
+    }
+
+    pub(crate) fn update_limit(&self, speed_limit: u64) {
+        self.rate_limiter.set_speed_limit(speed_limit);
+        self.update_statistics();
+    }
+
+    pub fn allow(&self) -> bool {
+        if !self.get_enabled() {
+            return true;
+        }
+        let allow = self.rate_limiter.allow(1);
+
+        self.update_statistics(); // TODO： Remove this line after implementing dynamic speed adjustment.
+        allow
+    }
+
+    fn update_statistics(&self) {
+        let last_time = self.last_time.load();
+        let dur = last_time.elapsed();
+        if dur < self.stats_interval.load() {
+            return;
+        }
+        self.last_time.store(Instant::now());
+        let transfer_leader = self.rate_limiter.total_bytes_consumed() as f64;
+        self.rate_limiter.reset_statistics();
+        let rate = transfer_leader / dur.as_secs_f64();
+        info!("resource control update_statistics dur {:?}", dur;
+            "transfer_leader" => transfer_leader,
+            "rate" => rate,
+        );
+        self.last_rate.store(rate as u64, Relaxed)
+    }
+
+    pub fn rate(&self) -> u64 {
+        self.last_rate.load(Relaxed)
+    }
+}
+
+/// Lock-free, non-blocking, uniform rate limiter.
+/// Ensures smooth execution by rejecting requests if they arrive too early.
+///
+/// - rate_bytes_per_sec: throughput in bytes/sec
+pub struct UniformLimiter {
+    rate_bytes_per_sec: AtomicU64,
+    allowed_time: AtomicTime,
+    total_bytes_consumed: AtomicU64,
+}
+
+impl UniformLimiter {
+    pub fn new(rate_bytes_per_sec: u64) -> Self {
+        assert!(rate_bytes_per_sec > 0);
+        let base = Instant::now();
+        Self {
+            rate_bytes_per_sec: AtomicU64::new(rate_bytes_per_sec),
+            allowed_time: AtomicTime::new(base, TimeUnit::Nanosecond),
+            total_bytes_consumed: AtomicU64::default(),
+        }
+    }
+
+    fn bytes_to_dur(rate_bytes_per_sec: u64, bytes: u64) -> Duration {
+        let secs: f64 = if rate_bytes_per_sec == 0 || bytes == 0 {
+            0.0
+        } else {
+            bytes as f64 / rate_bytes_per_sec as f64
+        };
+        Duration::from_secs_f64(secs)
+    }
+
+    /// Dynamically changes the speed limit. The new limit applies to all clones
+    /// of this instance.
+    pub fn set_speed_limit(&self, speed_limit: u64) {
+        debug_assert!(speed_limit > 0, "speed limit must be positive");
+        self.rate_bytes_per_sec.store(speed_limit, Relaxed);
+    }
+
+    /// Non-blocking check. Returns true if request can proceed immediately,
+    /// false if it arrives too early (would break uniform pacing).
+    pub fn allow(&self, bytes: u64) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        self.total_bytes_consumed
+            .fetch_add(bytes, Ordering::Relaxed);
+        let now = Instant::now();
+        let duration = UniformLimiter::bytes_to_dur(self.rate_bytes_per_sec.load(Relaxed), bytes);
+        let mut allowed = self.allowed_time.load();
+        loop {
+            if now < allowed {
+                // Too early, must reject to maintain smoothness
+                return false;
+            }
+            let scheduled_end = allowed.add(duration).max(now.sub(duration));
+            match self.allowed_time.compare_exchange(allowed, scheduled_end) {
+                Some(current) => {
+                    allowed = current;
+                }
+                None => {
+                    return true;
+                }
+            }
+        }
+    }
+
+    /// Obtains the total number of bytes consumed by this limiter so far.
+    ///
+    /// If more than `usize::MAX` bytes have been consumed, the count will wrap
+    /// around.
+    pub fn total_bytes_consumed(&self) -> usize {
+        self.total_bytes_consumed.load(Ordering::Relaxed) as usize
+    }
+
+    /// Resets the total number of bytes consumed to 0.
+    pub fn reset_statistics(&self) {
+        self.total_bytes_consumed.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread::sleep;
+
+    use super::*;
+
+    #[test]
+    fn test_uniform_limiter() {
+        let limiter = UniformLimiter::new(1000); // ~1000 bytes/sec
+
+        // First request should pass.
+        assert!(limiter.allow(100));
+
+        // Immediate second request likely rejected (too soon).
+        assert!(!limiter.allow(100));
+
+        // After enough time passes, allow again.
+        sleep(Duration::from_millis(100));
+        assert!(limiter.allow(100));
+
+        sleep(Duration::from_millis(100));
+        assert!(limiter.allow(200));
+
+        // Request rejected due to insufficient wait time.
+        sleep(Duration::from_millis(100));
+        assert!(!limiter.allow(100));
+
+        // After enough time passes, allow again.
+        sleep(Duration::from_millis(100));
+        assert!(limiter.allow(100));
+
+        assert!(!limiter.allow(100));
+        sleep(Duration::from_millis(100));
+
+        for i in 10..30 {
+            assert!(limiter.allow(i));
+            sleep(Duration::from_millis(i));
+        }
     }
 }
