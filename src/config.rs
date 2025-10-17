@@ -64,7 +64,7 @@ use serde::{
 use serde_json::{to_value, Map, Value};
 use tikv_util::{
     config::{self, LogFormat, ReadableDuration, ReadableSize, TomlWriter, GIB, MIB},
-    logger::{get_level_by_string, get_string_by_level, set_log_level},
+    logger::{get_level_by_string, get_string_by_level, set_log_level, set_txn_info_logging},
     sys::SysQuota,
     time::duration_to_sec,
     yatp_pool,
@@ -2705,6 +2705,7 @@ impl Default for File {
 #[serde(rename_all = "kebab-case")]
 pub struct LogConfig {
     pub level: LogLevel,
+    pub txn_info_logging: bool,
     #[online_config(skip)]
     pub format: LogFormat,
     #[online_config(skip)]
@@ -2780,6 +2781,7 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             level: LogLevel(slog::Level::Info),
+            txn_info_logging: false,
             format: LogFormat::Text,
             enable_timestamp: true,
             file: File::default(),
@@ -2803,6 +2805,9 @@ impl ConfigManager for LogConfigManager {
         if let Some(v) = changes.get("level") {
             let log_level = LogLevel::try_from(v)?;
             set_log_level(log_level.0);
+        }
+        if let Some(ConfigValue::Bool(enable)) = changes.get("txn-info-logging") {
+            set_txn_info_logging(*enable);
         }
         info!("update log config"; "config" => ?changes);
         Ok(())

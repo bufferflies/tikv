@@ -42,6 +42,7 @@ use crate::sys::thread::StdThreadBuildWrapper;
 
 #[macro_use]
 pub mod log;
+pub mod branch_hint;
 pub mod buffer_vec;
 pub mod codec;
 pub mod config;

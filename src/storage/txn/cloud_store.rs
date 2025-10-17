@@ -41,6 +41,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             "CloudStore::get entry";
             "key" => log_wrappers::Value::key(user_key.as_encoded()),
             "start_ts" => ?self.start_ts,
+            "keyspace_id" => self.snapshot.get_keyspace_id(),
             "region_id" => self.snapshot.get_id()
         );
 
@@ -63,6 +64,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             "CloudStore::get result";
             "key" => log_wrappers::Value::key(user_key.as_encoded()),
             "start_ts" => ?self.start_ts,
+            "keyspace_id" => self.snapshot.get_keyspace_id(),
             "region_id" => self.snapshot.get_id(),
             "result" => ?result.as_ref().map(|v| log_wrappers::Value::value(v))
         );
@@ -76,6 +78,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             "CloudStore::incremental_get entry";
             "key" => log_wrappers::Value::key(user_key.as_encoded()),
             "start_ts" => ?self.start_ts,
+            "keyspace_id" => self.snapshot.get_keyspace_id(),
             "region_id" => self.snapshot.get_id()
         );
 
@@ -99,6 +102,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             "CloudStore::incremental_get result";
             "key" => log_wrappers::Value::key(user_key.as_encoded()),
             "start_ts" => ?self.start_ts,
+            "keyspace_id" => self.snapshot.get_keyspace_id(),
             "region_id" => self.snapshot.get_id(),
             "result" => ?result.as_ref().map(|v| log_wrappers::Value::value(v))
         );
@@ -125,6 +129,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             "keys_count" => keys.len(),
             "keys" => ?keys,
             "start_ts" => ?self.start_ts,
+            "keyspace_id" => self.snapshot.get_keyspace_id(),
             "region_id" => self.snapshot.get_id()
         );
 
@@ -140,6 +145,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             "CloudStore::batch_get result";
             "keys_count" => keys.len(),
             "start_ts" => ?self.start_ts,
+            "keyspace_id" => self.snapshot.get_keyspace_id(),
             "region_id" => self.snapshot.get_id(),
             "result" => ?res_vec.iter().map(|r| {
                 match r {
@@ -166,6 +172,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             "CloudStore::scanner entry";
             "desc" => desc,
             "start_ts" => ?self.start_ts,
+            "keyspace_id" => self.snapshot.get_keyspace_id(),
             "region_id" => self.snapshot.get_id(),
             "lower_bound" => ?lower_bound,
             "upper_bound" => ?upper_bound
@@ -793,6 +800,7 @@ impl super::Scanner for CloudStoreScanner {
         txn_debug!(
             "CloudStoreScanner::next";
             "start_ts" => ?self.start_ts,
+            "keyspace_id" => self.snap.get_keyspace_id(),
             "region_id" => self.snap.get_id(),
             "result" => ?result.as_ref().map(|(key, value)| {
                 (key, log_wrappers::Value::value(value))

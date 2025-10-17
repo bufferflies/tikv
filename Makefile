@@ -232,22 +232,6 @@ endif
 unportable_release:
 	ROCKSDB_SYS_PORTABLE=0 make release
 
-# An optimized build with jepsen-debug feature enabled for detailed logging
-# during testing and debugging scenarios.
-release-jepsen-debug: export TIKV_PROFILE=release
-ifeq ($(TIKV_FRAME_POINTER),1)
-release-jepsen-debug:
-	rustup component add rust-src
-	cargo build --release --no-default-features --features "${ENABLE_FEATURES} jepsen-debug" \
-		-Z build-std=core,std,alloc,proc_macro,test \
-		-Z unstable-options \
-		--target "${TIKV_BUILD_RUSTC_TARGET}" \
-		--out-dir "${CARGO_TARGET_DIR}/release"
-else
-release-jepsen-debug:
-	cargo build --release --no-default-features --features "${ENABLE_FEATURES} jepsen-debug"
-endif
-
 # An optimized build with jemalloc memory profiling enabled.
 prof_release:
 	ENABLE_FEATURES=mem-profiling make release
@@ -501,3 +485,4 @@ test-cloud-engine-integration: pre-test
 
 test-cloud-engine-integration-with-nextest:
 	cargo nextest run -P ci -p tests --test cloud_engine --test cloud_engine_failpoints --test cloud_integrations -j 2
+

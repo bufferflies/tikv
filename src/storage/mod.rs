@@ -597,6 +597,8 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             "Storage::get entry";
             "key" => %key,
             "start_ts" => ?start_ts,
+            "keyspace_id" => ctx.get_keyspace_id(),
+            "request_source" => %ctx.get_request_source(),
             "region_id" => ctx.get_region_id(),
             "peer_id" => ctx.get_peer().get_id(),
             "term" => ctx.get_term()
@@ -735,6 +737,8 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         "Storage::get result";
                         "key" => %key,
                         "start_ts" => ?start_ts,
+                        "keyspace_id" => ctx.get_keyspace_id(),
+                        "request_source" => %ctx.get_request_source(),
                         "region_id" => ctx.get_region_id(),
                         "peer_id" => ctx.get_peer().get_id(),
                         "term" => ctx.get_term(),

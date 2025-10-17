@@ -45,9 +45,6 @@ testing = []
 # For debug trace
 debug-trace-txn-tasks = []
 
-# For jepsen testing debug logging
-jepsen-debug = []
-
 [lib]
 name = "tikv"
 

@@ -31,7 +31,6 @@ test-engines-panic = [
 ]
 nortcheck = ["engine_rocks/nortcheck"]
 backup-stream-debug = ["backup-stream/backup-stream-debug"]
-jepsen-debug = ["tikv/jepsen-debug"]
 
 [dependencies]
 api_version = { workspace = true }

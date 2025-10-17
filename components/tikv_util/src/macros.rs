@@ -163,9 +163,9 @@ macro_rules! impl_display_as_debug {
     };
 }
 
-/// Transaction debug logging macro for jepsen-debug feature.
-/// When jepsen-debug feature is enabled, logs at info level for visibility.
-/// Otherwise, logs at debug level.
+/// Transaction debug logging macro controlled by `log.txn-info-logging`.
+/// When promotion is enabled, logs at info level for visibility; otherwise it
+/// logs at debug level.
 ///
 /// This macro supports both slog-style structured logging and standard format
 /// strings:
@@ -176,23 +176,17 @@ macro_rules! impl_display_as_debug {
 macro_rules! txn_debug {
     // slog-style: message; key-value pairs
     ($msg:expr; $($args:tt)*) => {
-        #[cfg(feature = "jepsen-debug")]
-        {
+        if $crate::logger::unlikely($crate::logger::txn_info_logging_enabled()) {
             info!($msg; $($args)*);
-        }
-        #[cfg(not(feature = "jepsen-debug"))]
-        {
+        } else {
             debug!($msg; $($args)*);
         }
     };
     // Standard format string style: message with format args
     ($($arg:tt)+) => {
-        #[cfg(feature = "jepsen-debug")]
-        {
+        if $crate::logger::unlikely($crate::logger::txn_info_logging_enabled()) {
             log::info!($($arg)+);
-        }
-        #[cfg(not(feature = "jepsen-debug"))]
-        {
+        } else {
             log::debug!($($arg)+);
         }
     };

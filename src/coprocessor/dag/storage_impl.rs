@@ -92,7 +92,22 @@ impl<S: Store> Storage for TikvStorage<S> {
             .next()
             .await
             .map_err(Error::from)?;
-        Ok(kv.map(|(k, v)| (k.into_raw().unwrap(), v)))
+        let kv = kv.map(|(k, v)| (k.into_raw().unwrap(), v));
+        if let Some((ref key, ref value)) = kv.as_ref() {
+            let read_ts = self.store.get_read_ts();
+            let snap_info = self
+                .get_kvengine_snap()
+                .map(|snap| (snap.get_keyspace_id(), snap.get_id()));
+            txn_debug!(
+                "TikvStorage::scan_next";
+                "read_ts" => read_ts,
+                "keyspace_id" => snap_info.map(|(keyspace, _)| keyspace),
+                "region_id" => snap_info.map(|(_, region)| region),
+                "key" => log_wrappers::Value::key(key.as_slice()),
+                "value" => log_wrappers::Value::value(value.as_slice()),
+            );
+        }
+        Ok(kv)
     }
 
     #[maybe_async]

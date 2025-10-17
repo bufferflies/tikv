@@ -650,6 +650,41 @@ impl<E: Engine> Endpoint<E> {
                 .boxed();
             }
         }
+        {
+            let ctx_ref = req.get_context();
+            let keyspace_id = ctx_ref.get_keyspace_id();
+            let region_id = ctx_ref.get_region_id();
+            let range_count = req.get_ranges().len();
+            let first_range = req
+                .get_ranges()
+                .first()
+                .map(|r| (r.get_start().to_vec(), r.get_end().to_vec()));
+            let last_range = req
+                .get_ranges()
+                .last()
+                .map(|r| (r.get_start().to_vec(), r.get_end().to_vec()));
+            txn_debug!(
+                "Coprocessor request entry";
+                "start_ts" => req.start_ts,
+                "keyspace_id" => keyspace_id,
+                "region_id" => region_id,
+                "range_count" => range_count,
+                "first_range_start" => first_range
+                    .as_ref()
+                    .map(|r| log_wrappers::Value::key(&r.0)),
+                "first_range_end" => first_range
+                    .as_ref()
+                    .map(|r| log_wrappers::Value::key(&r.1)),
+                "last_range_start" => last_range
+                    .as_ref()
+                    .map(|r| log_wrappers::Value::key(&r.0)),
+                "last_range_end" => last_range
+                    .as_ref()
+                    .map(|r| log_wrappers::Value::key(&r.1)),
+                "request_source" => %ctx_ref.get_request_source(),
+                "peer" => ?peer
+            );
+        }
         let tracker = GLOBAL_TRACKERS.insert(::tracker::Tracker::new(RequestInfo::new(
             req.get_context(),
             RequestType::Unknown,

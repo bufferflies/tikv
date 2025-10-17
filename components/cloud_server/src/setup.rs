@@ -156,6 +156,7 @@ pub fn initial_logger(config: &TikvConfig) {
         let drainer = logger::LogDispatcher::new(normal, rocksdb, raftdb, slow);
         let level = config.log.level;
         let slow_threshold = config.slow_log_threshold.as_millis();
+        logger::set_txn_info_logging(config.log.txn_info_logging);
         logger::init_log(drainer, level.into(), true, true, vec![], slow_threshold).unwrap_or_else(
             |e| {
                 fatal!("failed to initialize log: {}", e);

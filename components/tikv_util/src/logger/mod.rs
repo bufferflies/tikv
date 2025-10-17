@@ -8,7 +8,7 @@ use std::{
     io::{self, BufWriter},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
     },
     thread,
@@ -21,6 +21,7 @@ use slog_async::{Async, AsyncGuard, OverflowStrategy};
 use slog_term::{Decorator, PlainDecorator, RecordDecorator};
 
 use self::file_log::{RotateBySize, RotatingFileLogger, RotatingFileLoggerBuilder};
+pub use crate::branch_hint::{likely, unlikely};
 use crate::config::{ReadableDuration, ReadableSize};
 
 // Default is 128.
@@ -32,6 +33,7 @@ const SLOG_CHANNEL_OVERFLOW_STRATEGY: OverflowStrategy = OverflowStrategy::Drop;
 const TIMESTAMP_FORMAT: &str = "%Y/%m/%d %H:%M:%S%.3f %:z";
 
 static LOG_LEVEL: AtomicUsize = AtomicUsize::new(usize::max_value());
+static TXN_INFO_LOGGING: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "env-logger")]
 pub type LevelFilter<D> = slog_envlogger::EnvLogger<D>;
@@ -296,6 +298,14 @@ pub fn set_log_level(new_level: Level) {
     LOG_LEVEL.store(new_level.as_usize(), Ordering::SeqCst);
     // also change std log to new level.
     let _ = slog_global::redirect_std_log(Some(new_level));
+}
+
+pub fn set_txn_info_logging(enable: bool) {
+    TXN_INFO_LOGGING.store(enable, Ordering::Relaxed);
+}
+
+pub fn txn_info_logging_enabled() -> bool {
+    TXN_INFO_LOGGING.load(Ordering::Relaxed)
 }
 
 pub struct TikvFormat<D>
