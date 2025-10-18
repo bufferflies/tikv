@@ -18,8 +18,8 @@ use fail::fail_point;
 use kvengine::{
     ia::ia_auto_file::report_transitions, table::schema_file::SchemaFile,
     table_id::is_table_boundary_key, CheckMergeResult, IdVer, Shard, DEL_PREFIXES_KEY,
-    MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE, MANUAL_MAJOR_COMPACTION_ENABLE,
-    MANUAL_MAJOR_COMPACTION_ENABLE_COLUMNAR, MAX_COLUMNAR_TABLES_IN_SHARD, TERM_KEY,
+    LARGE_NUM_COLUMNAR_TABLES_IN_SHARD, MANUAL_MAJOR_COMPACTION, MANUAL_MAJOR_COMPACTION_DISABLE,
+    MANUAL_MAJOR_COMPACTION_ENABLE, MANUAL_MAJOR_COMPACTION_ENABLE_COLUMNAR, TERM_KEY,
 };
 use kvproto::{
     import_sstpb::SwitchMode,
@@ -1302,7 +1302,7 @@ impl<'a> PeerMsgHandler<'a> {
                 t.and_then(|s: String| s.parse::<usize>().ok())
             })
             .flatten()
-            .unwrap_or(MAX_COLUMNAR_TABLES_IN_SHARD * 3 / 2);
+            .unwrap_or(LARGE_NUM_COLUMNAR_TABLES_IN_SHARD * 3);
             if estimated_size >= region_max_size
                 || estimated_entries >= region_max_entries
                 || table_count > max_tables_threshold

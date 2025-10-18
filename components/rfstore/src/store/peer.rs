@@ -19,7 +19,8 @@ use kvengine::{
     metrics::ENGINE_DUPLICATED_CHANGE_SET_COUNTER,
     set_shard_property,
     util::{estimated_entries_by_table_count, PropertiesHelper},
-    FilePrepareType, ShardMeta, ENCRYPTION_KEY, MAX_COLUMNAR_TABLES_IN_SHARD, STORAGE_CLASS_KEY,
+    FilePrepareType, ShardMeta, ENCRYPTION_KEY, LARGE_NUM_COLUMNAR_TABLES_IN_SHARD,
+    STORAGE_CLASS_KEY,
 };
 use kvproto::{
     disk_usage::DiskUsage,
@@ -1535,7 +1536,7 @@ impl Peer {
             .shard_meta
             .as_ref()
             .map(|shard_meta| {
-                if shard_meta.columnar_table_ids.len() > MAX_COLUMNAR_TABLES_IN_SHARD {
+                if shard_meta.columnar_table_ids.len() > LARGE_NUM_COLUMNAR_TABLES_IN_SHARD {
                     estimated_entries_by_table_count(shard_meta.columnar_table_ids.len())
                 } else {
                     self.peer_stat.approximate_keys

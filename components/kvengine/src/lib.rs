@@ -90,4 +90,4 @@ pub const COLUMNAR_LEVELS: usize = 3;
 
 pub const WRITE_CF_BOTTOM_LEVEL: u32 = 3;
 
-pub const MAX_COLUMNAR_TABLES_IN_SHARD: usize = 256;
+pub const LARGE_NUM_COLUMNAR_TABLES_IN_SHARD: usize = 256;
