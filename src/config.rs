@@ -3526,18 +3526,6 @@ impl TikvConfig {
             );
             self.rocksdb.auto_tuned = None;
         }
-        // When shared block cache is enabled, if its capacity is set, it overrides
-        // individual block cache sizes. Otherwise use the sum of block cache
-        // size of all column families as the shared cache size.
-        let cache_cfg = &mut self.storage.block_cache;
-        if cache_cfg.shared && cache_cfg.capacity.is_none() {
-            cache_cfg.capacity = Some(ReadableSize(
-                self.rocksdb.defaultcf.block_cache_size.0
-                    + self.rocksdb.writecf.block_cache_size.0
-                    + self.rocksdb.lockcf.block_cache_size.0
-                    + self.raftdb.defaultcf.block_cache_size.0,
-            ));
-        }
         if self.backup.sst_max_size.0 < default_coprocessor.region_max_size().0 / 10 {
             warn!(
                 "override backup.sst-max-size with min sst-max-size, {:?}",

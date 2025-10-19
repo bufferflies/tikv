@@ -307,9 +307,10 @@ pub struct BlockCacheConfig {
 
 impl Default for BlockCacheConfig {
     fn default() -> BlockCacheConfig {
+        let total_mem = SysQuota::memory_limit_in_bytes();
         BlockCacheConfig {
             shared: true,
-            capacity: None,
+            capacity: Some(ReadableSize(((total_mem as f64) * BLOCK_CACHE_RATE) as u64)),
             num_shard_bits: 6,
             strict_capacity_limit: false,
             high_pri_pool_ratio: 0.8,
