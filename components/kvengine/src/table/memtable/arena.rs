@@ -237,7 +237,7 @@ impl ArenaSegment {
         let new_block_idx = block_idx + 1;
         let mut new_block_size = block_cap(block_idx);
         if new_block_size < min_size {
-            new_block_size = min_size;
+            new_block_size = (min_size + BLOCK_ALIGN - 1) & ALIGN_MASK;
         }
         let new_block = Box::into_raw(Box::new(ArenaBlock::new(new_block_size)));
         self.blocks[new_block_idx].store(new_block, Ordering::Release);
