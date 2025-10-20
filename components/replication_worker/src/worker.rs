@@ -36,7 +36,9 @@ use kvproto::{
     tikvpb::create_tikv,
 };
 use log_wrappers::Value as LogValue;
-use merged_engine::{ForceStop, MergedEngine, MergedEngineContext, StoreProgress};
+use merged_engine::{
+    peer_is_skippable, ForceStop, MergedEngine, MergedEngineContext, StoreProgress,
+};
 use native_br::{
     common::{assemble_wal_chunks, collect_wal_chunks_with_retry, CollectWalChunksContext},
     wal::AssembledWalData,
@@ -497,9 +499,10 @@ impl ReplicationWorker {
             cb(Err(Error::OtherError("keyspace not found".into())));
             return;
         }
+        let merged_store_id = self.merged_store_id();
         let task_svc = self.keyspaces.get_mut(&keyspace_id).unwrap();
         let pd_client = task_svc.get_pd_client();
-        Self::report_store_to_pd(&pd_client, self.ctx.config.merged_store_id);
+        Self::report_store_to_pd(&pd_client, merged_store_id);
         let keyspace_region_ids = self.merged_engine.get_keyspace_regions(keyspace_id);
         let raft = self.merged_engine.get_raft();
         for region_id in keyspace_region_ids {
@@ -881,7 +884,8 @@ impl ReplicationWorker {
             return Ok(());
         }
 
-        info!("send_resolved_ts"; "last_update_time" => self.last_update_ts);
+        let merged_store_id = self.merged_store_id();
+        info!("{} send_resolved_ts", merged_store_id; "last_update_time" => self.last_update_ts);
         self.resolved_regions.clear();
         for (&region_id, delegate) in &mut self.region_delegates {
             try_force_stop_err!(self);
@@ -892,7 +896,7 @@ impl ReplicationWorker {
             else {
                 continue;
             };
-            debug!("{} send_resolved_ts: ts: {}", region_id, ts);
+            debug!("{}:{} send_resolved_ts: {}", merged_store_id, region_id, ts);
             for (req_key, req_info) in delegate.requests.iter_mut() {
                 if req_info.resolved_ts != ts && req_info.state.is_initialized() {
                     debug_assert!(req_info.resolved_ts < ts);
@@ -974,9 +978,17 @@ impl ReplicationWorker {
                     // The region may have been merged.
                     continue;
                 };
+                let tag = ShardTag::from_region(None, region_local_state.get_region());
+                if peer_is_skippable(&region_local_state) {
+                    debug!("{} report_region: skip", tag);
+                    continue;
+                }
+
                 let mut region = region_local_state.take_region();
                 region.set_start_key(Self::trim_keyspace_prefix(region.get_start_key()));
                 region.set_end_key(Self::trim_keyspace_prefix(region.get_end_key()));
+                debug!("{} report_region", tag; "region" => ?region);
+
                 let leader = region.get_peers()[0].clone();
                 let mut stats = RegionStat::default();
                 stats.approximate_kv_size = 100 * 1024 * 1024;
@@ -990,7 +1002,7 @@ impl ReplicationWorker {
                         // The keyspace has been removed.
                         return;
                     }
-                    warn!("failed to heartbeat region {} {:?}", region_id, err);
+                    warn!("{} report_region failed: {:?}", tag, err);
                     continue;
                 }
             }
@@ -1226,7 +1238,8 @@ impl ReplicationWorker {
     }
 
     fn report_region_to_rep_pd(rep_pd_cli: &Arc<dyn PdClient>, region: metapb::Region) {
-        info!("{} report region to pd event {:?}", region.id, region);
+        let tag = ShardTag::from_region(None, &region);
+        info!("{} report_region_to_rep_pd: {:?}", tag, region);
         let leader = region.get_peers()[0].clone();
         let mut stats = RegionStat::default();
         stats.approximate_kv_size = 100 * 1024 * 1024;
@@ -1235,7 +1248,7 @@ impl ReplicationWorker {
         let resp = rep_pd_cli.region_heartbeat(1, region, leader, stats, None);
         tokio::spawn(async move {
             if let Err(err) = resp.await {
-                warn!("region heartbeat failed"; "err" => ?err);
+                warn!("{} report_region_to_rep_pd failed", tag; "err" => ?err);
             }
         });
     }

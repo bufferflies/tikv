@@ -33,7 +33,10 @@ impl Preprocessor {
     ) -> Option<Self> {
         let shard_meta =
             rfstore::store::load_engine_meta(raft, store_id, region_id).or_else(|| {
-                info!("{} new_preprocessor: no engine meta for region", region_id);
+                info!(
+                    "{}:{} new_preprocessor: no engine meta for region",
+                    store_id, region_id
+                );
                 None
             })?;
         let encryption_key = shard_meta

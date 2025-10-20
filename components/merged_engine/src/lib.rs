@@ -58,7 +58,7 @@ use security::SecurityConfig;
 use serde_derive::{Deserialize, Serialize};
 use tikv::config::TikvConfig;
 use tikv_util::{
-    box_try,
+    box_err, box_try,
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     debug, error, info, mpsc, trace, warn,
 };
@@ -301,27 +301,30 @@ impl MergedEngine {
         raft.set_engine_id(merged_store_id);
         let manifest_dir = ctx.local_dir.join("manifest");
         let mut manifest = Manifest::open(&manifest_dir)?;
-        let region_progresses = if manifest.store_progresses.is_empty() {
+        let (region_progresses, tombstone_regions) = if manifest.store_progresses.is_empty() {
             let (region_progresses, store_progresses) =
                 Self::recover_from_backup(&ctx, backup_meta, &raft)?;
             manifest.store_progresses = store_progresses;
             // Note: manifest is not persisted here to avoid saving all entries. If
             // replication worker restart before next loop, we will recover from backup
             // again.
-            region_progresses
+            (region_progresses, HashSet::default())
         } else {
             Self::recover_from_merged_raft_engine(&raft, &manifest.uncommitted_entries)?
         };
         let mut preprocessors = HashMap::default();
         for (region_id, _) in raft.get_region_peer_map() {
-            if region_id == 0 {
+            if region_id == 0 || tombstone_regions.contains(&region_id) {
                 continue;
             }
             tikv_util::set_current_region(region_id);
             let Some(processor) =
                 Preprocessor::new(&raft, merged_store_id, region_id, &ctx.master_key)
             else {
-                error!("{} failed to create preprocessor", region_id);
+                error!(
+                    "{}:{} failed to create preprocessor",
+                    merged_store_id, region_id
+                );
                 debug_assert!(false);
                 continue;
             };
@@ -346,8 +349,13 @@ impl MergedEngine {
                 &kv,
                 recover_handler.clone(),
                 &manifest.keyspace_states,
+                Some(&tombstone_regions),
             )
         })?;
+
+        // Should be invoked after `load_shards_impl` (to setup the dependency).
+        let delay_destroy_regions =
+            box_try!(Self::destroy_regions_on_startup(&raft, tombstone_regions));
 
         let (store_sender, store_receiver) = mpsc::unbounded();
         let (peer_sender, peer_receiver) = mpsc::unbounded();
@@ -362,7 +370,7 @@ impl MergedEngine {
             recover_handler,
             preprocessors,
             appliers: HashMap::default(),
-            delay_destroy_regions: HashSet::default(),
+            delay_destroy_regions,
             _store_receiver: store_receiver,
             peer_receiver,
             router,
@@ -408,8 +416,10 @@ impl MergedEngine {
         kv: &kvengine::Engine,
         mut recoverer: RecoverHandler,
         keyspace_states: &HashMap<u32, Bytes>,
+        tombstone_regions: Option<&HashSet<u64 /* region_id */>>,
     ) -> Result<()> {
-        let metas = Self::load_shard_metas_impl(ctx, &mut recoverer, keyspace_states)?;
+        let metas =
+            Self::load_shard_metas_impl(ctx, &mut recoverer, keyspace_states, tombstone_regions)?;
         kv.load_shards(metas, recoverer, None)?;
         Ok(())
     }
@@ -418,11 +428,15 @@ impl MergedEngine {
         ctx: &MergedEngineContext,
         recoverer: &mut RecoverHandler,
         keyspace_states: &HashMap<u32, Bytes>,
+        tombstone_regions: Option<&HashSet<u64 /* region_id */>>,
     ) -> Result<StdHashMap<u64 /* region_id */, ShardMeta>> {
         let engine_id = ctx.config.merged_store_id;
         let mut metas = StdHashMap::default();
         recoverer.iterate(|cs| {
             debug_assert!(cs.has_snapshot());
+            if tombstone_regions.is_some_and(|x| x.contains(&cs.shard_id)) {
+                return;
+            }
             let keyspace_id = get_keyspace_id_of_snapshot(cs.get_snapshot());
             if keyspace_states.contains_key(&keyspace_id) {
                 let meta = ShardMeta::new(engine_id, &cs);
@@ -439,6 +453,7 @@ impl MergedEngine {
             &self.kv,
             self.recover_handler.clone(),
             keyspace_states,
+            None,
         )
     }
 
@@ -449,7 +464,7 @@ impl MergedEngine {
         let mut states = HashMap::with_capacity(1);
         states.insert(keyspace_id, Bytes::new());
         let mut recoverer = self.recover_handler.clone();
-        Self::load_shard_metas_impl(&self.ctx, &mut recoverer, &states)
+        Self::load_shard_metas_impl(&self.ctx, &mut recoverer, &states, None)
     }
 
     pub fn close(&self) {
@@ -652,8 +667,13 @@ impl MergedEngine {
     fn recover_from_merged_raft_engine(
         merged_raft: &RfEngine,
         uncommitted_entries: &UncommittedEntries,
-    ) -> Result<HashMap<u64, RegionProgress>> {
+    ) -> Result<(
+        HashMap<u64, RegionProgress>,
+        HashSet<u64>, // tombstone_regions
+    )> {
+        let merged_store_id = merged_raft.get_engine_id();
         let mut region_progresses = HashMap::default();
+        let mut tombstone_regions = HashSet::default();
 
         // Get region progresses from RfEngine.
         let region_peers_map = merged_raft.get_region_peer_map();
@@ -661,11 +681,45 @@ impl MergedEngine {
             if region_id == 0 {
                 continue;
             }
-            let region_state = rfstore::store::load_last_peer_state(merged_raft, peer_id).unwrap();
-            let tag = ShardTag::from_region(None, region_state.get_region());
+            let tag = ShardTag::new(merged_store_id, IdVer::new(region_id, 0));
+
+            let Some(region_state) = rfstore::store::load_last_peer_state(merged_raft, peer_id)
+            else {
+                // The region is destroyed.
+                let states = merged_raft.get_peer_all_states(peer_id, false);
+                info!("{} recover_from_merged_raft_engine: no peer state, skip", tag;
+                        "peer" => peer_id, "states" => ?states);
+                continue;
+            };
             let region_version = region_state.get_region().get_region_epoch().get_version();
-            let raft_state =
-                rfstore::store::load_peer_raft_state(merged_raft, peer_id, region_version).unwrap();
+            let tag = tag.with_region_version(region_version);
+
+            if region_state.state == PeerState::Tombstone {
+                // The dependency is not setup yet. So tombstone regions should not be skipped
+                // here.
+                debug!("{} recover_from_merged_raft_engine: tombstone region", tag;
+                    "region_state" => ?region_state);
+                tombstone_regions.insert(region_id);
+            }
+            if !is_region_initialized(region_state.get_region()) {
+                // Should not happen, not initialized region is skipped during
+                // `recover_from_backup` & `update_wal`.
+                error!("{} recover_from_merged_raft_engine: region not initialized", tag;
+                    "region_state" => ?region_state);
+                debug_assert!(false);
+                return Err(box_err!("region not initialized: {}", region_id));
+            }
+
+            let Some(raft_state) =
+                rfstore::store::load_peer_raft_state(merged_raft, peer_id, region_version)
+            else {
+                let states = merged_raft.get_peer_all_states(peer_id, false);
+                warn!("{} recover_from_merged_raft_engine: no raft state", tag;
+                        "peer" => peer_id, "states" => ?states);
+                debug_assert!(false);
+                continue;
+            };
+
             let keyspace_id =
                 ApiV2::get_u32_keyspace_id_by_key(region_state.get_region().get_start_key())
                     .unwrap_or_default();
@@ -712,7 +766,7 @@ impl MergedEngine {
             );
         }
 
-        Ok(region_progresses)
+        Ok((region_progresses, tombstone_regions))
     }
 
     fn setup_raft_engine(
@@ -1325,6 +1379,40 @@ impl MergedEngine {
         }
     }
 
+    fn destroy_regions_on_startup(
+        raft: &RfEngine,
+        tombstone_regions: HashSet<u64>,
+    ) -> Result<HashSet<u64> /* delay_destroy_regions */> {
+        let mut delay_destroy_regions = HashSet::default();
+        if tombstone_regions.is_empty() {
+            return Ok(delay_destroy_regions);
+        }
+
+        let merged_store_id = raft.get_engine_id();
+        let get_region_tag = |region_id| ShardTag::new(merged_store_id, IdVer::new(region_id, 0));
+
+        let mut raft_wb = rfengine::WriteBatch::new();
+        for region_id in tombstone_regions {
+            if raft.has_dependents(region_id) {
+                info!("{} delay destroy", get_region_tag(region_id));
+                delay_destroy_regions.insert(region_id);
+                continue;
+            }
+
+            info!("{} destroy", get_region_tag(region_id));
+            raft.iterate_peer_states(region_id, false, |k, _| {
+                raft_wb.set_state_bytes(region_id, region_id, k.clone(), Bytes::new());
+                true
+            });
+            raft_wb.truncate_raft_log(region_id, region_id, TRUNCATE_ALL_INDEX);
+        }
+
+        if !raft_wb.is_empty() {
+            box_try!(raft.write(raft_wb));
+        }
+        Ok(delay_destroy_regions)
+    }
+
     fn new_applier(
         shard: &Shard,
         preprocess_ref: PreprocessRef<'_>,
@@ -1641,7 +1729,7 @@ fn fetch_raft_entries_to_region_progress(
     Ok(())
 }
 
-fn peer_is_skippable(region_local_state: &RegionLocalState) -> bool {
+pub fn peer_is_skippable(region_local_state: &RegionLocalState) -> bool {
     // `start_key` is empty if region is not initialized, and we will get incorrect
     // keyspace.
     region_local_state.state == PeerState::Tombstone
