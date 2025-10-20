@@ -319,11 +319,10 @@ fn block_cap(idx: usize) -> u32 {
     } else if idx >= MAX_NUM_BLOCKS / 2 {
         1024 * 1024
     } else {
-        let mut cap = (idx as u32 + 1) * 32 * 1024;
-        if cap > 640 * 1024 {
-            cap = 640 * 1024
-        }
-        cap
+        // Exponential growth for every 4 idx:
+        //   1K, 1K, 1K, 1K, 2K, 2K, 2k, 2K, ...
+        // starts from idx 36 to idx 127, the values is always 512KB.
+        1 << ((idx / 4).min(9) + 10)
     }
 }
 
@@ -436,5 +435,36 @@ mod tests {
         assert!(result.is_err());
         let max_total_size = arena.values.total_size.load(Ordering::Acquire);
         assert_eq!(max_total_size - total_size, MAX_VAL_SIZE * 60);
+    }
+
+    #[test]
+    fn test_block_capacity() {
+        assert_eq!(block_cap(0), 1024);
+        assert_eq!(block_cap(4), 2048);
+        assert_eq!(block_cap(8), 4096);
+        assert_eq!(block_cap(12), 8192);
+        assert_eq!(block_cap(16), 16384);
+        assert_eq!(block_cap(20), 32768);
+        assert_eq!(block_cap(24), 65536);
+        assert_eq!(block_cap(28), 131072);
+        assert_eq!(block_cap(32), 262144);
+        for idx in 36..128 {
+            assert_eq!(block_cap(idx), 512 * 1024);
+        }
+        for idx in 128..192 {
+            assert_eq!(block_cap(idx), 1024 * 1024);
+        }
+        for idx in 192..224 {
+            assert_eq!(block_cap(idx), 2 * 1024 * 1024);
+        }
+        for idx in 224..256 {
+            assert_eq!(block_cap(idx), 16 * 1024 * 1024);
+        }
+        let mut sum = 0;
+        for idx in 0..255 {
+            sum += block_cap(idx);
+        }
+        // There is sufficient memory before switch mem-table.
+        assert!(sum > 640 * 1024 * 1024);
     }
 }
