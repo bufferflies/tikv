@@ -141,12 +141,14 @@ macro_rules! handle_request {
         fn $fn_name(&mut self, ctx: RpcContext<'_>, req: $req_ty, sink: UnarySink<$resp_ty>) {
             forward_unary!(self.proxy, $fn_name, ctx, req, sink);
             let begin_instant = Instant::now_coarse();
-            let keyspace_id = req.get_context().get_keyspace_id();
+
             let resp = $future_name(&self.storage, req);
             let task = async move {
                 let resp = resp.await?;
                 sink.success(resp).await?;
-                record_request_grpc_metrics(stringify!($fn_name), keyspace_id, begin_instant.saturating_elapsed());
+                GRPC_MSG_HISTOGRAM_STATIC
+                    .$fn_name
+                    .observe(begin_instant.saturating_elapsed().as_secs_f64());
                 ServerResult::Ok(())
             }
             .map_err(|e| {
@@ -262,16 +264,13 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
     fn coprocessor(&mut self, ctx: RpcContext<'_>, req: Request, sink: UnarySink<Response>) {
         forward_unary!(self.proxy, coprocessor, ctx, req, sink);
         let begin_instant = Instant::now_coarse();
-        let keyspace_id = req.get_context().get_keyspace_id();
         let future = future_copr(&self.copr, Some(ctx.peer()), req);
         let task = async move {
             let resp = future.await?.consume();
             sink.success(resp).await?;
-            record_request_grpc_metrics(
-                GrpcTypeKind::coprocessor.get_str(),
-                keyspace_id,
-                begin_instant.saturating_elapsed(),
-            );
+            GRPC_MSG_HISTOGRAM_STATIC
+                .coprocessor
+                .observe(begin_instant.saturating_elapsed().as_secs_f64());
             ServerResult::Ok(())
         }
         .map_err(|e| {
@@ -293,16 +292,13 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         sink: UnarySink<DelegateResponse>,
     ) {
         let begin_instant = Instant::now_coarse();
-        let keyspace_id = req.get_context().get_keyspace_id();
         let future = self.copr.handle_delegate_request(req);
         let task = async move {
             let resp = future.await;
             sink.success(resp).await?;
-            record_request_grpc_metrics(
-                GrpcTypeKind::delegate_coprocessor.get_str(),
-                keyspace_id,
-                begin_instant.saturating_elapsed(),
-            );
+            GRPC_MSG_HISTOGRAM_STATIC
+                .delegate_coprocessor
+                .observe(begin_instant.saturating_elapsed().as_secs_f64());
             ServerResult::Ok(())
         }
         .map_err(|e| {
@@ -326,7 +322,6 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         let begin_instant = Instant::now_coarse();
         let start = req.take_start_key();
         let end = req.take_end_key();
-        let keyspace_id = req.get_context().get_keyspace_id();
         // DestroyRange is a very dangerous operation. We don't allow passing MIN_KEY as
         // start, or MAX_KEY as end here.
         if start.is_empty()
@@ -458,11 +453,9 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                 }
             }
             sink.success(resp).await?;
-            record_request_grpc_metrics(
-                GrpcTypeKind::unsafe_destroy_range.get_str(),
-                keyspace_id,
-                begin_instant.saturating_elapsed(),
-            );
+            GRPC_MSG_HISTOGRAM_STATIC
+                .unsafe_destroy_range
+                .observe(begin_instant.saturating_elapsed().as_secs_f64());
             ServerResult::Ok(())
         }
         .map_err(|e| {
@@ -483,7 +476,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         mut sink: ServerStreamingSink<Response>,
     ) {
         let begin_instant = Instant::now_coarse();
-        let keyspace_id = req.get_context().get_keyspace_id();
+
         let mut stream = self
             .copr
             .parse_and_handle_stream_request(req, Some(ctx.peer()))
@@ -496,11 +489,9 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         let future = async move {
             match sink.send_all(&mut stream).await.map_err(Error::from) {
                 Ok(_) => {
-                    record_request_grpc_metrics(
-                        GrpcTypeKind::coprocessor_stream.get_str(),
-                        keyspace_id,
-                        begin_instant.saturating_elapsed(),
-                    );
+                    GRPC_MSG_HISTOGRAM_STATIC
+                        .coprocessor_stream
+                        .observe(begin_instant.saturating_elapsed().as_secs_f64());
                     let _ = sink.close().await;
                 }
                 Err(e) => {
@@ -602,7 +593,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
     ) {
         forward_unary!(self.proxy, split_region, ctx, req, sink);
         let begin_instant = Instant::now_coarse();
-        let keyspace_id = req.get_context().get_keyspace_id();
+
         let region_id = req.get_context().get_region_id();
         let (cb, f) = paired_future_callback();
         let mut split_keys = if !req.get_split_key().is_empty() {
@@ -652,11 +643,9 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                 }
             }
             sink.success(resp).await?;
-            record_request_grpc_metrics(
-                GrpcTypeKind::split_region.get_str(),
-                keyspace_id,
-                begin_instant.saturating_elapsed(),
-            );
+            GRPC_MSG_HISTOGRAM_STATIC
+                .split_region
+                .observe(begin_instant.saturating_elapsed().as_secs_f64());
             ServerResult::Ok(())
         }
         .map_err(|e| {
@@ -679,7 +668,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
     ) {
         forward_unary!(self.proxy, read_index, ctx, req, sink);
         let begin_instant = Instant::now_coarse();
-        let keyspace_id = req.get_context().get_keyspace_id();
+
         let region_id = req.get_context().get_region_id();
         let mut cmd = RaftCmdRequest::default();
         let mut header = RaftRequestHeader::default();
@@ -736,11 +725,9 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                 }
             }
             sink.success(resp).await?;
-            record_request_grpc_metrics(
-                GrpcTypeKind::read_index.get_str(),
-                keyspace_id,
-                begin_instant.saturating_elapsed(),
-            );
+            GRPC_MSG_HISTOGRAM_STATIC
+                .read_index
+                .observe(begin_instant.saturating_elapsed_secs());
             ServerResult::Ok(())
         }
         .map_err(|e| {
@@ -813,13 +800,10 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
                     label,
                     begin,
                     source: _,
-                    keyspace_id,
                 } = measure;
-                record_request_grpc_metrics(
-                    label.get_str(),
-                    keyspace_id,
-                    begin.saturating_elapsed(),
-                );
+                GRPC_MSG_HISTOGRAM_STATIC
+                    .get(label)
+                    .observe(begin.saturating_elapsed_secs());
             }
 
             let mut r = item.batch_resp;
@@ -875,7 +859,6 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             let regions = resp.await?;
             GRPC_MSG_HISTOGRAM_STATIC
                 .check_leader
-                .default
                 .observe(begin_instant.saturating_elapsed().as_secs_f64());
             let mut resp = CheckLeaderResponse::default();
             resp.set_ts(ts);
@@ -1130,7 +1113,6 @@ fn response_batch_commands_request<F, T>(
     tx: Sender<MeasuredSingleResponse>,
     begin: Instant,
     label: GrpcTypeKind,
-    keyspace_id: u32,
 ) where
     MemoryTraceGuard<batch_commands_response::Response>: From<T>,
     F: Future<Output = Result<T, ()>> + Send + 'static,
@@ -1141,7 +1123,6 @@ fn response_batch_commands_request<F, T>(
                 begin,
                 label,
                 source: String::default(),
-                keyspace_id,
             };
             let task = MeasuredSingleResponse::new(id, resp, measure);
             if let Err(e) = tx.send_with(task, WakePolicy::Immediately) {
@@ -1162,7 +1143,6 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
     req: batch_commands_request::Request,
     tx: &Sender<MeasuredSingleResponse>,
 ) {
-    let begin_instant = Instant::now();
     match req.cmd {
         None => {
             let begin_instant = Instant::now();
@@ -1173,7 +1153,6 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::invalid,
-                0_u32,
             );
         }
         Some(batch_commands_request::request::Cmd::Get(req)) => {
@@ -1183,7 +1162,7 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
             {
                 batcher.as_mut().unwrap().add_get_request(req, id);
             } else {
-                let keyspace_id = req.get_context().get_keyspace_id();
+                let begin_instant = Instant::now();
                 let resp = future_get(storage, req)
                     .map_ok(|resp| batch_commands_response::Response {
                         cmd: Some(batch_commands_response::response::Cmd::Get(resp)),
@@ -1196,12 +1175,11 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                     tx.clone(),
                     begin_instant,
                     GrpcTypeKind::kv_get,
-                    keyspace_id,
                 );
             }
         }
         Some(batch_commands_request::request::Cmd::Coprocessor(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_copr(copr, Some(peer.to_string()), req)
                 .map_ok(|resp| {
                     resp.map(|resp| batch_commands_response::Response {
@@ -1216,11 +1194,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::coprocessor,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::Scan(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_scan(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::Scan(resp)),
@@ -1233,11 +1210,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_scan,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::Prewrite(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_prewrite(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::Prewrite(resp)),
@@ -1250,11 +1226,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_prewrite,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::Commit(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_commit(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::Commit(resp)),
@@ -1267,11 +1242,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_commit,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::Cleanup(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_cleanup(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::Cleanup(resp)),
@@ -1284,11 +1258,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_cleanup,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::BatchGet(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_batch_get(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::BatchGet(resp)),
@@ -1301,11 +1274,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_batch_get,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::BatchRollback(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_batch_rollback(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::BatchRollback(resp)),
@@ -1318,11 +1290,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_batch_rollback,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::TxnHeartBeat(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_txn_heart_beat(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::TxnHeartBeat(resp)),
@@ -1335,11 +1306,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_txn_heart_beat,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::CheckTxnStatus(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_check_txn_status(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::CheckTxnStatus(resp)),
@@ -1352,11 +1322,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_check_txn_status,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::CheckSecondaryLocks(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_check_secondary_locks(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::CheckSecondaryLocks(
@@ -1371,11 +1340,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_check_secondary_locks,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::ScanLock(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_scan_lock(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::ScanLock(resp)),
@@ -1388,11 +1356,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_scan_lock,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::ResolveLock(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_resolve_lock(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::ResolveLock(resp)),
@@ -1405,11 +1372,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_resolve_lock,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::Gc(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_gc(req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::Gc(resp)),
@@ -1422,11 +1388,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_gc,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::DeleteRange(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_delete_range(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::DeleteRange(resp)),
@@ -1439,11 +1404,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_delete_range,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::PessimisticLock(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_acquire_pessimistic_lock(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::PessimisticLock(
@@ -1458,11 +1422,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_pessimistic_lock,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::PessimisticRollback(req)) => {
-            let keyspace_id = req.get_context().get_keyspace_id();
+            let begin_instant = Instant::now();
             let resp = future_pessimistic_rollback(storage, req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::PessimisticRollback(
@@ -1477,10 +1440,10 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::kv_pessimistic_rollback,
-                keyspace_id,
             );
         }
         Some(batch_commands_request::request::Cmd::Empty(req)) => {
+            let begin_instant = Instant::now();
             let resp = future_handle_empty(req)
                 .map_ok(|resp| batch_commands_response::Response {
                     cmd: Some(batch_commands_response::response::Cmd::Empty(resp)),
@@ -1493,7 +1456,6 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 tx.clone(),
                 begin_instant,
                 GrpcTypeKind::invalid,
-                0_u32,
             );
         }
         Some(batch_commands_request::request::Cmd::Import(_)) => panic!("not implemented"),

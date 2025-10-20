@@ -135,7 +135,6 @@ impl PeerFsm {
         } else {
             0
         };
-
         Ok(PeerFsm {
             peer,
             stopped: false,
@@ -179,7 +178,6 @@ impl PeerFsm {
         } else {
             0
         };
-
         Ok(PeerFsm {
             peer,
             stopped: false,

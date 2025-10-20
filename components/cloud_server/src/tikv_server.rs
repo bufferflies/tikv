@@ -263,7 +263,6 @@ impl TikvServer {
         );
         let pd_client =
             TikvServer::connect_to_pd_cluster(config, env.clone(), Arc::clone(&security_mgr));
-        init_keyspace_manager(pd_client.clone());
 
         config.dfs.override_from_env();
         config.security.override_from_env();
@@ -399,6 +398,7 @@ impl TikvServer {
             })
             .unwrap();
 
+        init_keyspace_manager(pd_client.clone());
         // Run check leader in a dedicate thread, because it is time sensitive
         // and crucial to TiCDC replication lag.
         let check_leader_worker = WorkerBuilder::new("check-leader").thread_count(1).create();

@@ -151,11 +151,9 @@ pub fn init_keyspace_manager(pd_client: Arc<dyn PdClient>) {
 ///   keyspace name will be fetched from PD asynchronously in the background
 ///   thread and then added to the cache.
 pub fn to_keyspace_name(keyspace_id: u32) -> Option<Arc<String>> {
-    KEYSPACE_MANAGER
-        .read()
-        .ok()?
-        .as_ref()?
-        .get_keyspace_name(keyspace_id)
+    let manager_guard = KEYSPACE_MANAGER.read().unwrap();
+    let manager = manager_guard.as_ref().unwrap();
+    manager.get_keyspace_name(keyspace_id)
 }
 
 #[cfg(test)]

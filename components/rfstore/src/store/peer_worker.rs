@@ -102,11 +102,6 @@ impl PeerInbox {
         // Filter out the elapsed time longer than recorded and replace the minimum one
         // if any.
         let elapsed = start.saturating_elapsed();
-        let applier = self.peer.applier.lock().unwrap();
-        applier
-            .store_time_histogram
-            .observe(duration_to_sec(elapsed));
-
         // If this peer handle cost is too short, skip the statistics to avoid iterate.
         if elapsed < Duration::from_millis(10) {
             return;
@@ -629,6 +624,7 @@ impl ApplyWorker {
             loop_cnt += 1;
             if loop_cnt % 128 == 0 {
                 self.ctx.apply_wait.flush();
+                self.ctx.apply_time.flush();
             }
         }
     }
@@ -655,6 +651,7 @@ fn batch_end(ctx: &mut RaftContext, batch_duration: Duration) {
         info!("raft worker batch loop takes {:?}", batch_duration);
     }
     let dur = duration_to_sec(batch_duration);
+    ctx.raft_metrics.store_time.observe(dur);
     ctx.raft_metrics.process_ready.observe(dur);
     ctx.raft_metrics.maybe_flush();
     ctx.current_time = None;

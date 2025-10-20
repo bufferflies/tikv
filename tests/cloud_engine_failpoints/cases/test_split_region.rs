@@ -179,8 +179,7 @@ fn test_split_not_to_split_existing_region() {
     pd_client.must_add_peer(region_c.get_id(), new_peer(3, 7));
 
     cluster.put(b"k3", b"v3").unwrap();
-    // todo: make it work well.
-    // must_get_equal(&cluster.get_engine(3), region_c.id, b"k3", b"v3");
+    must_get_equal(&cluster.get_engine(3), region_c.id, b"k3", b"v3");
 
     fail::remove(on_handle_apply_1003_fp);
 
