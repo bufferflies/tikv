@@ -8,18 +8,28 @@ use std::{
     marker::PhantomData,
     ops::Deref,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
+use api_version::api_v2::KEYSPACE_PREFIX_LEN;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
 use kvenginepb as pb;
 use kvenginepb::TxnFileRefs;
 use log_wrappers::Value as LogValue;
 use protobuf::Message;
+use tidb_query_datatype::{
+    codec::{
+        mysql::VectorFloat32Decoder,
+        table::{decode_common_handle, decode_int_handle},
+    },
+    FieldTypeFlag,
+};
 use tikv_util::{
     box_try,
     codec::number::{U32_SIZE, U64_SIZE},
     memory::{MemoryLimiter, MemoryLimiterGuard},
+    time::Instant,
 };
 use tipb::{AnnQueryInfo, ColumnInfo, FtsQueryInfo};
 use txn_types::Lock;
@@ -29,12 +39,13 @@ use crate::{
     dfs::FileType,
     ia::types::FileSegmentIdent,
     limiter::RegionLimiter,
+    metrics::{COLUMNAR_PREFETCH_CACHE_HIT_HISTOGRAM, COLUMNAR_PREFETCH_HISTOGRAM},
     table::{
         blobtable::blobtable::{BlobPrefetcher, BlobTable},
         columnar::{
-            filter::TableScanCtx, ColumnarConcatReader, ColumnarFile, ColumnarMergeReader,
-            ColumnarMvccReader, ColumnarReader, ColumnarRowTableReader, ColumnarTableReader,
-            HANDLE_COL_ID,
+            filter::TableScanCtx, Block, ColumnarConcatReader, ColumnarFile, ColumnarFilterReader,
+            ColumnarMergeReader, ColumnarMvccReader, ColumnarReader, ColumnarRowTableReader,
+            ColumnarTableReader, GLOBAL_COMMON_HANDLE_END, HANDLE_COL_ID,
         },
         fts_index::FtsBruteForceReader,
         memtable::{CfTable, Hint, SkipList, WriteBatch},
@@ -2129,6 +2140,399 @@ impl Iterator {
         } else {
             self.inner.key() >= self.data.inner_end()
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TableCtx {
+    pub table_id: i64,
+    pub ranges: Vec<tipb::KeyRange>,
+}
+
+/// CloudColumnarReaders is used to read columnar data from multiple tables
+/// sequentially in one shard.
+/// NOTE: This is used in columnar read node.
+pub struct CloudColumnarReaders {
+    snap_access: SnapAccess,
+    reader: Option<CloudColumnarReader>,
+    tables: Vec<TableCtx>,
+    columns: Vec<ColumnInfo>,
+    scan_ctx: TableScanCtx,
+    ann_query_info: Arc<tipb::AnnQueryInfo>,
+    ia_ctx: IaCtx,
+    start_ts: u64,
+}
+
+impl CloudColumnarReaders {
+    pub fn new(
+        snap_access: SnapAccess,
+        tables: Vec<TableCtx>,
+        columns: Vec<ColumnInfo>,
+        scan_ctx: TableScanCtx,
+        ann_query_info: tipb::AnnQueryInfo,
+        ia_ctx: IaCtx,
+        start_ts: u64,
+    ) -> Self {
+        Self {
+            snap_access,
+            reader: None,
+            tables,
+            columns,
+            scan_ctx,
+            ann_query_info: Arc::new(ann_query_info),
+            ia_ctx,
+            start_ts,
+        }
+    }
+
+    pub fn ffi_read_block(&mut self, read_limit: usize) -> Result<usize> {
+        if self.reader.is_none() {
+            let table_ctx = self.tables.remove(0);
+            self.reader = Some(
+                CloudColumnarReader::new(
+                    self.snap_access.clone(),
+                    self.ia_ctx.clone(),
+                    table_ctx.table_id,
+                    table_ctx.ranges.clone(),
+                    &self.columns,
+                    &self.scan_ctx,
+                    Arc::clone(&self.ann_query_info),
+                    self.start_ts,
+                )
+                .map_err(|e| crate::table::Error::Other(e.to_string()))?,
+            );
+        }
+        loop {
+            let read_count = self.reader.as_mut().unwrap().ffi_read_block(read_limit)?;
+            if read_count == 0 {
+                if self.tables.is_empty() {
+                    return Ok(0);
+                }
+                let table_ctx = self.tables.remove(0);
+                self.reader = Some(
+                    CloudColumnarReader::new(
+                        self.snap_access.clone(),
+                        self.ia_ctx.clone(),
+                        table_ctx.table_id,
+                        table_ctx.ranges.clone(),
+                        &self.columns,
+                        &self.scan_ctx,
+                        self.ann_query_info.clone(),
+                        self.start_ts,
+                    )
+                    .map_err(|e| crate::table::Error::Other(e.to_string()))?,
+                );
+                continue;
+            }
+            return Ok(read_count);
+        }
+    }
+
+    pub fn ffi_read_handle(&mut self) -> Vec<u8> {
+        if let Some(reader) = self.reader.as_mut() {
+            return reader.ffi_read_handle();
+        }
+        vec![]
+    }
+
+    pub fn ffi_read_version(&mut self) -> Vec<u8> {
+        if let Some(reader) = self.reader.as_mut() {
+            return reader.ffi_read_version();
+        }
+        vec![]
+    }
+
+    pub fn ffi_read_column(&mut self, col_id: i64) -> Vec<u8> {
+        if let Some(reader) = self.reader.as_mut() {
+            return reader.ffi_read_column(col_id);
+        }
+        vec![]
+    }
+}
+
+pub struct CloudColumnarReader {
+    tag: String,
+    reader: Box<ColumnarMvccReader>,
+    ranges: Vec<tipb::KeyRange>,
+    block: Block,
+    schema: Schema,
+    keyspace_id: u32,
+    ia_ctx: IaCtx,
+    inited: bool,
+
+    read_block_cost: f64,
+    serialize_cost: f64,
+}
+
+impl CloudColumnarReader {
+    pub fn new(
+        snap_access: SnapAccess,
+        ia_ctx: IaCtx,
+        table_id: i64,
+        ranges: Vec<tipb::KeyRange>,
+        columns: &[ColumnInfo],
+        scan_ctx: &TableScanCtx,
+        ann_query: Arc<tipb::AnnQueryInfo>,
+        start_ts: u64,
+    ) -> Result<Self> {
+        let mvcc_reader = if ann_query.get_query_type() != tipb::AnnQueryType::InvalidQueryType {
+            let index_id = ann_query.get_index_id();
+            let target = ann_query
+                .get_ref_vec_f32()
+                .read_vector_float32()
+                .ok()
+                .ok_or(crate::Error::Other(
+                    "read vector float32 failed".to_string().into(),
+                ))?;
+            let col_id = get_ann_vec_col_id(&ann_query)?;
+            let top_k = ann_query.get_top_k();
+            let schema = snap_access
+                .new_schema_from_columns(table_id, columns)
+                .ok_or(crate::Error::Other(
+                    "construct schema from columns failed".to_string().into(),
+                ))?;
+
+            let vector_reader_result = snap_access.new_vector_index_reader(
+                table_id,
+                index_id,
+                col_id,
+                target.as_ref().data(),
+                top_k as usize,
+                schema,
+                start_ts,
+                None, // Pass None to disable filter by handle range.
+                None,
+                Arc::clone(&ann_query),
+            )?;
+            if let Some(reader) = vector_reader_result {
+                reader
+            } else {
+                warn!("no vector index reader available, use columnar reader instead");
+                snap_access
+                    .new_columnar_mvcc_reader(
+                        table_id,
+                        columns,
+                        Some(scan_ctx),
+                        start_ts,
+                        Some(Arc::clone(&ann_query)),
+                    )?
+                    .ok_or(crate::Error::Other(
+                        "no vector index reader available after fallback"
+                            .to_string()
+                            .into(),
+                    ))?
+            }
+        } else {
+            snap_access
+                .new_columnar_mvcc_reader(table_id, columns, Some(scan_ctx), start_ts, None)?
+                .ok_or(crate::Error::Other(
+                    "no columnar available".to_string().into(),
+                ))?
+        };
+        let schema_file = snap_access.get_schema_file().unwrap();
+        let table_schema = schema_file.get_table(table_id).unwrap();
+        let mut columns = columns.to_vec();
+        columns.retain(|c| !c.get_pk_handle() && c.get_column_id() != HANDLE_COL_ID as i64);
+        let schema_buf = SchemaBuf::new(
+            table_id,
+            table_schema.handle_column.clone(),
+            table_schema.version_column.clone(),
+            columns,
+            table_schema.pk_col_ids.clone(),
+            table_schema.max_col_id,
+            table_schema.vector_indexes.clone(),
+            table_schema.get_storage_class_spec().clone(),
+            table_schema.partitions.clone(),
+        );
+        let schema = Schema::new(schema_buf);
+        let block = Block::new(&schema);
+
+        let reader = Self {
+            tag: snap_access.get_tag().to_string(),
+            reader: Box::new(mvcc_reader),
+            ranges,
+            block,
+            schema: schema.clone(),
+            keyspace_id: snap_access.get_keyspace_id(),
+            read_block_cost: 0.0,
+            serialize_cost: 0.0,
+            ia_ctx,
+            inited: false,
+        };
+        // Do not call init here to avoid blocking the dispatch thread.
+        Ok(reader)
+    }
+
+    fn init(&mut self) -> Result<()> {
+        if let IaCtx::Enabled(ia_mgr, _) = &self.ia_ctx {
+            let start = Instant::now_coarse();
+            let prefetch = futures::executor::block_on(self.reader.prefetch_ia_remote_segments(
+                &self.tag,
+                ia_mgr,
+                self.keyspace_id,
+                Duration::from_secs(600), // 10 minutes is enough for prefetching one region.
+            ))
+            .map_err(|e| {
+                crate::Error::Other(format!("prefetch_ia_remote_segments failed: {:?}", e).into())
+            })?;
+            COLUMNAR_PREFETCH_HISTOGRAM.observe(start.saturating_elapsed_secs());
+            COLUMNAR_PREFETCH_CACHE_HIT_HISTOGRAM.observe(prefetch.unwrap_or(1.0) * 100.0);
+        }
+        futures::executor::block_on(self.update_range_handle());
+        self.inited = true;
+        Ok(())
+    }
+
+    // Set next range handle.
+    // Return true if next range handle is set, false if no more range.
+    async fn update_range_handle(&mut self) -> bool {
+        if self.ranges.is_empty() {
+            return false;
+        }
+        let range = self.ranges.remove(0);
+        info!(
+            "{} update range handle, table_id: {}, range: {:?}",
+            self.tag, self.schema.table_id, range
+        );
+        let is_common_handle = self.reader.get_schema().is_common_handle();
+        if is_common_handle {
+            let start_handle =
+                decode_common_handle(&range.get_low()[KEYSPACE_PREFIX_LEN..]).unwrap_or(&[]);
+            let end_handle = decode_common_handle(&range.get_high()[KEYSPACE_PREFIX_LEN..])
+                .unwrap_or(GLOBAL_COMMON_HANDLE_END);
+            self.reader
+                .set_handle_range(start_handle, end_handle)
+                .await
+                .unwrap();
+        } else {
+            let start_handle =
+                decode_int_handle(&range.get_low()[KEYSPACE_PREFIX_LEN..]).unwrap_or(i64::MIN);
+            let end_handle = decode_int_handle(&range.get_high()[KEYSPACE_PREFIX_LEN..])
+                .map(|h| Some(h))
+                .unwrap_or(None);
+            self.reader
+                .set_int_handle_range(start_handle, end_handle)
+                .await
+                .unwrap();
+        }
+        true
+    }
+
+    pub fn ffi_read_block(&mut self, read_limit: usize) -> Result<usize> {
+        if !self.inited {
+            // Postpone the initialization to here to use concurrent threads.
+            self.init()
+                .map_err(|e| crate::table::Error::Other(e.to_string()))?;
+        }
+        self.block.reset();
+        let start = Instant::now_coarse();
+        let ret = futures::executor::block_on(self.read_block_with_range(read_limit));
+        self.read_block_cost += start.saturating_elapsed_secs();
+        ret
+    }
+
+    pub async fn read_block_with_range(&mut self, read_limit: usize) -> Result<usize> {
+        loop {
+            let read_count = self.reader.read_block(&mut self.block, read_limit).await?;
+            if read_count > 0 {
+                return Ok(read_count);
+            }
+            // Data may be read out and filtered out in previous range, we need to reset the
+            // reader here to continue reading.
+            self.reader.reset();
+            if !self.update_range_handle().await {
+                return Ok(0);
+            }
+        }
+    }
+
+    pub fn ffi_read_handle(&mut self) -> Vec<u8> {
+        let start = Instant::now_coarse();
+        let mut data = vec![];
+        let col_id = self.block.get_handle_buf().col_id();
+        let col_info = self.schema.find_column_by_id(col_id as i64).unwrap();
+        self.block.get_handle_buf().serialize_for_tiflash(
+            &mut data,
+            col_info.get_tp(),
+            Self::is_unsigned(col_info),
+            col_info.get_column_len() as usize,
+        );
+        self.serialize_cost += start.saturating_elapsed_secs();
+        data
+    }
+
+    pub fn ffi_read_version(&mut self) -> Vec<u8> {
+        let start = Instant::now_coarse();
+        let mut data = vec![];
+        let col_id = self.block.get_version_buf().col_id();
+        let col_info = self.schema.find_column_by_id(col_id as i64).unwrap();
+        self.block.get_version_buf().serialize_for_tiflash(
+            &mut data,
+            col_info.get_tp(),
+            Self::is_unsigned(col_info),
+            col_info.get_column_len() as usize,
+        );
+        self.serialize_cost += start.saturating_elapsed_secs();
+        data
+    }
+
+    fn is_unsigned(col_info: &ColumnInfo) -> bool {
+        match FieldTypeFlag::from_bits(col_info.get_flag() as u32) {
+            Some(flag) => flag.contains(FieldTypeFlag::UNSIGNED),
+            None => false,
+        }
+    }
+
+    pub fn ffi_read_column(&mut self, col_id: i64) -> Vec<u8> {
+        let start = Instant::now_coarse();
+        let mut data = vec![];
+        let col_info = self.schema.find_column_by_id(col_id).unwrap();
+        if col_info.get_pk_handle() {
+            self.block.get_handle_buf().serialize_for_tiflash(
+                &mut data,
+                col_info.get_tp(),
+                Self::is_unsigned(col_info),
+                col_info.get_column_len() as usize,
+            );
+        } else {
+            self.block.get_column(col_id).serialize_for_tiflash(
+                &mut data,
+                col_info.get_tp(),
+                Self::is_unsigned(col_info),
+                col_info.get_column_len() as usize,
+            );
+        }
+        self.serialize_cost += start.saturating_elapsed_secs();
+        data
+    }
+}
+
+impl Drop for CloudColumnarReader {
+    fn drop(&mut self) {
+        info!(
+            "{} CloudColumnarReader dropped, table_id: {} read_block_cost: {:.3}s, serialize_cost: {:.3}s",
+            self.tag, self.schema.table_id, self.read_block_cost, self.serialize_cost
+        );
+    }
+}
+
+// Due to the discarding of column_id in the vector index, the value assigned to
+// ann_query_info may be different in different versions of tidb. For
+// compatibility, use this function to get column_id.
+// For field changes, see: https://github.com/pingcap/tipb/pull/358
+fn get_ann_vec_col_id(ann_query: &AnnQueryInfo) -> Result<i64> {
+    // Check `has_deprecated_column_id` first, because `column` is marked as
+    // not null in TiDB side so that it will be always populated with some value.
+    if ann_query.has_deprecated_column_id() {
+        Ok(ann_query.get_deprecated_column_id())
+    } else if ann_query.has_column() {
+        Ok(ann_query.get_column().get_column_id())
+    } else {
+        Err(crate::Error::Other(
+            "unexpected empty vector column id in ANNQueryInfo"
+                .to_string()
+                .into(),
+        ))
     }
 }
 

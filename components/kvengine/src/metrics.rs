@@ -163,6 +163,29 @@ lazy_static! {
         "Total number of kvengine compaction with a label of compaction result",
         &["result"]
     ).unwrap();
+    pub static ref COLUMNAR_PREFETCH_HISTOGRAM: Histogram = register_histogram!(
+        "kv_engine_columnar_prefetch_duration_seconds",
+        "Bucketed histogram of columnar prefetch segments duration",
+        exponential_buckets(0.1, 2.0, 20).unwrap()
+    )
+    .unwrap();
+    pub static ref COLUMNAR_PREFETCH_CACHE_HIT_HISTOGRAM: Histogram = register_histogram!(
+        "kv_engine_columnar_prefetch_cache_hit",
+        "Bucketed histogram of columnar prefetch cache hit",
+        linear_buckets(50.0, 2.0, 25).unwrap()
+    )
+    .unwrap();
+    pub static ref COLUMNAR_FETCH_SNAPSHOT_HISTOGRAM: Histogram = register_histogram!(
+        "kv_engine_columnar_fetch_snapshot_duration_seconds",
+        "Bucketed histogram of columnar fetch snapshot duration",
+        exponential_buckets(0.1, 2.0, 20).unwrap()
+    )
+    .unwrap();
+    pub static ref COLUMNAR_FETCH_SNAPSHOT_RETRY_COUNTER: Counter = register_counter!(
+        "kv_engine_columnar_fetch_snapshot_retry_count",
+        "Count of columnar fetch snapshot retry",
+    )
+    .unwrap();
 }
 
 pub(crate) fn elapsed_secs(t: Instant) -> f64 {
