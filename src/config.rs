@@ -2806,7 +2806,7 @@ impl ConfigManager for LogConfigManager {
             let log_level = LogLevel::try_from(v)?;
             set_log_level(log_level.0);
         }
-        if let Some(ConfigValue::Bool(enable)) = changes.get("txn-info-logging") {
+        if let Some(ConfigValue::Bool(enable)) = changes.get("txn_info_logging") {
             set_txn_info_logging(*enable);
         }
         info!("update log config"; "config" => ?changes);
@@ -4203,7 +4203,7 @@ mod tests {
     use tikv_kv::RocksEngine as RocksDBEngine;
     use tikv_util::{
         config::VersionTrack,
-        logger::get_log_level,
+        logger::{get_log_level, txn_info_logging_enabled},
         quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
         sys::SysQuota,
         worker::{dummy_scheduler, ReceiverWrapper},
@@ -4906,6 +4906,7 @@ mod tests {
 
         cfg_controller.register(Module::Log, Box::new(LogConfigManager));
 
+        // Test log level changes
         cfg_controller.update_config("log.level", "warn").unwrap();
         assert_eq!(get_log_level().unwrap(), Level::Warning);
         assert_eq!(
@@ -4920,6 +4921,28 @@ mod tests {
             cfg_controller.get_current().log.level,
             LogLevel(Level::Warning)
         );
+
+        // Test txn-info-logging changes
+        // Set to false explicitly
+        cfg_controller
+            .update_config("log.txn-info-logging", "false")
+            .unwrap();
+        assert!(!txn_info_logging_enabled());
+        assert!(!cfg_controller.get_current().log.txn_info_logging);
+
+        // Enable txn_info_logging
+        cfg_controller
+            .update_config("log.txn-info-logging", "true")
+            .unwrap();
+        assert!(txn_info_logging_enabled());
+        assert!(cfg_controller.get_current().log.txn_info_logging);
+
+        // Disable txn_info_logging again
+        cfg_controller
+            .update_config("log.txn-info-logging", "false")
+            .unwrap();
+        assert!(!txn_info_logging_enabled());
+        assert!(!cfg_controller.get_current().log.txn_info_logging);
     }
 
     #[test]
