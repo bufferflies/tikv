@@ -520,7 +520,14 @@ impl TikvServer {
                 if cur_port == port
                     && (cur_ip == ip || cur_ip.is_unspecified() || ip.is_unspecified())
                 {
-                    let _ = try_lock_conflict_addr(file_path);
+                    let f = try_lock_conflict_addr(&file_path);
+                    // The `unlock` is not necessary according to https://man7.org/linux/man-pages/man2/flock.2.html.
+                    // But actually, without the `unlock` here, the `try_lock_conflict_addr` after
+                    // the loop will occasionally fail.
+                    // And the reason is unknown yet.
+                    if let Err(e) = f.unlock() {
+                        warn!("unlock failed: {:?}", e; "path" => file_path.display())
+                    }
                 }
             }
         }
@@ -999,7 +1006,9 @@ impl TikvServer {
         self.raw_engines.kv.close();
 
         for f in self.lock_files {
-            let _ = f.unlock();
+            if let Err(e) = f.unlock() {
+                warn!("unlock failed: {:?}", e);
+            }
         }
     }
 
