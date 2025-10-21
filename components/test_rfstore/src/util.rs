@@ -54,6 +54,7 @@ pub fn create_test_engine(
     let mut cfg: Config = cfg.clone();
     cfg.storage.data_dir = dir.to_str().unwrap().to_string();
     cfg.rfengine.wal_sync_dir = format!("{}/wal", dir.display());
+    cfg.rfengine.wal_secondary_dir = format!("{}/wal2", dir.display());
 
     let rfengine_dir = dir.join("rfengine");
     let data_dir = Path::new(&cfg.storage.data_dir);

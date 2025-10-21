@@ -146,4 +146,19 @@ lazy_static! {
         "raft_engine_dfs_requests_total",
         "Total number of requests to DFS",
     ).unwrap();
+    pub static ref RFENGINE_DOUBLE_WRITE_HEALTHY_GAUGE: IntGauge = register_int_gauge!(
+        "raft_engine_double_write_healthy",
+        "Status of healthy wal double write",
+    )
+    .unwrap();
+}
+
+#[cfg(feature = "testexport")]
+lazy_static! {
+    pub static ref RFENGINE_DFS_WORKER_BECOME_UNHEALTHY_COUNTER: IntCounter =
+        register_int_counter!(
+            "raft_engine_dfs_worker_become_unhealthy_counter",
+            "Counter of rfengine DFS worker become unhealthy",
+        )
+        .unwrap();
 }

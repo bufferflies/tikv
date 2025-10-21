@@ -108,7 +108,9 @@ impl RfEngineCore {
                 }
             });
             if let Some(wb) = wb {
-                self.task_sender.send(ServiceTask::Write { wb }).unwrap();
+                let _ = self.task_sender.send(ServiceTask::Write {
+                    wb: wb.into_vector().into(),
+                });
             }
         });
         match sync_iteration_result {
@@ -258,28 +260,7 @@ mod tests {
     use bytes::Buf;
 
     use super::{config::Config, *};
-    use crate::test_util::{init_logger, make_log_data, make_state_kv, try_wait};
-
-    fn prepare_rfengine(engine: &RfEngine) {
-        let mut wb = WriteBatch::new();
-        for peer_id in 1..=10_u64 {
-            let (key, val) = make_state_kv(2, 1);
-            let region_id = peer_id + 1;
-            wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
-        }
-        engine.write(wb).unwrap();
-        for idx in 1..=1050_u64 {
-            let mut wb = WriteBatch::new();
-            for peer_id in 1..=10_u64 {
-                let region_id = peer_id + 1;
-                wb.append_raft_log(peer_id, region_id, &make_log_data(idx, 128));
-                let (key, val) = make_state_kv(1, idx);
-                wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
-            }
-            engine.write(wb).unwrap();
-        }
-        assert_eq!(engine.peers.len(), 10);
-    }
+    use crate::test_util::{init_logger, make_log_data, make_state_kv, prepare_rfengine, try_wait};
 
     #[test]
     fn test_load_async_corruption() {
@@ -296,7 +277,7 @@ mod tests {
         engine.stop_worker(true);
 
         let writer = engine.writer.lock().unwrap();
-        let current_epoch = writer.epoch_id;
+        let current_epoch = writer.get_epoch_id();
 
         let mut it = WalIterator::new(dir_path.to_owned(), current_epoch);
         it.iterate_batch(|_, _| {
@@ -339,7 +320,7 @@ mod tests {
         engine.stop_worker(true);
 
         let writer = engine.writer.lock().unwrap();
-        let current_epoch = writer.epoch_id;
+        let current_epoch = writer.get_epoch_id();
 
         let mut async_it = WalIterator::new(dir_path.to_owned(), current_epoch);
         async_it
@@ -413,12 +394,10 @@ mod tests {
         // Rollback MANIFEST to the previous backup one.
         fs::copy(&manifest_filename_bak, &manifest_filename).unwrap();
         let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
-        let (compacted_epoch, current_epoch) = {
+        let compacted_epoch = engine.compacted_epoch.load(Ordering::Relaxed);
+        let current_epoch = {
             let writer = engine.writer.lock().unwrap();
-            (
-                writer.compacted_epoch.load(Ordering::SeqCst),
-                writer.epoch_id,
-            )
+            writer.get_epoch_id()
         };
         engine.stop_worker(false);
         drop(engine);

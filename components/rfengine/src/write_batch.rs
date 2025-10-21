@@ -112,7 +112,6 @@ impl WriteBatch {
         self.peers.values().map(|b| b.encoded_len()).sum()
     }
 
-    #[allow(dead_code)]
     /// Convert `WriteBatch` into a vector of `PeerBatch` to make the iteration
     /// deterministic.
     pub(crate) fn into_vector(self) -> Vec<PeerBatch> {
@@ -123,6 +122,8 @@ impl WriteBatch {
 const PEER_BATCH_HEADER_LEN: usize = 8 /* peer_id */ + 8 /* region_id */ + 8 /* truncated_idx */ + 8 /* start_index */ + 8 /* end_index */ + 4 /* states_len */;
 
 /// `RegionBatch` is a batch of modifications in one region.
+
+#[derive(Clone)]
 pub(crate) struct PeerBatch {
     pub(crate) peer_id: u64,
     pub(crate) meta: PeerMeta,

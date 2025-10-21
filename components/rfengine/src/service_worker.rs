@@ -30,7 +30,7 @@ use crate::{
     log_batch::RaftLogBlock,
     manifest::{Manifest, PeerFile},
     metrics::ENGINE_COMPACT_CACHE_WAL_SKIPPED_COUNTER,
-    write_batch::WriteBatch,
+    write_batch::{PeerBatch, WriteBatch},
     writer::WalWriter,
     BackupTask, DfsStatistic, Error,
 };
@@ -60,7 +60,7 @@ pub(crate) enum ServiceTask {
         cache_wb_for_compact: bool,
     },
     Write {
-        wb: crate::write_batch::WriteBatch,
+        wb: Arc<Vec<PeerBatch>>,
     },
     Backup(BackupTask),
     Truncates(Vec<Vec<RaftLogBlock>>),
@@ -203,7 +203,7 @@ impl ServiceWorker {
         while let Ok(task) = self.rx.recv() {
             match task {
                 ServiceTask::Write { wb } => {
-                    self.handle_write(wb);
+                    self.handle_write(wb.to_vec());
                 }
                 ServiceTask::Dump {
                     epoch_id,
@@ -242,7 +242,7 @@ impl ServiceWorker {
         self.engine_id.load(Ordering::SeqCst)
     }
 
-    fn handle_write(&mut self, wb: crate::write_batch::WriteBatch) {
+    fn handle_write(&mut self, wb: Vec<PeerBatch>) {
         if let Some(wal_writer) = &mut self.async_wal_writer {
             let old_file_off = wal_writer.file_off;
             let (epoch_id, file_off, rotated) = wal_writer.write_batch(&wb).unwrap();
@@ -268,7 +268,9 @@ impl ServiceWorker {
             }
         }
         if let Some(compact_wb) = &mut self.compact_wb {
-            compact_wb.merge_write_batch(wb);
+            for peer_batch in wb {
+                compact_wb.merge_peer(peer_batch);
+            }
         }
     }
 
