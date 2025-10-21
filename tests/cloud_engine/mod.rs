@@ -22,6 +22,7 @@ use tidb_query_common::util::convert_to_prefix_next;
 use tikv_util::{codec::bytes::encode_bytes, info};
 use tokio::runtime::Runtime;
 mod backup;
+mod builtin_dfs;
 mod columnar;
 mod delete_range;
 mod delta_scanner;

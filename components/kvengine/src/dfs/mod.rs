@@ -52,6 +52,9 @@ pub trait Dfs: Any + Sync + Send {
     /// exists checks if the file exists in the DFS.
     async fn exists(&self, file_id: u64, opts: Options) -> Result<bool>;
 
+    /// size gets the total size of the file in bytes.
+    async fn size(&self, file_id: u64, opts: Options) -> Result<u64>;
+
     /// read_file reads the whole file to memory.
     /// It can be used by remote compaction server that doesn't have local disk.
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes>;
@@ -117,6 +120,13 @@ impl Dfs for InMemFs {
             } else {
                 return Ok(file.slice(opts.start_off as usize..));
             }
+        }
+        Err(Error::NotExists(file_id))
+    }
+
+    async fn size(&self, file_id: u64, _opts: Options) -> Result<u64> {
+        if let Some(file) = self.files.get(&file_id).as_deref() {
+            return Ok(file.len() as u64);
         }
         Err(Error::NotExists(file_id))
     }
@@ -294,6 +304,13 @@ impl Dfs for CacheFs {
     /// read part of it.
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         self.read_file_inner(file_id, opts).await
+    }
+
+    async fn size(&self, file_id: u64, opts: Options) -> Result<u64> {
+        if let Some(bytes) = self.cache.get(&file_id) {
+            return Ok(bytes.len() as u64);
+        }
+        self.s3_fs.size(file_id, opts).await
     }
 
     async fn create(&self, _file_id: u64, _data: Bytes, _opts: Options) -> Result<()> {
@@ -486,6 +503,12 @@ impl Dfs for LocalFs {
     fn get_runtime(&self) -> &Runtime {
         &self.runtime
     }
+
+    async fn size(&self, file_id: u64, opts: Options) -> Result<u64> {
+        let local_file_name = self.local_file_path(file_id, opts.file_type);
+        let meta = std::fs::metadata(local_file_name)?;
+        Ok(meta.len())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -629,6 +652,22 @@ mod tests {
         localfs.runtime.spawn(f_exists_before);
         assert!(!rx.recv().unwrap());
 
+        // Test size before create - should return error
+        let fs = localfs.clone();
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let f_size_before = async move {
+            match fs.size(file_id, opts).await {
+                Ok(_) => {
+                    tx.send(false).unwrap(); // Should not succeed
+                }
+                Err(_) => {
+                    tx.send(true).unwrap(); // Expected: error
+                }
+            }
+        };
+        localfs.runtime.spawn(f_size_before);
+        assert!(rx.recv().unwrap());
+
         let fs = localfs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let file_data_clone = file_data.clone();
@@ -665,6 +704,25 @@ mod tests {
         };
         localfs.runtime.spawn(f_exists_after);
         assert!(rx.recv().unwrap());
+
+        // Test size after create
+        let fs = localfs.clone();
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let expected_size = file_data.len() as u64;
+        let f_size = async move {
+            match fs.size(file_id, opts).await {
+                Ok(size) => {
+                    tx.send((true, size)).unwrap();
+                }
+                Err(_) => {
+                    tx.send((false, 0)).unwrap();
+                }
+            }
+        };
+        localfs.runtime.spawn(f_size);
+        let (success, size) = rx.recv().unwrap();
+        assert!(success);
+        assert_eq!(size, expected_size);
 
         let fs = localfs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
@@ -715,5 +773,21 @@ mod tests {
         };
         localfs.runtime.spawn(f_exists_after_remove);
         assert!(!rx.recv().unwrap());
+
+        // Test size after remove - should return error
+        let fs = localfs.clone();
+        let (tx, rx) = tikv_util::mpsc::bounded(1);
+        let f_size_after_remove = async move {
+            match fs.size(file_id, opts).await {
+                Ok(_) => {
+                    tx.send(false).unwrap(); // Should not succeed
+                }
+                Err(_) => {
+                    tx.send(true).unwrap(); // Expected: error
+                }
+            }
+        };
+        localfs.runtime.spawn(f_size_after_remove);
+        assert!(rx.recv().unwrap());
     }
 }

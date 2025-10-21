@@ -20,8 +20,22 @@ use kvproto::{
 };
 use pd_client::PdClient;
 use rand::seq::SliceRandom;
+use serde::{Deserialize, Serialize};
 use tikv_util::{error, sys::thread::ThreadBuildWrapper, time::Instant, HandyRwLock};
 use tokio::runtime::Runtime;
+
+/// File metadata returned by meta query API.
+///
+/// Unlike S3 which returns file size in the Content-Length header with empty
+/// body, we return metadata as JSON in the response body. This is because the
+/// hyper HTTP framework automatically sets Content-Length based on actual body
+/// size, making it impossible to set Content-Length to the file size while
+/// keeping the body empty. Using JSON body provides better extensibility for
+/// future metadata fields.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BuiltinDfsFileMeta {
+    pub size: u64,
+}
 
 const PD_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -254,19 +268,24 @@ impl BuiltinDfs {
         }
         Ok(())
     }
-}
 
-#[async_trait]
-impl dfs::Dfs for BuiltinDfs {
-    async fn exists(&self, file_id: u64, opts: Options) -> dfs::Result<bool> {
-        let mut stores = self.get_stores(&opts).await?;
+    /// Helper function for file metadata queries.
+    ///
+    /// This function queries multiple stores using meta=true and returns
+    /// file metadata from JSON response body.
+    ///
+    /// # Arguments
+    /// * `file_id` - The file ID to query
+    /// * `opts` - Query options including file type and shard information
+    async fn query_meta(&self, file_id: u64, opts: &Options) -> dfs::Result<BuiltinDfsFileMeta> {
+        let mut stores = self.get_stores(opts).await?;
         stores.shuffle(&mut rand::thread_rng());
         let mut errors = Vec::new();
 
         for store_id in stores {
             let store_addr = self.get_store_addr(store_id).await?;
             let uri = Uri::try_from(format!(
-                "http://{}/dfs/{}?file_type={}&check_exists_only=true",
+                "http://{}/dfs/{}?file_type={}&meta=true",
                 store_addr, file_id, opts.file_type
             ))
             .unwrap();
@@ -275,31 +294,71 @@ impl dfs::Dfs for BuiltinDfs {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
-                        // File exists on this store.
-                        return Ok(true);
+                        // Parse JSON response body
+                        match hyper::body::to_bytes(resp.into_body()).await {
+                            Ok(body) => match serde_json::from_slice::<BuiltinDfsFileMeta>(&body) {
+                                Ok(meta) => return Ok(meta),
+                                Err(e) => {
+                                    errors.push(dfs::Error::Other(format!(
+                                        "failed to parse meta response: {}",
+                                        e
+                                    )));
+                                }
+                            },
+                            Err(e) => {
+                                errors.push(dfs::Error::Other(format!(
+                                    "failed to read response body: {}",
+                                    e
+                                )));
+                            }
+                        }
                     } else if status != StatusCode::NOT_FOUND {
+                        // Collect non-404 errors
                         let err_msg = hyper::body::to_bytes(resp.into_body())
                             .await
-                            .map(|b| String::from_utf8_lossy(&b).to_string())?;
+                            .map(|b| String::from_utf8_lossy(&b).to_string())
+                            .unwrap_or_else(|e| format!("failed to read error message: {}", e));
                         errors.push(dfs::Error::Other(format!(
-                            "check file existence failed: {}:{}",
-                            status, err_msg,
+                            "meta query failed: {}:{}",
+                            status, err_msg
                         )));
                     }
+                    // Silently skip 404 errors - file might exist on other
+                    // stores
                 }
                 Err(e) => {
-                    errors.push(dfs::Error::Other(format!(
-                        "check file existence failed: {}",
-                        e
-                    )));
+                    errors.push(dfs::Error::Other(format!("meta request failed: {}", e)));
                 }
             }
         }
 
+        // Return the last error if any, otherwise a generic error
         if errors.is_empty() {
-            Ok(false)
+            Err(dfs::Error::Other(format!(
+                "meta query for file {} failed: file not found on any store",
+                file_id
+            )))
         } else {
-            return Err(errors.pop().unwrap());
+            Err(errors.pop().unwrap())
+        }
+    }
+}
+
+#[async_trait]
+impl dfs::Dfs for BuiltinDfs {
+    async fn size(&self, file_id: u64, opts: Options) -> dfs::Result<u64> {
+        let meta = self.query_meta(file_id, &opts).await?;
+        Ok(meta.size)
+    }
+
+    async fn exists(&self, file_id: u64, opts: Options) -> dfs::Result<bool> {
+        match self.query_meta(file_id, &opts).await {
+            Ok(_meta) => Ok(true), // Got metadata, file exists
+            Err(dfs::Error::Other(ref msg)) if msg.contains("file not found on any store") => {
+                // All stores returned 404, file doesn't exist
+                Ok(false)
+            }
+            Err(e) => Err(e), // Other errors should propagate
         }
     }
 

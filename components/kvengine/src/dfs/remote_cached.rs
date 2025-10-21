@@ -115,6 +115,10 @@ impl Dfs for RemoteCachedDfs {
         unreachable!()
     }
 
+    async fn size(&self, file_id: u64, opts: Options) -> crate::dfs::Result<u64> {
+        self.inner.size(file_id, opts).await
+    }
+
     async fn read_file(&self, file_id: u64, opts: Options) -> crate::dfs::Result<Bytes> {
         if let Some(data) = self.try_read_remote_cache(file_id, opts).await {
             return Ok(data);

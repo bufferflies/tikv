@@ -32,6 +32,10 @@ impl Dfs for TempDirFs {
         self.fs.exists(file_id, opts).await
     }
 
+    async fn size(&self, file_id: u64, opts: Options) -> Result<u64> {
+        self.fs.size(file_id, opts).await
+    }
+
     async fn read_file(&self, file_id: u64, opts: Options) -> Result<Bytes> {
         self.fs.read_file(file_id, opts).await
     }

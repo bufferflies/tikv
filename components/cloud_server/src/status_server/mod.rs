@@ -17,6 +17,7 @@ use std::{
 
 use api_version::{api_v2::TXN_KEY_PREFIX, ApiV2};
 use async_stream::stream;
+use builtin_dfs::BuiltinDfsFileMeta;
 use bytes::{Buf, BufMut, BytesMut};
 use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
@@ -39,6 +40,7 @@ use hyper::{
 };
 use kvengine::{
     dfs::{DFSConfig, FileType},
+    table::file::File,
     util::new_table_create_pb,
     IdVer, Shard, ShardStats, ShardTag, GLOBAL_SHARD_END_KEY, WRITE_CF, WRITE_CF_BOTTOM_LEVEL,
 };
@@ -1404,18 +1406,67 @@ impl StatusServer {
         u64::from_str(last).ok()
     }
 
+    /// Handle meta request: return file metadata in JSON format.
+    async fn handle_meta(
+        id: u64,
+        file_type: FileType,
+        ctx: &StatusContext,
+    ) -> hyper::Result<Response<Body>> {
+        let (callback, future) = paired_future_callback();
+        let kvengine = ctx.kvengine.clone();
+        spawn_anonymous_thread_with!(move || {
+            let res = match file_type {
+                FileType::TxnChunk => kvengine
+                    .get_txn_chunk_manager()
+                    .read_local_chunk(id)
+                    .map(|chunk| chunk.len() as u64),
+                _ => kvengine
+                    .open_local_file(id, file_type)
+                    .map(|file| file.size()),
+            };
+            callback(res)
+        });
+        let res = future.await.unwrap();
+        Ok(match res {
+            Ok(size) => make_meta_response(size),
+            // Handle IO NotFound error
+            Err(kvengine::Error::Io { err, .. }) if err.kind() == std::io::ErrorKind::NotFound => {
+                make_response(StatusCode::NOT_FOUND, "")
+            }
+            // Handle table NotFound error
+            Err(kvengine::Error::TableError(ref e))
+                if matches!(e, kvengine::table::Error::NotFound) =>
+            {
+                make_response(StatusCode::NOT_FOUND, "")
+            }
+            // Handle table IO error with NotFound message
+            Err(kvengine::Error::TableError(kvengine::table::Error::Io(ref msg)))
+                if msg.contains("NotFound") || msg.contains("No such file") =>
+            {
+                make_response(StatusCode::NOT_FOUND, "")
+            }
+            Err(e) => {
+                error!("Error getting file metadata: {:?}", e);
+                make_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Error getting file metadata",
+                )
+            }
+        })
+    }
+
     fn get_dfs_read_args(
         req: &Request<Body>,
     ) -> (
         FileType,
         u64,         // start_off
         Option<u64>, // end_off
-        bool,        // check_exists_only
+        bool,        // meta
     ) {
         let mut file_type: Option<FileType> = None;
         let mut start_off: Option<u64> = None;
         let mut end_off: Option<u64> = None;
-        let mut check_exists_only: Option<bool> = None;
+        let mut meta: Option<bool> = None;
         if let Some(query) = req.uri().query() {
             let query_pairs: HashMap<_, _> =
                 url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -1428,15 +1479,13 @@ impl StatusServer {
             end_off = query_pairs
                 .get("end_off")
                 .and_then(|s| s.parse::<u64>().ok());
-            check_exists_only = query_pairs
-                .get("check_exists_only")
-                .and_then(|s| s.parse::<bool>().ok());
+            meta = query_pairs.get("meta").and_then(|s| s.parse::<bool>().ok());
         }
         (
             file_type.unwrap_or(FileType::Sst),
             start_off.unwrap_or_default(),
             end_off,
-            check_exists_only.unwrap_or(false),
+            meta.unwrap_or(false),
         )
     }
 
@@ -1451,34 +1500,11 @@ impl StatusServer {
             return Ok(make_response(StatusCode::BAD_REQUEST, "invalid file id"));
         }
         let id = id_opt.unwrap();
-        let (file_type, start_off, end_off, check_exists_only) = Self::get_dfs_read_args(&req);
+        let (file_type, start_off, end_off, meta) = Self::get_dfs_read_args(&req);
 
-        if check_exists_only {
-            let (callback, future) = paired_future_callback();
-            let kvengine = ctx.kvengine.clone();
-            spawn_anonymous_thread_with!(move || {
-                let res = match file_type {
-                    FileType::TxnChunk => kvengine
-                        .get_txn_chunk_manager()
-                        .read_local_chunk(id)
-                        .map(|_| ()),
-                    _ => kvengine.open_local_file(id, file_type).map(|_| ()),
-                };
-                callback(res)
-            });
-            let res = future.await.unwrap();
-            return Ok(match res {
-                Ok(_) => make_response(StatusCode::OK, ""),
-                Err(kvengine::Error::Io { err, .. })
-                    if err.kind() == std::io::ErrorKind::NotFound =>
-                {
-                    make_response(StatusCode::NOT_FOUND, "")
-                }
-                Err(_) => make_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Error checking file existence",
-                ),
-            });
+        if meta {
+            // Handle meta query: return file metadata as JSON
+            return Self::handle_meta(id, file_type, ctx).await;
         }
         let handle_res = tokio::runtime::Handle::try_current();
         if let Err(handle_err) = handle_res {
@@ -2654,6 +2680,19 @@ where
     Response::builder()
         .status(status_code)
         .body(message.into())
+        .unwrap()
+}
+
+/// Create a meta response with file metadata in JSON format.
+///
+/// Returns a JSON response containing file metadata like size.
+fn make_meta_response(file_size: u64) -> Response<Body> {
+    let info = BuiltinDfsFileMeta { size: file_size };
+    let json = serde_json::to_string(&info).unwrap();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json))
         .unwrap()
 }
 

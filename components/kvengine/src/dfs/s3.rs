@@ -1384,6 +1384,78 @@ impl Dfs for S3Fs {
     fn get_runtime(&self) -> &Runtime {
         &self.runtime
     }
+
+    async fn size(&self, file_id: u64, opts: Options) -> crate::dfs::Result<u64> {
+        // Use HEAD to check and get size from Content-Length where possible
+        let key = self.file_key(file_id, opts.file_type);
+        let name = format!("{}.{}", file_id, opts.file_type.suffix());
+        let mut retry_cnt = 0;
+        let file_type = self.get_file_type_from_key(&key);
+        let start_time_with_retry = Instant::now();
+        loop {
+            let start_time = Instant::now();
+            let req = self.new_request("HEAD", &key);
+            let result = self.dispatch(req, HeadObjectError::from_response).await;
+            match result {
+                Ok(resp) => {
+                    // Try to parse Content-Length
+                    let len = match resp
+                        .headers
+                        .get("Content-Length")
+                        .and_then(|v| v.parse::<u64>().ok())
+                    {
+                        Some(len) => len,
+                        None => {
+                            error!(
+                                "missing or invalid Content-Length header for file {}",
+                                &name
+                            );
+                            return Err(dfs::Error::Other(format!(
+                                "missing or invalid Content-Length header for file {}",
+                                &name
+                            )));
+                        }
+                    };
+                    let duration = start_time.saturating_elapsed();
+                    KVENGINE_DFS_LATENCY
+                        .head
+                        .get(MetricsFileType::from(file_type))
+                        .observe(duration.as_secs_f64());
+                    let duration_with_retry = start_time_with_retry.saturating_elapsed();
+                    KVENGINE_DFS_LATENCY_WITH_RETRY
+                        .head
+                        .get(MetricsFileType::from(file_type))
+                        .observe(duration_with_retry.as_secs_f64());
+                    KVENGINE_DFS_REQUEST_COUNTER
+                        .head
+                        .get(MetricsFileType::from(file_type))
+                        .inc();
+                    return Ok(len);
+                }
+                Err(err) => {
+                    if let RusotoError::Service(HeadObjectError::NoSuchKey(err_msg)) = &err {
+                        error!("file {} not exist, err msg {}", &name, err_msg);
+                        return Err(dfs::Error::NoSuchKey(format!("file {} not exist,", &name)));
+                    }
+                    if self.is_err_not_found(&err) {
+                        error!("file {} not exist, err {}", &name, err.to_string());
+                        return Err(dfs::Error::NoSuchKey(format!("file {} not exist,", &name)));
+                    }
+                    if self.is_err_retryable(&err)
+                        && self.sleep_for_retry(&mut retry_cnt, &name).await
+                    {
+                        KVENGINE_DFS_RETRY_COUNTER
+                            .head
+                            .get(MetricsFileType::from(file_type))
+                            .inc();
+                        warn!("retry head file {}, error {:?}", &name, &err);
+                        continue;
+                    }
+                    return Err(err.into());
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -1534,12 +1606,13 @@ pub mod test_util {
             Box::pin(async move {
                 match method.as_str() {
                     "HEAD" => {
-                        let created = {
+                        let (created, file_len) = {
                             let state = state.lock().unwrap();
-                            state.created
+                            (state.created, state.file_data.len())
                         };
                         if created {
                             MockRequestDispatcher::with_status(200)
+                                .with_header("Content-Length", &file_len.to_string())
                                 .dispatch(request, _timeout)
                                 .await
                         } else {
@@ -1648,6 +1721,22 @@ mod tests {
         s3fs.runtime.spawn(f_exists_before);
         assert!(!rx_exists_before.recv().unwrap());
 
+        // Test size before create - should return error
+        let fs = s3fs.clone();
+        let (tx_size_before, rx_size_before) = tikv_util::mpsc::bounded(1);
+        let f_size_before = async move {
+            match fs.size(file_id, opts).await {
+                Ok(_) => {
+                    tx_size_before.send(false).unwrap(); // Should not succeed
+                }
+                Err(_) => {
+                    tx_size_before.send(true).unwrap(); // Expected: error
+                }
+            }
+        };
+        s3fs.runtime.spawn(f_size_before);
+        assert!(rx_size_before.recv().unwrap());
+
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);
         let file_data_clone_create = file_data.clone();
@@ -1685,6 +1774,25 @@ mod tests {
         };
         s3fs.runtime.spawn(f_exists_after);
         assert!(rx_exists_after.recv().unwrap());
+
+        // Test size after create
+        let fs = s3fs.clone();
+        let (tx_size_after, rx_size_after) = tikv_util::mpsc::bounded(1);
+        let expected_size = file_data.len() as u64;
+        let f_size_after = async move {
+            match fs.size(file_id, opts).await {
+                Ok(size) => {
+                    tx_size_after.send((true, size)).unwrap();
+                }
+                Err(_err) => {
+                    tx_size_after.send((false, 0)).unwrap();
+                }
+            }
+        };
+        s3fs.runtime.spawn(f_size_after);
+        let (success, size) = rx_size_after.recv().unwrap();
+        assert!(success);
+        assert_eq!(size, expected_size);
 
         let fs = s3fs.clone();
         let (tx, rx) = tikv_util::mpsc::bounded(1);

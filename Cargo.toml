@@ -317,6 +317,7 @@ aliyun = { path = "components/cloud/aliyun" }
 backup = { path = "components/backup", default-features = false }
 backup-stream = { path = "components/backup-stream", default-features = false }
 batch-system = { path = "components/batch-system" }
+builtin_dfs = { path = "components/builtin_dfs" }
 case_macros = { path = "components/case_macros" }
 causal_ts = { path = "components/causal_ts" }
 cdc = { path = "components/cdc", default-features = false }

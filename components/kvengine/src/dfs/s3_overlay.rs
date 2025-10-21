@@ -88,6 +88,15 @@ impl Dfs for OverlaidFs {
         }
     }
 
+    async fn size(&self, file_id: u64, opts: Options) -> Result<u64> {
+        // Check overlay first for new writes, fallback to base for existing files
+        match self.overlay.size(file_id, opts).await {
+            Ok(size) => Ok(size),
+            Err(Error::NoSuchKey(..) | Error::NotExists(..)) => self.base.size(file_id, opts).await,
+            Err(e) => Err(e),
+        }
+    }
+
     /// Create creates a new File.
     /// The shard_id and shard_ver can be used determine where to write the
     /// file.
