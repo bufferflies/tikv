@@ -410,14 +410,14 @@ impl ReplicationWorker {
                 let res = self.handle_register(request, conn_id);
                 self.handle_result(res, "register");
             }
-            CdcMsg::RegisterSpawnHandler {
+            CdcMsg::SpawnRegisterHandler {
                 request,
                 conn_id,
                 snap_access,
             } => {
                 tikv_util::set_current_region(request.region_id);
-                let res = self.handler_register_spawn_handler(request, conn_id, snap_access);
-                self.handle_result(res, "register_spawn_handler");
+                let res = self.handler_spawn_register_handler(request, conn_id, snap_access);
+                self.handle_result(res, "spawn_register_handler");
             }
             CdcMsg::RegisterResult {
                 event,
@@ -433,6 +433,11 @@ impl ReplicationWorker {
                     self.deregister_region_on_error(conn_id, request_id, region_id, err);
                 }
                 self.handle_result(res.map_err(Into::into), "register_result");
+            }
+            CdcMsg::SpawnScanLocks { snap_access } => {
+                tikv_util::set_current_region(snap_access.get_id());
+                let res = self.handle_spawn_scan_locks(snap_access);
+                self.handle_result(res, "spawn_scan_locks");
             }
             CdcMsg::ScanLocksResult {
                 region_id,
@@ -552,65 +557,89 @@ impl ReplicationWorker {
     }
 
     fn handle_register(&mut self, request: ChangeDataRequest, conn_id: ConnId) -> Result<()> {
-        let merged_store_id = self.merged_store_id();
         let region_id = request.region_id;
         let Some(shard) = self.merged_engine.get_kv().get_shard(request.region_id) else {
             self.send_region_not_found(conn_id, &request);
             return Ok(());
         };
-        if shard.ver != request.get_region_epoch().get_version() {
+        let request_ver = request.get_region_epoch().get_version();
+        if shard.ver != request_ver {
             self.send_epoch_not_match(conn_id, &request);
             return Ok(());
         }
         let tag = shard.tag();
         info!("{} cdc register", tag; "req" => ?request, "conn" => ?conn_id);
-        let delegate = self
-            .region_delegates
-            .entry(region_id)
-            .or_insert_with(|| RegionDelegate::new(merged_store_id, region_id));
+
+        let (need_scan_locks, need_incremental_scan) = if let Some(delegate) =
+            self.region_delegates.get(&region_id)
+        {
+            if delegate.region_ver != request_ver {
+                // Delegate is stale. Return error to let client retry.
+                warn!("{} cdc register: delegate is stale", tag; "req" => ?request, "conn" => ?conn_id,
+                    "delegate.ver" => delegate.region_ver, "request_ver" => request_ver);
+                self.send_server_is_busy(conn_id, &request, "delegate is stale".to_string());
+                return Ok(());
+            }
+
+            let need_scan_locks = delegate.resolver.is_none();
+            let check_duplicated = delegate.requests.check_duplicated(&request, conn_id);
+            if let Err(err) = &check_duplicated {
+                info!("{} cdc register: ignore duplicated request", tag; "err" => ?err);
+            }
+            (need_scan_locks, check_duplicated.is_ok())
+        } else {
+            // Create delegate after `flush_observer_region`.
+            // Otherwise, the new delegate would receive stale applied entries.
+            (true, true)
+        };
+
+        if need_scan_locks || need_incremental_scan {
+            // Flush observer for region.
+            // Otherwise, the scan locks/incremental scan may get data duplicated with
+            // pending locks/events.
+            self.apply_ctx.flush_observer_region(region_id);
+        }
 
         let snap_access = shard.new_snap_access();
-        if delegate.resolver.is_none() {
-            delegate.resolver = Some(RegionResolver::new_pending(
-                snap_access.get_mem_table_snap_version(),
-            ));
-            let snap_access = snap_access.clone();
-            let mut locks_handler = ScanLocksHandler::new(snap_access, self.tx.clone());
-            self.runtime.spawn_blocking(move || {
-                locks_handler.scan_locks();
-            });
-        }
-
-        if let Err(err) = delegate.requests.check_duplicated(&request, conn_id) {
-            info!("{} cdc register: ignore duplicated request", tag; "err" => ?err);
-            return Ok(());
-        }
-
-        // Flush observer for region.
-        // Otherwise, the incremental scan may get data duplicated with pending events.
-        self.apply_ctx.flush_observer_region(region_id);
-
-        if let Err(SendError(msg)) = self.tx.send(CdcMsg::RegisterSpawnHandler {
-            request,
-            conn_id,
-            snap_access,
-        }) {
-            let CdcMsg::RegisterSpawnHandler {
-                request, conn_id, ..
-            } = msg
-            else {
-                unreachable!()
-            };
+        if need_scan_locks
+            && self
+                .tx
+                .send(CdcMsg::SpawnScanLocks {
+                    snap_access: snap_access.clone(),
+                })
+                .is_err()
+        {
             self.send_server_is_busy(
                 conn_id,
                 &request,
-                "handle_register: send msg failed".to_string(),
+                "handle_register: spawn scan locks failed".to_string(),
             );
+            return Err(box_err!("{} spawn scan locks failed", tag));
+        }
+        if need_incremental_scan {
+            if let Err(SendError(msg)) = self.tx.send(CdcMsg::SpawnRegisterHandler {
+                request,
+                conn_id,
+                snap_access,
+            }) {
+                let CdcMsg::SpawnRegisterHandler {
+                    request, conn_id, ..
+                } = msg
+                else {
+                    unreachable!()
+                };
+                self.send_server_is_busy(
+                    conn_id,
+                    &request,
+                    "handle_register: spawn handler failed".to_string(),
+                );
+                return Err(box_err!("{} spawn register handler failed", tag));
+            }
         }
         Ok(())
     }
 
-    fn handler_register_spawn_handler(
+    fn handler_spawn_register_handler(
         &mut self,
         request: ChangeDataRequest,
         conn_id: ConnId,
@@ -627,10 +656,15 @@ impl ReplicationWorker {
         };
         conn_regions.insert(region_id);
 
-        let delegate = self
-            .region_delegates
-            .entry(region_id)
-            .or_insert_with(|| RegionDelegate::new(merged_store_id, region_id));
+        let delegate = self.region_delegates.entry(region_id).or_insert_with(|| {
+            RegionDelegate::new(merged_store_id, region_id, snap_access.get_version())
+        });
+        if delegate.region_ver != request.get_region_epoch().get_version() {
+            info!("{} cdc register: delegate version not match, skip", tag;
+                "conn" => ?conn_id, "request" => %request.request_id, "delegate.ver" => delegate.region_ver);
+            self.send_epoch_not_match(conn_id, &request);
+            return Ok(());
+        }
 
         let init_id = match delegate.requests.add(&request, conn_id) {
             Ok(init_id) => init_id,
@@ -700,6 +734,37 @@ impl ReplicationWorker {
             info!("{} handle_register_result: initialized", tag;
                 "count" => events_count, "bytes" => events_bytes,
                 "conn" => ?conn_id, "request" => %request_id);
+        }
+        Ok(())
+    }
+
+    fn handle_spawn_scan_locks(&mut self, snap_access: SnapAccess) -> Result<()> {
+        let tag = snap_access.get_tag();
+        let merged_store_id = self.merged_store_id();
+        let region_id = snap_access.get_id();
+
+        let delegate = self.region_delegates.entry(region_id).or_insert_with(|| {
+            RegionDelegate::new(merged_store_id, region_id, snap_access.get_version())
+        });
+        if delegate.region_ver != snap_access.get_version() {
+            // There should be a coming `CdcMsg::AppliedAdmin` which will remove this stale
+            // delegate.
+            info!("{} handle_spawn_scan_locks: delegate is stale, skip", tag;
+                "delegate.ver" => delegate.region_ver);
+            return Ok(());
+        }
+
+        if delegate.resolver.is_none() {
+            debug!("{} cdc register: spawn scan locks", tag);
+            delegate.resolver = Some(RegionResolver::new_pending(
+                snap_access.get_mem_table_snap_version(),
+            ));
+            let mut locks_handler = ScanLocksHandler::new(snap_access, self.tx.clone());
+            self.runtime.spawn_blocking(move || {
+                locks_handler.scan_locks();
+            });
+        } else {
+            info!("{} handle_spawn_scan_locks: duplicated, skip", tag);
         }
         Ok(())
     }
@@ -885,7 +950,7 @@ impl ReplicationWorker {
         }
 
         let merged_store_id = self.merged_store_id();
-        info!("{} send_resolved_ts", merged_store_id; "last_update_time" => self.last_update_ts);
+        info!("send_resolved_ts"; "last_update_time" => self.last_update_ts, "store" => merged_store_id);
         self.resolved_regions.clear();
         for (&region_id, delegate) in &mut self.region_delegates {
             try_force_stop_err!(self);
@@ -1513,21 +1578,20 @@ impl ReplicationWorker {
         let mut sink_err_requests: Vec<(RequestKey, cdc::Error)> = vec![];
 
         let Some(delegate) = self.region_delegates.get_mut(&region_id) else {
-            debug!("{} handle_applied: region delegate not found, skip", tag);
+            debug!("{} handle_applied: region delegate not found, skip", tag; "events" => ?region_events);
             return sink_err_requests;
         };
+        let tag = tag.with_region_version(delegate.region_ver);
+        if region_events.region_version != delegate.region_ver {
+            warn!("{} handle_applied: version not match", tag; "events.version" => region_events.region_version);
+            debug_assert!(
+                false,
+                "{} version not match, events: {:?}",
+                tag, region_events.events
+            );
+        }
 
         for (req_key, req_info) in delegate.requests.iter_mut() {
-            let tag = tag.with_region_version(req_info.region_version);
-            if region_events.region_version != req_info.region_version {
-                warn!("{} handle_applied: version not match", tag; "events.version" => region_events.region_version);
-                debug_assert!(
-                    false,
-                    "{} version not match, events: {:?}",
-                    tag, region_events.events
-                );
-            }
-
             let Some(conn) = self.conns.get(&req_key.conn_id) else {
                 warn!("{} handle_applied: conn not found, skip", tag;
                     "conn" => ?req_key.conn_id, "request" => %req_key.request_id);
@@ -1547,7 +1611,7 @@ impl ReplicationWorker {
                         if req_info.in_range(entry.get_key()) {
                             entries_to_send.push(entry.clone());
 
-                            debug!("send event";
+                            trace!("send event";
                                 "key" => LogValue::key(entry.get_key()),
                                 "commit_ts" => entry.get_commit_ts(),
                                 "region" => region_id,
@@ -1639,7 +1703,7 @@ impl ReplicationWorker {
 
             let mut error = cdcpb::Error::new();
             error.mut_region_not_found().set_region_id(source_region.id);
-            self.remove_stale_requests(tag, source_region.id, u64::MAX, error);
+            self.remove_stale_delegate(tag, source_region.id, error);
         }
 
         let mut error = cdcpb::Error::new();
@@ -1652,27 +1716,14 @@ impl ReplicationWorker {
             error.mut_region_not_found().set_region_id(region_id);
         }
 
-        self.remove_stale_requests(tag, region_id, region_version, error);
+        self.remove_stale_delegate(tag, region_id, error);
     }
 
-    fn remove_stale_requests(
-        &mut self,
-        tag: ShardTag,
-        region_id: u64,
-        region_version: u64,
-        error: cdcpb::Error,
-    ) {
-        if let Some(delegate) = self.region_delegates.get_mut(&region_id) {
-            let mut requests_to_remove = vec![];
-            for (req_key, request) in delegate.requests.iter() {
-                if request.region_version <= region_version {
-                    requests_to_remove.push(*req_key);
-                }
-            }
-            info!("{} handle_applied_admin: send error to requests", tag;
-                "err" => ?error, "requests" => ?requests_to_remove);
-            for req_key in requests_to_remove {
-                delegate.requests.remove(&req_key).unwrap();
+    fn remove_stale_delegate(&mut self, tag: ShardTag, region_id: u64, error: cdcpb::Error) {
+        if let Some(mut delegate) = self.region_delegates.remove(&region_id) {
+            debug!("{} remove_stale_delegate: send error to requests", tag;
+                "err" => ?error, "requests" => ?delegate.requests.keys());
+            for (req_key, _) in delegate.requests.drain() {
                 let Some(conn) = self.conns.get(&req_key.conn_id) else {
                     continue;
                 };
@@ -1681,13 +1732,11 @@ impl ReplicationWorker {
                 event.set_request_id(req_key.request_id.into_inner());
                 event.set_error(error.clone());
                 if let Err(err) = conn.get_sink().unbounded_send(CdcEvent::Event(event), true) {
-                    warn!("{} remove_stale_requests: send error failed: {:?}", tag, err;
+                    warn!("{} remove_stale_delegate: send error failed: {:?}", tag, err;
                         "conn" => ?req_key.conn_id, "request" => %req_key.request_id);
                 }
             }
-            if delegate.requests.is_empty() {
-                self.remove_region(region_id);
-            }
+            self.remove_region(region_id);
         }
     }
 

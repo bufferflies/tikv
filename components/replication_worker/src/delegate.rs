@@ -142,7 +142,6 @@ impl RequestState {
 
 /// Information about a ChangeDataRequest.
 pub(crate) struct RequestInfo {
-    pub(crate) region_version: u64,
     pub(crate) start_key: Vec<u8>,
     pub(crate) end_key: Vec<u8>,
     pub(crate) resolved_ts: TimeStamp,
@@ -191,11 +190,9 @@ impl RegionRequests {
             return Err(format!("{:?}", request_info.state));
         }
 
-        let region_version = request.get_region_epoch().get_version();
         let (start_key, end_key) = build_request_range(request);
         let init_id = INIT_ID_ALLOC.fetch_add(1, Ordering::Relaxed);
         let request_info = RequestInfo {
-            region_version,
             start_key,
             end_key,
             resolved_ts: TimeStamp::zero(),
@@ -331,15 +328,17 @@ impl RegionResolver {
 pub(crate) struct RegionDelegate {
     pub(crate) merged_store_id: u64,
     pub(crate) region_id: u64,
+    pub(crate) region_ver: u64,
     pub(crate) requests: RegionRequests,
     pub(crate) resolver: Option<RegionResolver>,
 }
 
 impl RegionDelegate {
-    pub(crate) fn new(merged_store_id: u64, region_id: u64) -> Self {
+    pub(crate) fn new(merged_store_id: u64, region_id: u64, region_ver: u64) -> Self {
         Self {
             merged_store_id,
             region_id,
+            region_ver,
             requests: RegionRequests::default(),
             resolver: None,
         }

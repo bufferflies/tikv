@@ -176,7 +176,7 @@ pub enum CdcMsg {
         request: ChangeDataRequest,
         conn_id: ConnId,
     },
-    RegisterSpawnHandler {
+    SpawnRegisterHandler {
         request: ChangeDataRequest,
         conn_id: ConnId,
         snap_access: SnapAccess,
@@ -186,6 +186,9 @@ pub enum CdcMsg {
         conn_id: ConnId,
         initialized: bool,
         init_id: u64,
+    },
+    SpawnScanLocks {
+        snap_access: SnapAccess,
     },
     ScanLocksResult {
         region_id: u64,

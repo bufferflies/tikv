@@ -312,7 +312,7 @@ impl ReplicationScheduler {
     }
 
     async fn handle_add_keyspace(&self, keyspace_id: u32, body_bytes: &[u8]) -> Response<Body> {
-        info!("handle add keyspace");
+        info!("handle add keyspace"; "keyspace" => keyspace_id);
         let (cb, fut) = paired_future_callback();
         let msg = match serde_json::from_slice::<crate::scheduler::ProvisionedKeyspace>(body_bytes)
         {

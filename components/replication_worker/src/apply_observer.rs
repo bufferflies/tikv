@@ -1,6 +1,6 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use api_version::ApiV2;
 use kvengine::{
@@ -30,6 +30,16 @@ pub struct RegionEvents {
     pub region_version: u64,
     pub events: Vec<cdcpb::Event>,
     pub tracked_locks: Vec<(Vec<u8>, u64)>,
+}
+
+impl fmt::Debug for RegionEvents {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegionEvents")
+            .field("region_ver", &self.region_version)
+            .field("events", &self.events.len())
+            .field("tracked_locks", &self.tracked_locks.len())
+            .finish()
+    }
 }
 
 impl CdcApplyObserver {
