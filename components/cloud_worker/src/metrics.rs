@@ -98,4 +98,15 @@ lazy_static! {
         "tikv_worker_memory_limiter_current_used",
         "Current used memory reported by worker memory limiter",
     ).unwrap();
+
+    pub static ref SCHEMA_MANAGER_SYNC_LOOP_COUNT: IntCounter = register_int_counter!(
+        "tikv_worker_schema_manager_sync_loop_count",
+        "Total count of schema manager sync loop",
+    ).unwrap();
+
+    pub static ref SCHEMA_MANAGER_SYNC_LOOP_ERROR_COUNT: IntCounterVec = register_int_counter_vec!(
+        "tikv_worker_schema_manager_sync_loop_error_count",
+        "Total count of schema manager sync loop errors",
+        &["type"],
+    ).unwrap();
 }

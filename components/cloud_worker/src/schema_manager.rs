@@ -50,6 +50,7 @@ use tokio::sync::Semaphore;
 use crate::{
     error::{Error, Error::SchemaError, Result},
     get_all_stores_except_tiflash,
+    metrics::{SCHEMA_MANAGER_SYNC_LOOP_COUNT, SCHEMA_MANAGER_SYNC_LOOP_ERROR_COUNT},
     server::Context,
 };
 
@@ -427,6 +428,9 @@ impl SchemaManager {
                     .await
                 {
                     error!("refresh keyspace stats error: {:?}", e);
+                    SCHEMA_MANAGER_SYNC_LOOP_ERROR_COUNT
+                        .with_label_values(&["refresh_keyspace_stats"])
+                        .inc();
                     tokio::time::sleep(self_clone.config.keyspace_refresh_interval.0).await;
                     continue;
                 }
@@ -438,6 +442,7 @@ impl SchemaManager {
                 {
                     error!("refresh schema version error: {:?}", e);
                 }
+                SCHEMA_MANAGER_SYNC_LOOP_COUNT.inc();
                 tokio::time::sleep(self_clone.config.keyspace_refresh_interval.0).await;
             }
         });
@@ -703,7 +708,6 @@ impl SchemaManager {
         {
             Ok(result) => result,
             Err(err) => {
-                // TODO: report metrics and alarm.
                 error!("{}: sync schema failed, skip", keyspace_id; "err" => ?err);
                 return Err(Error::Other(box_err!("sync schema failed: {:?}", err)));
             }
@@ -782,8 +786,10 @@ impl SchemaManager {
         let schemas = match self.build_new_schema(local_schema_file.as_ref(), table_infos) {
             Ok(schema) => schema,
             Err(err) => {
-                // TODO: report metrics and alarm.
                 error!("{}: build new schema failed", keyspace_id; "err" => ?err);
+                SCHEMA_MANAGER_SYNC_LOOP_ERROR_COUNT
+                    .with_label_values(&["build_new_schema"])
+                    .inc();
                 return Err(err);
             }
         };
@@ -825,7 +831,7 @@ impl SchemaManager {
         schemas: Vec<Schema>,
         keyspace_shard_stats: &[ShardStatsLite],
         stores: &[Store],
-        tx: tikv_util::mpsc::Sender<(u32, u64, i64)>,
+        tx: tikv_util::mpsc::Sender<Result<(u32, u64, i64)>>,
         runtime: &tokio::runtime::Runtime,
     ) -> Result<u32> {
         let schema_restore_version = keyspace_shard_stats
@@ -867,6 +873,12 @@ impl SchemaManager {
             if let Err(err) = res {
                 error!("{}: failed to update schema file", keyspace_id;
                     "file_id" => file_id, "schema_ver" => schema_version, "err" => ?err);
+                let _ = tx_clone
+                    .send(Err(err))
+                    .map_err(|e| warn!("{}: send failed: {:?}", keyspace_id, e));
+                SCHEMA_MANAGER_SYNC_LOOP_ERROR_COUNT
+                    .with_label_values(&["upload_schema_file"])
+                    .inc();
                 return;
             }
             if let Err(err) =
@@ -874,6 +886,12 @@ impl SchemaManager {
             {
                 error!("{}: failed to write schema file to local", keyspace_id;
                     "file_id" => file_id, "schema_ver" => schema_version, "err" => ?err);
+                let _ = tx_clone
+                    .send(Err(err))
+                    .map_err(|e| warn!("{}: send failed: {:?}", keyspace_id, e));
+                SCHEMA_MANAGER_SYNC_LOOP_ERROR_COUNT
+                    .with_label_values(&["write_schema_file_to_local"])
+                    .inc();
                 return;
             }
 
@@ -889,7 +907,7 @@ impl SchemaManager {
             )
             .await;
             let _ = tx_clone
-                .send((keyspace_id, file_id, schema_version))
+                .send(Ok((keyspace_id, file_id, schema_version)))
                 .map_err(|err| {
                     // Should happen only when `refresh_keyspace_schema` is aborted.
                     warn!("{} refresh keyspace schema: send failed: {:?}", keyspace_id, err;
@@ -903,11 +921,13 @@ impl SchemaManager {
     /// Handles completion of all spawned tasks and saves meta file
     fn handle_task_completion(
         &self,
-        rx: tikv_util::mpsc::Receiver<(u32, u64, i64)>,
+        rx: tikv_util::mpsc::Receiver<Result<(u32, u64, i64)>>,
         spawn_task_count: u32,
     ) -> Result<()> {
         for _ in 0..spawn_task_count {
-            let (keyspace_id, file_id, schema_version) = rx.recv().unwrap();
+            let Ok((keyspace_id, file_id, schema_version)) = rx.recv().unwrap() else {
+                continue;
+            };
             self.meta_file
                 .add_file(keyspace_id, file_id, schema_version);
             self.meta_file
@@ -929,7 +949,7 @@ impl SchemaManager {
         keyspace_stats: &HashMap<u32, Vec<ShardStatsLite>>,
         stores: &[Store],
     ) -> Result<()> {
-        let (tx, rx) = tikv_util::mpsc::unbounded::<(u32, u64, i64)>();
+        let (tx, rx) = tikv_util::mpsc::unbounded::<Result<(u32, u64, i64)>>();
         let runtime = self.ctx.s3fs.get_runtime();
         let mut spawn_task_count = 0;
 
@@ -949,6 +969,9 @@ impl SchemaManager {
                 Ok((local, cur, cont)) => (local, cur, cont),
                 Err(err) => {
                     error!("{}: process local schema file failed", keyspace_id; "err" => ?err);
+                    SCHEMA_MANAGER_SYNC_LOOP_ERROR_COUNT
+                        .with_label_values(&["process_local_schema_file"])
+                        .inc();
                     continue;
                 }
             };
@@ -969,6 +992,9 @@ impl SchemaManager {
                 Ok((ver, tables, cont)) => (ver, tables, cont),
                 Err(err) => {
                     error!("{}: sync schema and check updates failed", keyspace_id; "err" => ?err);
+                    SCHEMA_MANAGER_SYNC_LOOP_ERROR_COUNT
+                        .with_label_values(&["sync_schema_and_check_updates"])
+                        .inc();
                     continue;
                 }
             };
@@ -992,6 +1018,7 @@ impl SchemaManager {
                 Ok((schemas, cont)) => (schemas, cont),
                 Err(err) => {
                     error!("{}: check schema update requirements failed", keyspace_id; "err" => ?err);
+                    // NOTE: metrics reported in `check_schema_update_requirements`.
                     continue;
                 }
             };
@@ -1013,6 +1040,7 @@ impl SchemaManager {
                 Ok(task_count) => spawn_task_count += task_count,
                 Err(err) => {
                     error!("{}: spawn schema upload task failed", keyspace_id; "err" => ?err);
+                    // Note: metrics reported in `spawn_schema_upload_task`.
                     continue;
                 }
             }
@@ -1741,6 +1769,9 @@ pub async fn broadcast_schema_update_to_all_stores(
                     "broadcast schema update to store {} {} failed: {:?}",
                     store.id, status_addr, err
                 );
+                SCHEMA_MANAGER_SYNC_LOOP_ERROR_COUNT
+                    .with_label_values(&["broadcast_schema_update_to_all_stores"])
+                    .inc();
             }
         });
         handles.push(handle);
