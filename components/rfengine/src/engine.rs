@@ -320,13 +320,13 @@ impl RfEngineCore {
     }
 
     /// Applies and persists the write batch.
-    pub fn write(&self, mut wb: WriteBatch) -> Result<usize> {
-        self.apply(&mut wb);
+    pub fn write(&self, wb: WriteBatch) -> Result<usize> {
+        self.apply(&wb);
         self.persist(wb)
     }
 
     /// Applies the write batch to memory without persisting it to WAL.
-    pub fn apply(&self, wb: &mut WriteBatch) {
+    pub fn apply(&self, wb: &WriteBatch) {
         let timer = Instant::now_coarse();
         let mut truncated_logs = vec![];
         for (&peer_id, batch_data) in &wb.peers {
@@ -1449,7 +1449,7 @@ mod tests {
             for &(peer_id, region_id, truncated_idx) in truncated_regions.iter() {
                 wb.truncate_raft_log(peer_id, region_id, truncated_idx);
             }
-            engine.apply(&mut wb);
+            engine.apply(&wb);
             engine.iterate_all_states(false, |peer_id, _, key, _| {
                 let old_region_data = old_entries_map.get(&peer_id).unwrap();
                 assert!(old_region_data.get_state(key).is_some());

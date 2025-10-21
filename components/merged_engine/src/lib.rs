@@ -1239,8 +1239,8 @@ impl MergedEngine {
             return Ok(res);
         }
         preprocessor_ref.write_raft_state(ctx);
-        let mut wb = mem::take(ctx.raft_wb);
-        ctx.raft.apply(&mut wb);
+        let wb = mem::take(ctx.raft_wb);
+        ctx.raft.apply(&wb);
         *merged_wb_estimated_size += wb.estimated_size();
         merged_wb.merge_write_batch(wb);
         if *merged_wb_estimated_size > self.ctx.config.raft_write_batch_size.0 as usize {

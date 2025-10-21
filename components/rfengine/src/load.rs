@@ -157,7 +157,7 @@ impl RfEngineCore {
             } else {
                 // In scene of restore keyspace, we don't persist WAL to avoid unnecessary I/O,
                 // as the rfengine is only used temporarily during the restoration process.
-                self.apply(&mut wb);
+                self.apply(&wb);
             }
         })?;
         Ok(())

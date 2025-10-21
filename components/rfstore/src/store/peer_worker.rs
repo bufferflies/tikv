@@ -694,9 +694,9 @@ fn persist_states(ctx: &mut RaftContext, io_sender: &Sender<Option<IoTask>>) {
     if ctx.persist_readies.is_empty() && ctx.raft_wb.is_empty() {
         return;
     }
-    let mut raft_wb = mem::take(&mut ctx.raft_wb);
+    let raft_wb = mem::take(&mut ctx.raft_wb);
     let remove_dependents = mem::take(&mut ctx.remove_dependents);
-    ctx.global.engines.raft.apply(&mut raft_wb);
+    ctx.global.engines.raft.apply(&raft_wb);
     let readies = mem::take(&mut ctx.persist_readies);
     let io_task = IoTask {
         raft_wb,
