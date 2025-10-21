@@ -168,7 +168,7 @@ impl ReplicationWorker {
             .http_client(hyper::Client::builder())
             .unwrap();
         let runtime = ctx.fs.get_runtime();
-        let merged_engine = MergedEngine::new(ctx.clone(), None)?;
+        let merged_engine = box_try!(MergedEngine::new(ctx.clone(), None));
         let keyspace_ids = merged_engine.get_keyspaces();
         let mut keyspace_services = HashMap::default();
         let cdc_addrs = Arc::new(dashmap::DashMap::new());

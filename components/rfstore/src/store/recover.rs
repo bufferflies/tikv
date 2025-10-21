@@ -218,10 +218,7 @@ impl RecoverHandler {
         let (region_meta, preprocessed_index) = self.load_region_meta(shard.id, shard.ver);
         let low_idx = applied_index + 1;
         let high_idx = preprocessed_index + 1;
-        info!(
-            "{} recover from applied {} to index {}",
-            tag, applied_index, preprocessed_index,
-        );
+        info!("{} recover: [{}, {})", tag, low_idx, high_idx,);
         let mut entries = Vec::with_capacity((high_idx.saturating_sub(low_idx)) as usize);
         let peer_id = self.get_peer_id(shard.id);
         self.rf_engine

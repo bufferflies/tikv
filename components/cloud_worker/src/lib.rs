@@ -324,6 +324,7 @@ fn start_server_impl(
         })
         .map_err(|e| {
             error!("failed to create replication worker"; "err" => ?e);
+            debug_assert!(false, "failed to create replication worker: {:?}", e);
         })
         .ok()
     } else {

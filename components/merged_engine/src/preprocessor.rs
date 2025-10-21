@@ -113,4 +113,8 @@ impl Preprocessor {
             self.region = new_region;
         }
     }
+
+    pub(crate) fn mut_shard_meta(&mut self) -> Option<&mut ShardMeta> {
+        self.shard_meta.as_mut()
+    }
 }

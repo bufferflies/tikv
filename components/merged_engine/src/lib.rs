@@ -163,7 +163,7 @@ impl RegionProgress {
         }
     }
 
-    pub fn upsert_entry<F>(&mut self, log_index: u64, term: u32, or_insert: F)
+    pub fn upsert_entry<F>(&mut self, tag: ShardTag, log_index: u64, term: u32, or_insert: F)
     where
         F: FnOnce() -> RaftLogOpWithCounter,
     {
@@ -178,7 +178,10 @@ impl RegionProgress {
                     if existing_op.counter() >= QUORUM_SIZE && existing_op.index > self.commit_index
                     {
                         self.commit_index = existing_op.index;
-                        debug!("upsert_entry: advance commit index: {}", self.commit_index; "region" => self.region_id);
+                        debug!(
+                            "{} upsert_entry: advance commit index: {}",
+                            tag, self.commit_index
+                        );
                     }
                     return;
                 }
@@ -283,7 +286,12 @@ impl MergedEngine {
     pub fn new(ctx: MergedEngineContext, backup_meta: Option<ClusterBackupMeta>) -> Result<Self> {
         let merged_dir = ctx.local_dir.join("merged");
         let merged_cfg = rfengine::RfEngineConfig::default();
-        let raft = RfEngine::open(merged_dir.as_path(), &merged_cfg, None, None)?;
+        let raft = box_try!(RfEngine::open(
+            merged_dir.as_path(),
+            &merged_cfg,
+            None,
+            None
+        ));
         let merged_store_id = ctx.config.merged_store_id;
         if let Some(store_ident) = rfengine::load_store_ident(&raft) {
             if store_ident.get_store_id() != merged_store_id {
@@ -300,17 +308,20 @@ impl MergedEngine {
         }
         raft.set_engine_id(merged_store_id);
         let manifest_dir = ctx.local_dir.join("manifest");
-        let mut manifest = Manifest::open(&manifest_dir)?;
+        let mut manifest = box_try!(Manifest::open(&manifest_dir));
         let (region_progresses, tombstone_regions) = if manifest.store_progresses.is_empty() {
             let (region_progresses, store_progresses) =
-                Self::recover_from_backup(&ctx, backup_meta, &raft)?;
+                box_try!(Self::recover_from_backup(&ctx, backup_meta, &raft));
             manifest.store_progresses = store_progresses;
             // Note: manifest is not persisted here to avoid saving all entries. If
             // replication worker restart before next loop, we will recover from backup
             // again.
             (region_progresses, HashSet::default())
         } else {
-            Self::recover_from_merged_raft_engine(&raft, &manifest.uncommitted_entries)?
+            box_try!(Self::recover_from_merged_raft_engine(
+                &raft,
+                &manifest.uncommitted_entries
+            ))
         };
         let mut preprocessors = HashMap::default();
         for (region_id, _) in raft.get_region_peer_map() {
@@ -335,15 +346,14 @@ impl MergedEngine {
         let mut recover_handler = RecoverHandler::new(raft.clone());
         recover_handler.set_merged_engine(true);
         let mut meta_iter = EmptyMetaIterator {};
-        let kv = Self::init_kv_engine(
+        let kv = box_try!(Self::init_kv_engine(
             &ctx,
             io_rate_limiter,
             store_limiter,
             &mut meta_iter,
             recover_handler.clone(),
-        )
-        .unwrap();
-        tikv_util::init_task_local_sync(|| {
+        ));
+        box_try!(tikv_util::init_task_local_sync(|| {
             Self::load_shards_impl(
                 &ctx,
                 &kv,
@@ -351,7 +361,7 @@ impl MergedEngine {
                 &manifest.keyspace_states,
                 Some(&tombstone_regions),
             )
-        })?;
+        }));
 
         // Should be invoked after `load_shards_impl` (to setup the dependency).
         let delay_destroy_regions =
@@ -988,7 +998,7 @@ impl MergedEngine {
                 origin_wb.read_peer_logs(peer_id, |logs| {
                     for log_op in logs {
                         debug!("{} update_wal: insert log index {}", tag, log_op.index; "origin" => %origin_tag);
-                        progress.upsert_entry(log_op.index, log_op.term, || log_op.clone().into());
+                        progress.upsert_entry(tag, log_op.index, log_op.term, || log_op.clone().into());
                     }
                 });
                 self.updated_regions.insert(region_id);
@@ -1134,6 +1144,7 @@ impl MergedEngine {
         let progress = self.region_progresses.get_mut(&updated_region).unwrap();
         let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
         let high: u64 = progress.commit_index + 1;
+        debug!("{} sync_merged: [{}, {})", tag, low, high);
         if low >= high {
             return Ok(SyncRegionResult::Finished);
         }
@@ -1327,28 +1338,41 @@ impl MergedEngine {
 
             // Skip truncating region with dependents. The parent region may need the old
             // raft logs on recover.
-            let truncate_raft_log = if !self.raft.has_dependents(region_id)
-                && progress.truncated_index > self.raft.get_truncated_index(region_id).unwrap()
-            {
-                if let Some(preprocessor) = self.preprocessors.get_mut(&region_id) {
-                    if let Some(shard_meta) = preprocessor.as_ref().shard_meta {
-                        if shard_meta.data_sequence < progress.truncated_index {
-                            shard_meta.data_sequence = progress.truncated_index;
-                            write_engine_meta(raft_wb, region_id, shard_meta);
-                        }
-                    }
-                }
-                raft_wb.truncate_raft_log(region_id, region_id, progress.truncated_index);
-                Some(progress.truncated_index)
-            } else {
-                None
-            };
+            let truncated_index = progress.truncated_index;
+            let truncate_raft_log =
+                self.truncate_region_raft_log(region_id, truncated_index, raft_wb);
 
             debug!(
                 "{} update_progress_and_truncate: truncate entries <= {}, raft log <= {:?}",
                 tag, commit_index, truncate_raft_log
             );
         }
+    }
+
+    fn truncate_region_raft_log(
+        &mut self,
+        region_id: u64,
+        truncated_index: u64,
+        raft_wb: &mut WriteBatch,
+    ) -> Option<u64> {
+        // Skip truncate region with dependents and parent. The parent region may need
+        // the old raft logs on recover.
+        if self.raft.has_dependents(region_id)
+            || truncated_index <= self.raft.get_truncated_index(region_id).unwrap()
+        {
+            return None;
+        }
+        let shard_meta = self.preprocessors.get_mut(&region_id)?.mut_shard_meta()?;
+        if shard_meta.parent.is_some() {
+            return None;
+        }
+
+        if shard_meta.data_sequence < truncated_index {
+            shard_meta.data_sequence = truncated_index;
+            write_engine_meta(raft_wb, region_id, shard_meta);
+        }
+        raft_wb.truncate_raft_log(region_id, region_id, truncated_index);
+        Some(truncated_index)
     }
 
     fn destroy_regions(&mut self, ctx: &mut SyncRegionsContext<'_>) {
@@ -1722,7 +1746,7 @@ fn fetch_raft_entries_to_region_progress(
             "{} fetch_raft_entries: insert log index {}",
             tag, entry.index
         );
-        region_progress.upsert_entry(entry.index, entry.term as u32, || {
+        region_progress.upsert_entry(tag, entry.index, entry.term as u32, || {
             RaftLogOp::new(&entry).into()
         });
     }
