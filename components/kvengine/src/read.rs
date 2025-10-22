@@ -2248,6 +2248,13 @@ impl CloudColumnarReaders {
         }
         vec![]
     }
+
+    pub fn ffi_physical_table_id(&self) -> i64 {
+        self.reader
+            .as_ref()
+            .map(|reader| reader.physical_table_id())
+            .unwrap_or(-1)
+    }
 }
 
 pub struct CloudColumnarReader {
@@ -2504,6 +2511,10 @@ impl CloudColumnarReader {
         }
         self.serialize_cost += start.saturating_elapsed_secs();
         data
+    }
+
+    pub fn physical_table_id(&self) -> i64 {
+        self.schema.table_id
     }
 }
 
