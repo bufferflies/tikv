@@ -221,6 +221,7 @@ impl GcRunner {
                         let meta = fs::metadata(&path).table_ctx(id, "gc.schema.metadata")?;
                         if self.is_old_file(meta) {
                             self.kv.remove_fd_cache(id);
+                            self.kv.remove_schema_file(id);
                             Self::remove_file(store_id, &path)
                                 .table_ctx(id, "gc.schema.remove_file")?;
                         }

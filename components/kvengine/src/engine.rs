@@ -1049,6 +1049,10 @@ impl EngineCore {
         self.fd_cache.remove(file_id);
     }
 
+    pub fn remove_schema_file(&self, file_id: u64) {
+        self.schema_files.remove(&file_id);
+    }
+
     pub fn get_value_cache(&self) -> Option<&ValueCache> {
         self.value_cache.as_ref()
     }
