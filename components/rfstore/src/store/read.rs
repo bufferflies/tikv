@@ -226,13 +226,15 @@ pub struct LocalReader {
 
 impl ReadExecutor for LocalReader {
     fn get_snapshot(&self, region_id: u64, region_ver: u64) -> Result<RegionSnapshot> {
-        if let Some(snap) = self.kv_engine.get_snap_access(region_id) {
-            if snap.get_version() == region_ver {
-                return Ok(RegionSnapshot::from_snapshot(
-                    snap,
-                    self.kv_engine.get_value_cache(),
-                ));
+        if let Ok(shard) = self.kv_engine.get_shard_with_ver(region_id, region_ver) {
+            if !shard.is_active() {
+                return Err(Error::NotLeader(region_id, None));
             }
+            let snap = shard.new_snap_access();
+            return Ok(RegionSnapshot::from_snapshot(
+                snap,
+                self.kv_engine.get_value_cache(),
+            ));
         }
         Err(Error::StaleCommand)
     }
