@@ -11,7 +11,7 @@ use std::{
 use async_trait::async_trait;
 use bstr::ByteSlice;
 use bytes::{BufMut, Bytes, BytesMut};
-use engine_traits::{GetObjectOptions, ListObjectContent, ObjectStorage};
+use engine_traits::{GetObjectOptions, ListObjectContent, ObjectCache, ObjectStorage};
 use fail::fail_point;
 use farmhash::fingerprint64;
 use futures::StreamExt;
@@ -627,6 +627,22 @@ impl S3FsCore {
         Ok(writer.into_inner().freeze())
     }
 
+    pub async fn get_object_with_cache(
+        &self,
+        key: String,
+        file_name: String,
+        opts: GetObjectOptions,
+        cache: Option<&ObjectCache>,
+    ) -> crate::dfs::Result<Bytes> {
+        match cache {
+            Some(cache) => {
+                let with = async { self.get_object(key.clone(), file_name, opts).await };
+                cache.get_or_insert_async(&key, with).await
+            }
+            None => self.get_object(key, file_name, opts).await,
+        }
+    }
+
     pub async fn get_object_to_writer<W, F>(
         &self,
         key: String,
@@ -1007,12 +1023,17 @@ impl ObjectStorage for S3Fs {
     fn get_objects(
         &self,
         keys: Vec<(String, GetObjectOptions)>,
+        cache: Option<&ObjectCache>,
     ) -> Result<Vec<(String, Bytes)>, String> {
-        let get_object = |key: String, opts: GetObjectOptions| {
+        let get_object = |key: String, opts: GetObjectOptions, cache: Option<&ObjectCache>| {
             let full_key = format!("{}/{}", self.prefix, key);
             let fs = self.clone();
+            let cache = cache.cloned();
             async move {
-                match fs.get_object(full_key, key.clone(), opts).await {
+                match fs
+                    .get_object_with_cache(full_key, key.clone(), opts, cache.as_ref())
+                    .await
+                {
                     Ok(data) => Ok((key, data)),
                     Err(err) => Err(format!("get {} failed {:?}", &key, err)),
                 }
@@ -1023,13 +1044,13 @@ impl ObjectStorage for S3Fs {
         if keys.len() == 1 {
             let mut keys = keys;
             let (key, opts) = keys.pop().unwrap();
-            let res = runtime.block_on(get_object(key, opts))?;
+            let res = runtime.block_on(get_object(key, opts, cache))?;
             return Ok(vec![res]);
         }
 
         let mut join_set = tokio::task::JoinSet::new();
         for (key, opts) in keys {
-            join_set.spawn_on(get_object(key, opts), runtime.handle());
+            join_set.spawn_on(get_object(key, opts, cache), runtime.handle());
         }
 
         runtime.block_on(async move {

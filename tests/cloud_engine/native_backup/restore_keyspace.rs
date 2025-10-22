@@ -409,6 +409,7 @@ fn test_restore_keyspace_impl(
         instant_backup_name
     };
 
+    let object_cache = cluster.create_object_cache_randomly();
     // Restore keyspace.
     restore_keyspace::restore_keyspace(
         keyspace_id,
@@ -421,6 +422,7 @@ fn test_restore_keyspace_impl(
         runtime,
         truncate_ts,
         reporter.clone(),
+        object_cache.clone(),
     )
     .unwrap();
     step!("restore done");
@@ -463,6 +465,7 @@ fn test_restore_keyspace_impl(
             runtime,
             Some(truncate_ts_pitr),
             reporter,
+            object_cache,
         )
         .unwrap();
         step!("restore (pitr on restored data) done");
@@ -824,6 +827,7 @@ fn test_restore_archived_keyspace_impl(
         );
     }
 
+    let object_cache = cluster.create_object_cache_randomly();
     for idx in 0..BACKUP_DAYS - 1 {
         // Restore keyspace.
         {
@@ -845,6 +849,7 @@ fn test_restore_archived_keyspace_impl(
                 runtime,
                 None,
                 reporter.clone(),
+                object_cache.clone(),
             )
             .unwrap();
             step!("restore done. case: {}:{}:{}", case_idx, loop_idx, idx);
@@ -1035,6 +1040,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
     }
 
     let restore_config = RestoreConfig::default_for_test();
+    let object_cache = cluster.create_object_cache_randomly();
     // Restore keyspace.
     {
         restore_keyspace::restore_keyspace(
@@ -1048,6 +1054,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
             &runtime,
             None,
             reporter.clone(),
+            object_cache.clone(),
         )
         .unwrap();
 
@@ -1091,6 +1098,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
             &runtime,
             Some(truncate_ts_a),
             reporter,
+            object_cache,
         )
         .unwrap();
         // Verify restored data.
@@ -1160,6 +1168,7 @@ fn test_restore_keyspace_with_no_chunk() {
 
     // Restore keyspace.
     let restore_config = RestoreConfig::default_for_test();
+    let object_cache = cluster.create_object_cache_randomly();
     restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -1171,6 +1180,7 @@ fn test_restore_keyspace_with_no_chunk() {
         &runtime,
         None,
         reporter,
+        object_cache,
     )
     .unwrap();
 
@@ -1258,6 +1268,7 @@ fn test_restore_keyspace_with_slow_dfs() {
     }
 
     let restore_config = RestoreConfig::default_for_test();
+    let object_cache = cluster.create_object_cache_randomly();
     NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR.reset();
     let mut ok = false;
     for _ in 0..30 {
@@ -1273,6 +1284,7 @@ fn test_restore_keyspace_with_slow_dfs() {
             &runtime,
             None,
             reporter.clone(),
+            object_cache.clone(),
         )
         .unwrap();
 
@@ -1402,6 +1414,7 @@ fn test_restore_keyspace_with_schema() {
 
     // Restore keyspace.
     let restore_config = RestoreConfig::default_for_test();
+    let object_cache = cluster.create_object_cache_randomly();
     restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -1413,6 +1426,7 @@ fn test_restore_keyspace_with_schema() {
         &runtime,
         None,
         reporter,
+        object_cache,
     )
     .unwrap();
 
@@ -1585,6 +1599,7 @@ fn test_restore_keyspace_with_failed_store(
         lower_memory: RestoreConfig::use_lower_memory(),
         ..Default::default()
     };
+    let object_cache = cluster.create_object_cache_randomly();
 
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
@@ -1597,6 +1612,7 @@ fn test_restore_keyspace_with_failed_store(
         &runtime,
         None,
         reporter.clone(),
+        object_cache.clone(),
     );
     assert_eq!(
         res.is_ok(),
@@ -1621,6 +1637,7 @@ fn test_restore_keyspace_with_failed_store(
         &runtime,
         None,
         reporter,
+        object_cache,
     );
     assert_eq!(
         res_tolerated.is_err(),

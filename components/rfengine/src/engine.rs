@@ -808,7 +808,7 @@ fn restore_all_raft_logs(
     let raft_file_key = snapshot_rlog
         .unwrap_or_else(|| store_raft_log_file_key(store_id, store_meta.get_manifest().epoch_id));
     let raft_file = object_storage
-        .get_objects(vec![(raft_file_key, GetObjectOptions::default())])
+        .get_objects(vec![(raft_file_key, GetObjectOptions::default())], None)
         .unwrap();
     let (_, rlog_data) = raft_file.first().unwrap();
     restore_all_raft_logs_with_snap_rlog_file(None, store_meta, dir, rlog_data)
@@ -878,7 +878,7 @@ fn restore_keyspace_raft_logs(
         end_off: None,
     };
     let raft_meta_data = object_storage
-        .get_objects(vec![(raft_file_key.clone(), option)])
+        .get_objects(vec![(raft_file_key.clone(), option)], None)
         .unwrap();
     let (_, rlog_meta_data) = raft_meta_data.first().unwrap();
     let mut raft_meta = StoreRaftLogBackupMeta::default();
@@ -902,7 +902,7 @@ fn restore_keyspace_raft_logs(
         end_off: Some(raft_files.last().unwrap().end_off),
     };
     let keyspace_raft_data = object_storage
-        .get_objects(vec![(raft_file_key, option)])
+        .get_objects(vec![(raft_file_key, option)], None)
         .unwrap();
     let (_, keyspace_raft_data) = keyspace_raft_data.first().unwrap();
     let mut cur_offset = 0;
@@ -1042,7 +1042,7 @@ pub fn restore(
                 )
             })
             .collect();
-        let mut objects = object_storage.get_objects(keys).unwrap();
+        let mut objects = object_storage.get_objects(keys, None).unwrap();
         objects.sort_by(|(a, _), (b, _)| a.cmp(b));
         let wal_path = wal_file_name(dir, store_meta.get_manifest().epoch_id + 1);
         let file = OpenOptions::new().write(true).open(wal_path).unwrap();

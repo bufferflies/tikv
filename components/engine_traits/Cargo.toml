@@ -16,6 +16,7 @@ file_system = { workspace = true }
 kvproto = { workspace = true }
 log_wrappers = { workspace = true }
 protobuf = "2"
+quick_cache = "0.6.14"
 raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
 serde = "1.0"
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }

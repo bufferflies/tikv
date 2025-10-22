@@ -603,6 +603,7 @@ fn get_cluster_backup_files_and_shards_count(
         true,
         None,
         false,
+        None,
     )?;
     let all_files = HashMap::from_iter(
         cluster

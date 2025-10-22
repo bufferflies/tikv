@@ -19,7 +19,7 @@ use bstr::ByteSlice;
 use bytes::{Buf, Bytes, BytesMut};
 use chrono::{NaiveTime, Utc};
 use collections::HashMap;
-use engine_traits::{GetObjectOptions, ObjectStorage};
+use engine_traits::{GetObjectOptions, ObjectCache, ObjectStorage};
 use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;
 use http::{Request, StatusCode};
@@ -357,6 +357,7 @@ pub struct ReplayWalLogsContext<'a> {
     pub full_restore: bool,
     pub fetch_wal_timeout: Duration,
     pub cache_dir: Option<PathBuf>,
+    pub object_cache: Option<ObjectCache>,
 }
 
 // TODO: Filter out the write batches of specified keyspace to replay to save
@@ -447,6 +448,7 @@ pub struct CollectWalChunksContext {
     pub complete_wal_chunks: bool,
     pub fetch_wal_timeout: Duration,
     pub cache_dir: Option<PathBuf>,
+    pub object_cache: Option<ObjectCache>,
 }
 
 impl From<&ReplayWalLogsContext<'_>> for CollectWalChunksContext {
@@ -458,6 +460,7 @@ impl From<&ReplayWalLogsContext<'_>> for CollectWalChunksContext {
             complete_wal_chunks: ctx.complete_wal_chunks,
             fetch_wal_timeout: ctx.fetch_wal_timeout,
             cache_dir: ctx.cache_dir.clone(),
+            object_cache: ctx.object_cache.clone(),
         }
     }
 }
@@ -506,7 +509,12 @@ pub fn collect_wal_chunks_with_retry(
                     cache_dir,
                 )
             } else {
-                collect_all_chunk_files(ctx.dfs.as_ref(), epoch_id, chunk_metas.clone())
+                collect_all_chunk_files(
+                    ctx.dfs.as_ref(),
+                    epoch_id,
+                    chunk_metas.clone(),
+                    ctx.object_cache.as_ref(),
+                )
             }
         },
         |err| {
@@ -746,6 +754,7 @@ fn collect_all_chunk_files(
     dfs: &S3Fs,
     epoch_id: u32,
     chunk_metas: Vec<WalChunkMeta>,
+    object_cache: Option<&ObjectCache>,
 ) -> Result<Vec<WalChunkData>> {
     let chunk_keys_with_option = chunk_metas
         .into_iter()
@@ -753,7 +762,7 @@ fn collect_all_chunk_files(
         .collect::<Vec<_>>();
 
     let mut chunks = dfs
-        .get_objects(chunk_keys_with_option)
+        .get_objects(chunk_keys_with_option, object_cache)
         .map_err(|e| Error::DfsError(dfs::Error::S3(e)))?;
 
     chunks.sort_by(|a, b| a.0.cmp(&b.0));
@@ -886,6 +895,7 @@ pub fn collect_snapshot_meta_rlog_files(
     prefix: &str,
     cluster_backup: &ClusterBackupMeta,
     store_id: u64,
+    object_cache: Option<&ObjectCache>,
 ) -> Result<StoreRlog> {
     let store_meta = cluster_backup
         .get_stores()
@@ -936,10 +946,11 @@ pub fn collect_snapshot_meta_rlog_files(
     let full_key = format!("{}/{}", dfs.get_prefix(), store_meta_key);
     let meta_data = dfs
         .get_runtime()
-        .block_on(dfs.get_object(
+        .block_on(dfs.get_object_with_cache(
             full_key,
             store_meta_key.clone(),
             GetObjectOptions::default(),
+            object_cache,
         ))
         .map_err(|e| {
             tikv_util::error!(
@@ -965,7 +976,12 @@ pub fn collect_snapshot_meta_rlog_files(
     let full_key = format!("{}/{}", dfs.get_prefix(), raft_file_key);
     let rlog_data = dfs
         .get_runtime()
-        .block_on(dfs.get_object(full_key, raft_file_key.clone(), GetObjectOptions::default()))
+        .block_on(dfs.get_object_with_cache(
+            full_key,
+            raft_file_key.clone(),
+            GetObjectOptions::default(),
+            object_cache,
+        ))
         .map_err(|e| {
             tikv_util::error!(
                 "failed to collect snapshot rlog {} for store {}, err {}",
@@ -1057,6 +1073,7 @@ pub fn collect_store_wal_rlog_files(
         &s3fs.get_prefix(),
         cluster_backup,
         store_id,
+        None,
     )?;
 
     // collect wal chunks files
@@ -1075,6 +1092,7 @@ pub fn collect_store_wal_rlog_files(
         complete_wal_chunks: true,
         fetch_wal_timeout: timeout,
         cache_dir: None, // TODO: cache_dir
+        object_cache: None,
     };
     // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found, the
     // `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.

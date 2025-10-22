@@ -296,6 +296,7 @@ fn test_periodic_backup() {
     let backup_file = files.choose(&mut thread_rng()).unwrap();
 
     let pd_client = cluster.get_pd_client();
+    let object_cache = cluster.create_object_cache_randomly();
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -307,6 +308,7 @@ fn test_periodic_backup() {
         &runtime,
         None,
         reporter,
+        object_cache,
     )
     .unwrap();
 

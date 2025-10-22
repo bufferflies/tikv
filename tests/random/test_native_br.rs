@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use engine_traits::ObjectCache;
 use kvengine::dfs::S3Fs;
 use native_br::{
     backup::BackupConfig,
@@ -44,6 +45,7 @@ pub(crate) fn do_restore_keyspace(
     backup_name: &str,
     truncate_ts: Option<u64>,
     reporter: Arc<dyn ReportRestoreStepTrait>,
+    object_cache: Option<ObjectCache>,
 ) -> native_br::Result<restore_keyspace::RestoredKeyspace> {
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(S3Fs::new_from_config(dfs_config));
@@ -58,6 +60,7 @@ pub(crate) fn do_restore_keyspace(
         runtime,
         truncate_ts,
         reporter,
+        object_cache,
     )
 }
 
@@ -178,6 +181,7 @@ pub(crate) fn spawn_restore_keyspace(
     keyspace_manager: KeyspaceManager,
     s3fs: &S3Fs,
     _enable_oss_chaos: bool,
+    object_cache: Option<ObjectCache>,
     timeout: Duration,
 ) -> JoinHandle<()> {
     let s3fs = s3fs.clone();
@@ -266,6 +270,7 @@ pub(crate) fn spawn_restore_keyspace(
                     &backup_name,
                     Some(backup.backup_ts),
                     reporter.clone(),
+                    object_cache.clone(),
                 ) {
                     Ok(res) => Some(res),
                     Err(Error::BackupEmptyForKeyspace(_)) => {

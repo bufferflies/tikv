@@ -109,6 +109,7 @@ pub(crate) fn execute_show_txn_log(args: ShowTxnLogArgs) {
         true,
         None,
         false,
+        None,
     )
     .unwrap();
     let mut txn_logs = vec![];

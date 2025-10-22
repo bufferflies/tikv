@@ -96,6 +96,7 @@ pub fn execute_mvcc(args: MvccArgs) {
         false,
         None,
         true,
+        None,
     )
     .unwrap();
     let kv = cluster.get_kvengine();

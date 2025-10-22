@@ -255,6 +255,7 @@ fn setup_raft_engine(
             &dfs.get_prefix(),
             cluster_backup,
             store_id,
+            None,
         )?;
         rfengine::lightweight_restore(
             store_id,
@@ -299,6 +300,7 @@ fn setup_raft_engine(
             fetch_wal_timeout: Duration::from_secs(1), /* NOTE: Retry is unnecessary for full
                                                         * restoration. */
             cache_dir,
+            object_cache: None,
         };
         replay_wal_logs_from_backup(tag, &ctx, snap_epoch_opt.unwrap())?;
     }

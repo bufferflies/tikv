@@ -15,6 +15,7 @@ use bytes::Bytes;
 use cloud_server::{server::GRPC_THREAD_PREFIX, TikvServer};
 use cloud_worker::{local_gc::LocalGcConfig, native_br::NativeBrConfig, CloudWorker};
 use dashmap::DashMap;
+use engine_traits::ObjectCache;
 use futures::{executor::block_on, future::try_join_all};
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
 use hyper::{http, Body, Request};
@@ -1210,6 +1211,24 @@ impl ServerCluster {
 
         keyspace_id
     }
+
+    pub fn create_object_cache_randomly(&self) -> Option<ObjectCache> {
+        use rand::prelude::*;
+        let factor = *[0, 4, 32, 128].choose(&mut thread_rng()).unwrap();
+        (factor > 0).then(|| {
+            let compressed_wal_chunk_size = self
+                .get_any_node_config()
+                .unwrap()
+                .rfengine
+                .wal_chunk_target_file_size
+                .0
+                / 3;
+            ObjectCache::new(
+                compressed_wal_chunk_size * factor,
+                compressed_wal_chunk_size,
+            )
+        })
+    }
 }
 
 impl Drop for ServerCluster {
@@ -1367,6 +1386,7 @@ pub fn new_test_config(
     config.rocksdb.max_background_jobs = 2;
     config.rocksdb.max_sub_compactions = 1;
     config.rfengine.target_file_size = ReadableSize::kb(128);
+    config.rfengine.wal_chunk_target_file_size = ReadableSize::kb(16);
     config.rfengine.wal_sync_dir = format!("{}/{}/wal", base_dir.to_str().unwrap(), node_id);
     // config.rfengine.wal_secondary_dir = format!("{}/{}/wal2",
     // base_dir.to_str().unwrap(), node_id);

@@ -167,6 +167,7 @@ fn test_random_all() {
         lower_memory: switches.restore_lower_memory,
         ..Default::default()
     };
+    let object_cache = cluster.create_object_cache_randomly();
     for _ in 0..RESTORE_CONCURRENCY {
         handles.push(spawn_restore_keyspace(
             cluster.get_pd_client(),
@@ -175,6 +176,7 @@ fn test_random_all() {
             keyspace_manager.clone(),
             &s3fs,
             switches.enable_oss_chaos,
+            object_cache.clone(),
             TIMEOUT,
         ));
     }

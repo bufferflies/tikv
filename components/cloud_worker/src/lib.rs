@@ -912,6 +912,7 @@ impl Config {
             timeout_fetch_wal: self.native_br.restore_timeout_fetch_wal,
             timeout_pd_control: self.native_br.restore_timeout_pd_control,
             max_retry: self.native_br.restore_max_retry,
+            store_concurrency: self.native_br.restore_store_concurrency,
             tolerate_err,
             coarse_split_regions_factor: self.native_br.restore_coarse_split_regions_factor,
             lower_memory: self.native_br.lower_memory,

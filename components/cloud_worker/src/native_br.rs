@@ -26,17 +26,23 @@ use native_br::{
     backup_worker,
     backup_worker::BackupWorker,
     common::get_all_incremental_backups,
-    restore,
+    restore, restore_keyspace,
     restore_keyspace::{
-        restore_keyspace_with_cfg, ReportRestoreStepTrait, RestoreStep, RestoredKeyspace,
+        restore_keyspace_with_cfg, ObjectCache, ReportRestoreStepTrait, RestoreStep,
+        RestoredKeyspace,
     },
 };
 use pd_client::PdClient;
 use serde::Deserialize;
 use tikv::storage::mvcc::TimeStamp;
 use tikv_util::{
-    config::ReadableDuration, debug, error, errors::Context as _, info, sys::SysQuota,
-    time::Instant, warn, HandyRwLock,
+    config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
+    debug, error,
+    errors::Context as _,
+    info,
+    sys::SysQuota,
+    time::Instant,
+    warn, HandyRwLock,
 };
 use tokio::runtime::Runtime;
 
@@ -733,6 +739,7 @@ pub(crate) struct BrContext {
     pub keyspace_tasks: RwLock<KeyspacesMap>,
     pub backup_worker: BackupWorker,
     restore_concurrency: usize,
+    object_cache: Option<ObjectCache>,
 }
 
 impl BrContext {
@@ -883,6 +890,7 @@ impl BrContext {
             &self.runtime,
             truncate_ts,
             progress_reporter,
+            self.object_cache.clone(),
         )?)
     }
 
@@ -1079,7 +1087,10 @@ pub struct NativeBrConfig {
     /// restore.
     pub restore_tolerate_err: bool,
 
+    pub restore_store_concurrency: usize,
     pub restore_concurrency_per_core: f64,
+    pub restore_object_cache_capacity: AbsoluteOrPercentSize,
+    pub wal_chunk_target_file_size: ReadableSize,
 
     /// See `RestoreConfig::lower_memory`.
     pub lower_memory: bool,
@@ -1104,7 +1115,10 @@ impl Default for NativeBrConfig {
             backup_skip_keyspace_meta: false,
             backup_tolerate_err: false,
             restore_tolerate_err: false,
+            restore_store_concurrency: restore_keyspace::RESTORE_RFENGINE_CONCURRENCY,
             restore_concurrency_per_core: 1.0,
+            restore_object_cache_capacity: 0.into(),
+            wal_chunk_target_file_size: ReadableSize::mb(64),
             lower_memory: false,
         }
     }
@@ -1137,6 +1151,17 @@ impl NativeBrManager {
             "native_br: restore concurrency limit: {}",
             restore_concurrency
         );
+        let object_cache_capacity = config
+            .native_br
+            .restore_object_cache_capacity
+            .as_memory_size();
+        let object_cache = (object_cache_capacity > 0).then(|| {
+            info!("native_br: create object cache"; "capacity" => object_cache_capacity);
+            ObjectCache::new(
+                object_cache_capacity,
+                config.native_br.wal_chunk_target_file_size.0 / 3,
+            )
+        });
         let mut context = BrContext {
             pd_client,
             s3fs,
@@ -1146,6 +1171,7 @@ impl NativeBrManager {
             keyspace_tasks: Default::default(),
             backup_worker,
             restore_concurrency,
+            object_cache,
         };
         if let Err(err) = context.init() {
             warn!("BR context init failed: {:?}", err);

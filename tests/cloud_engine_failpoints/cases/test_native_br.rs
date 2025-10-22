@@ -186,6 +186,7 @@ fn test_backup_on_scaling_up() {
     );
     client.verify_data_with_ref_store();
 
+    let object_cache = cluster.create_object_cache_randomly();
     // Perform restore to verify backup.
     for (bk_name, ref_store) in [
         (backup_name, origin_ref_store),
@@ -208,6 +209,7 @@ fn test_backup_on_scaling_up() {
             &runtime,
             None,
             reporter.clone(),
+            object_cache.clone(),
         )
         .expect("restore");
         info!("restore keyspace result for backup {}: {:?}", bk_name, res);
@@ -288,6 +290,7 @@ fn test_restore_on_disk_full() {
     fail::cfg(low_space_fp, "return").unwrap();
 
     let restore_config = RestoreConfig::default_for_test();
+    let object_cache = cluster.create_object_cache_randomly();
     thread::scope(|s| {
         let pd_client = cluster.get_pd_client();
         let h = s.spawn(move || {
@@ -302,6 +305,7 @@ fn test_restore_on_disk_full() {
                 &runtime,
                 None,
                 reporter,
+                object_cache,
             )
         });
 
@@ -594,6 +598,7 @@ fn test_backup_pessimistic_lock() {
         lower_memory: RestoreConfig::use_lower_memory(),
         ..Default::default()
     };
+    let object_cache = cluster.create_object_cache_randomly();
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -605,6 +610,7 @@ fn test_backup_pessimistic_lock() {
         &runtime,
         None,
         reporter.clone(),
+        object_cache,
     )
     .expect("restore");
     info!(
@@ -771,6 +777,7 @@ fn test_check_backup_ts(#[case] write_method: TxnWriteMethod) {
 
     // Perform restore.
     let restore_config = RestoreConfig::default_for_test();
+    let object_cache = cluster.create_object_cache_randomly();
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -782,6 +789,7 @@ fn test_check_backup_ts(#[case] write_method: TxnWriteMethod) {
         &runtime,
         None,
         reporter.clone(),
+        object_cache,
     )
     .expect("restore");
     info!("restore: {:?}", res);
@@ -949,6 +957,7 @@ fn test_check_backup_ts_with_async_commit() {
         ref_store0
     });
 
+    let object_cache = cluster.create_object_cache_randomly();
     // Perform restore.
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
@@ -961,6 +970,7 @@ fn test_check_backup_ts_with_async_commit() {
         &runtime,
         None,
         reporter.clone(),
+        object_cache,
     )
     .expect("restore");
     info!("restore: {:?}", res);

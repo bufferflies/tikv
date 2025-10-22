@@ -235,6 +235,7 @@ fn execute_restore_keyspace_impl(
         &runtime,
         args.truncate_ts,
         reporter,
+        None,
     )
 }
 

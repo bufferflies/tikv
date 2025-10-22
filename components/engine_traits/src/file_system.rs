@@ -106,6 +106,7 @@ pub trait ObjectStorage: Sync + Send {
     fn get_objects(
         &self,
         keys: Vec<(String, GetObjectOptions)>,
+        cache: Option<&ObjectCache>,
     ) -> std::result::Result<Vec<(String, Bytes)>, String>;
 
     fn list_objects(
@@ -114,4 +115,47 @@ pub trait ObjectStorage: Sync + Send {
         prefix: Option<&str>,
         max_keys: Option<u32>,
     ) -> std::result::Result<(Vec<ListObjectContent>, Option<String>), String>;
+}
+
+#[derive(Clone)]
+pub struct ObjectWeighter {}
+
+impl quick_cache::Weighter<String, Bytes> for ObjectWeighter {
+    fn weight(&self, key: &String, val: &Bytes) -> u64 {
+        key.len() as u64 + val.len() as u64
+    }
+}
+
+#[derive(Clone)]
+pub struct ObjectCache {
+    cache: Arc<
+        quick_cache::sync::Cache<String, Bytes, ObjectWeighter, quick_cache::DefaultHashBuilder>,
+    >,
+}
+
+impl std::ops::Deref for ObjectCache {
+    type Target = quick_cache::sync::Cache<String, Bytes, ObjectWeighter>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.cache
+    }
+}
+
+impl ObjectCache {
+    pub fn new(max_capacity: u64, avg_object_size: u64) -> Self {
+        let opts = quick_cache::OptionsBuilder::new()
+            .weight_capacity(max_capacity)
+            .estimated_items_capacity(max_capacity as usize / avg_object_size as usize)
+            .build()
+            .unwrap();
+        let cache = quick_cache::sync::Cache::with_options(
+            opts,
+            ObjectWeighter {},
+            quick_cache::DefaultHashBuilder::default(),
+            quick_cache::sync::DefaultLifecycle::default(),
+        );
+        Self {
+            cache: Arc::new(cache),
+        }
+    }
 }

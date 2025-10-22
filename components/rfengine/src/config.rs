@@ -39,7 +39,7 @@ pub struct Config {
 
     /// Target file size for wal chunk files.
     ///
-    /// Default: "128MB"
+    /// Default: "64MB"
     pub wal_chunk_target_file_size: ReadableSize,
 
     /// Open RfEngine in cli mode used by tools. Skip serde for this field to
