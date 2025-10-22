@@ -1419,13 +1419,15 @@ where
         let path = dir.join(meta_key.replace('/', "_"));
         let dfs = dfs.clone();
         async move {
-            let temp_obj = box_try!(TempLocalObject::create(path));
-            let mut writer = BufWriter::new(temp_obj);
+            let build_writer = move || -> io::Result<_> {
+                let temp_obj = TempLocalObject::create(path.clone())?;
+                Ok(BufWriter::new(temp_obj))
+            };
             match dfs
-                .get_object_to_writer(full_key, meta_key, opts, &mut writer)
+                .get_object_to_writer(full_key, meta_key, opts, build_writer)
                 .await
             {
-                Ok(len) => {
+                Ok((writer, len)) => {
                     let temp_obj = box_try!(writer.into_inner()); // Writer will flush here.
                     debug_assert_eq!(temp_obj.len, len);
                     Ok((meta, temp_obj))

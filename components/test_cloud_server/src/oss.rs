@@ -1160,10 +1160,12 @@ mod tests {
                         .unwrap();
                     assert_eq!(read_data, expected);
 
-                    let f = tempfile().unwrap();
-                    let mut writer = std::io::BufWriter::new(f);
-                    let len = s3fs
-                        .get_object_to_writer(key, file_name, opts, &mut writer)
+                    let build_writer = || {
+                        let f = tempfile().unwrap();
+                        Ok(std::io::BufWriter::new(f))
+                    };
+                    let (writer, len) = s3fs
+                        .get_object_to_writer(key, file_name, opts, build_writer)
                         .await
                         .unwrap();
                     let mut f = writer.into_inner().unwrap();

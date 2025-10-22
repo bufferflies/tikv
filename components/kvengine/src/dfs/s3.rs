@@ -569,19 +569,23 @@ impl S3FsCore {
     }
 
     async fn read_body(&self, resp: &mut Response) -> Result<Bytes, HttpDispatchError> {
-        let mut writer = BytesMut::new().writer();
-        self.read_body_to_writer(resp, &mut writer).await?;
+        let (writer, _) = self
+            .read_body_to_writer(resp, &|| Ok(BytesMut::new().writer()))
+            .await?;
         Ok(writer.into_inner().freeze())
     }
 
-    async fn read_body_to_writer<W>(
+    async fn read_body_to_writer<'a, W, F>(
         &self,
         resp: &mut Response,
-        writer: &mut W,
-    ) -> Result<u64 /* read_len */, HttpDispatchError>
+        build_writer: &'a F,
+    ) -> Result<(W, u64 /* read_len */), HttpDispatchError>
     where
         W: ReservableWriter + Send + 'static,
+        F: Fn() -> std::io::Result<W> + 'static,
     {
+        let mut writer =
+            build_writer().map_err(|e| HttpDispatchError::new(format!("build_writer: {:?}", e)))?;
         // Some interfaces may not return Content-Length header, e.g. ListObjects.
         let cap = resp
             .headers
@@ -608,7 +612,7 @@ impl S3FsCore {
                 "content_length" => cap, "read_len" => read_len);
             debug_assert!(false);
         }
-        Ok(read_len)
+        Ok((writer, read_len))
     }
 
     pub async fn get_object(
@@ -617,21 +621,22 @@ impl S3FsCore {
         file_name: String,
         opts: GetObjectOptions,
     ) -> crate::dfs::Result<Bytes> {
-        let mut writer = BytesMut::new().writer();
-        self.get_object_to_writer(key, file_name, opts, &mut writer)
+        let (writer, _) = self
+            .get_object_to_writer(key, file_name, opts, &|| Ok(BytesMut::new().writer()))
             .await?;
         Ok(writer.into_inner().freeze())
     }
 
-    pub async fn get_object_to_writer<W>(
+    pub async fn get_object_to_writer<W, F>(
         &self,
         key: String,
         file_name: String,
         opts: GetObjectOptions,
-        writer: &mut W,
-    ) -> crate::dfs::Result<u64>
+        build_writer: F,
+    ) -> crate::dfs::Result<(W, u64)>
     where
         W: ReservableWriter + Send + 'static,
+        F: Fn() -> std::io::Result<W> + 'static,
     {
         let mut retry_cnt = 0;
         let start_time = Instant::now_coarse();
@@ -644,9 +649,9 @@ impl S3FsCore {
 
             if result.is_ok() {
                 let mut resp = result.unwrap();
-                let res = self.read_body_to_writer(&mut resp, writer).await;
+                let res = self.read_body_to_writer(&mut resp, &build_writer).await;
                 match res {
-                    Ok(object_len) => {
+                    Ok((writer, object_len)) => {
                         info!(
                             "read file {}, size {}, takes {:?}, retry {}",
                             &file_name,
@@ -661,7 +666,7 @@ impl S3FsCore {
                         KVENGINE_DFS_LATENCY_VEC
                             .with_label_values(&["read"])
                             .observe(start_time.saturating_elapsed().as_millis() as f64);
-                        return Ok(object_len);
+                        return Ok((writer, object_len));
                     }
                     Err(err) => result = Err(err.into()),
                 }
@@ -1009,7 +1014,7 @@ impl ObjectStorage for S3Fs {
             async move {
                 match fs.get_object(full_key, key.clone(), opts).await {
                     Ok(data) => Ok((key, data)),
-                    Err(err) => Err(format!("put {} failed {:?}", &key, err)),
+                    Err(err) => Err(format!("get {} failed {:?}", &key, err)),
                 }
             }
         };
