@@ -379,7 +379,6 @@ impl raft::Storage for PeerStorage {
             ) {
                 Ok(_count) => {
                     // Entries were already in memory, return them
-                    self.async_fetch_stats.sync_fetch.update(|m| m + 1);
                     return Ok(ents);
                 }
                 Err(rfengine::Error::AsyncFetch(async_info)) => {

@@ -26569,7 +26569,7 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum(rate(\n    tikv_raftstore_entry_fetches\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
+              "expr": "sum(rate(\n    rfstore_raft_entry_fetches_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -26577,7 +26577,7 @@
               "intervalFactor": 1,
               "legendFormat": "{{type}} {{$additional_groupby}}",
               "metric": "",
-              "query": "sum(rate(\n    tikv_raftstore_entry_fetches\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
+              "query": "sum(rate(\n    rfstore_raft_entry_fetches_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -26586,7 +26586,7 @@
           "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
-          "title": "Raft log fetch ",
+          "title": "Raft log fetch",
           "tooltip": {
             "msResolution": true,
             "shared": true,
@@ -26713,7 +26713,7 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "histogram_quantile(0.9999,(\n    sum(rate(\n    tikv_raftstore_entry_fetches_task_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
+              "expr": "histogram_quantile(0.9999,(\n    sum(rate(\n    rfstore_raft_entry_fetches_task_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -26721,14 +26721,14 @@
               "intervalFactor": 1,
               "legendFormat": "99.99% {{$additional_groupby}}",
               "metric": "",
-              "query": "histogram_quantile(0.9999,(\n    sum(rate(\n    tikv_raftstore_entry_fetches_task_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
+              "query": "histogram_quantile(0.9999,(\n    sum(rate(\n    rfstore_raft_entry_fetches_task_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
               "refId": "",
               "step": 10,
               "target": ""
             },
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "(sum(rate(\n    tikv_raftstore_entry_fetches_task_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance)  / sum(rate(\n    tikv_raftstore_entry_fetches_task_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance) )",
+              "expr": "(sum(rate(\n    rfstore_raft_entry_fetches_task_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance)  / sum(rate(\n    rfstore_raft_entry_fetches_task_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance) )",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -26736,14 +26736,14 @@
               "intervalFactor": 1,
               "legendFormat": "avg-{{instance}}",
               "metric": "",
-              "query": "(sum(rate(\n    tikv_raftstore_entry_fetches_task_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance)  / sum(rate(\n    tikv_raftstore_entry_fetches_task_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance) )",
+              "query": "(sum(rate(\n    rfstore_raft_entry_fetches_task_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance)  / sum(rate(\n    rfstore_raft_entry_fetches_task_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance) )",
               "refId": "",
               "step": 10,
               "target": ""
             },
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum((\n    tikv_worker_pending_task_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\",name=~\"raftlog-fetch-worker\"}\n    \n)) by (instance, $additional_groupby) ",
+              "expr": "sum((\n    tikv_worker_pending_task_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\",name=~\"async-read-worker\"}\n    \n)) by (instance, $additional_groupby) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -26751,7 +26751,7 @@
               "intervalFactor": 1,
               "legendFormat": "pending-task {{$additional_groupby}}",
               "metric": "",
-              "query": "sum((\n    tikv_worker_pending_task_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\",name=~\"raftlog-fetch-worker\"}\n    \n)) by (instance, $additional_groupby) ",
+              "query": "sum((\n    tikv_worker_pending_task_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\",name=~\"async-read-worker\"}\n    \n)) by (instance, $additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""

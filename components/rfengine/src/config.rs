@@ -115,7 +115,7 @@ impl Default for Config {
             dfs_worker_memory_limit: AbsoluteOrPercentSize::Percent(10.0),
             write_throttle_duration: ReadableDuration::millis(10),
             compact_wal_sync_concurrency: 2,
-            rlog_soft_memory_limit: ReadableSize::mb(0),
+            rlog_soft_memory_limit: ReadableSize::gb(4),
             rlog_file_size: ReadableSize::mb(256),
             compact_bytes_per_sec: ReadableSize::mb(200),
         }

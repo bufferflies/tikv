@@ -2857,12 +2857,12 @@ def RaftLog() -> RowPanel:
                 ],
             ),
             graph_panel(
-                title="Raft log fetch ",
+                title="Raft log fetch",
                 yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
                 targets=[
                     target(
                         expr=expr_sum_rate(
-                            "tikv_raftstore_entry_fetches",
+                            "rfstore_raft_entry_fetches_total",
                             by_labels=["type"],
                         ),
                         additional_groupby=True,
@@ -2880,14 +2880,14 @@ def RaftLog() -> RowPanel:
                     target(
                         expr=expr_histogram_quantile(
                             0.9999,
-                            "tikv_raftstore_entry_fetches_task_duration_seconds",
+                            "rfstore_raft_entry_fetches_task_duration_seconds",
                         ),
                         legend_format="99.99%",
                         additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_avg(
-                            "tikv_raftstore_entry_fetches_task_duration_seconds",
+                            "rfstore_raft_entry_fetches_task_duration_seconds",
                             by_labels=["instance"],
                         ),
                         legend_format="avg-{{instance}}",
@@ -2895,7 +2895,7 @@ def RaftLog() -> RowPanel:
                     target(
                         expr=expr_sum(
                             "tikv_worker_pending_task_total",
-                            label_selectors=['name=~"raftlog-fetch-worker"'],
+                            label_selectors=['name=~"async-read-worker"'],
                         ),
                         legend_format="pending-task",
                         additional_groupby=True,

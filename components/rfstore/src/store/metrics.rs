@@ -14,7 +14,7 @@ make_auto_flush_static_metric! {
     }
 
     pub struct RaftEntryFetches : LocalIntCounter {
-        "kind" => RaftEntryFetchKind,
+        "type" => RaftEntryFetchKind,
     }
 }
 
@@ -41,27 +41,15 @@ lazy_static! {
     pub static ref RAFT_ENTRY_FETCHES_VEC: IntCounterVec = register_int_counter_vec!(
         "rfstore_raft_entry_fetches_total",
         "Number of raft entry fetches by type",
-        &["kind"]
+        &["type"]
     )
     .unwrap();
     pub static ref RAFT_ENTRY_FETCHES: RaftEntryFetches =
         auto_flush_from!(RAFT_ENTRY_FETCHES_VEC, RaftEntryFetches);
 
-    // Duration of async raft entry fetch tasks from schedule to result consumption
-    pub static ref RAFT_ENTRY_FETCH_TASK_DURATION_HISTOGRAM: Histogram = register_histogram!(
-        "rfstore_raft_entry_fetch_task_duration_seconds",
-        "Duration of async raft entry fetch tasks",
-        vec![
-            0.001, 0.005, 0.01, 0.025, 0.05,
-            0.1, 0.25, 0.5, 1.0, 2.5,
-            5.0, 10.0
-        ]
-    )
-    .unwrap();
-
     pub static ref RAFT_ENTRY_FETCHES_TASK_DURATION_HISTOGRAM: Histogram =
         register_histogram!(
-            "tikv_rfstore_entry_fetches_task_duration_seconds",
+            "rfstore_raft_entry_fetches_task_duration_seconds",
             "Bucketed histogram of raft entry fetches task duration.",
             exponential_buckets(0.0005, 2.0, 21).unwrap()  // 500us ~ 8.7m
         ).unwrap();
