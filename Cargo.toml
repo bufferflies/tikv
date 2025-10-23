@@ -199,9 +199,6 @@ protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = 
 # remove this when https://github.com/danburkert/fs2-rs/pull/42 is merged.
 fs2 = { git = "https://github.com/tikv/fs2-rs", branch = "tikv" }
 
-# Remove this when a new version is release. We need to solve rust-lang/cmake-rs#143.
-cmake = { git = "https://github.com/rust-lang/cmake-rs" }
-
 # TODO: remove this after crossbeam-deque is updated to the next release version.
 # This is a workaround for cargo can't resolving the this patch in yatp.
 crossbeam-deque = { git = "https://github.com/crossbeam-rs/crossbeam", rev = "41ed3d948720f26149b2ebeaf58fe8a193134056" }

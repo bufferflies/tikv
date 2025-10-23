@@ -2017,8 +2017,9 @@ dependencies = [
 
 [[package]]
 name = "cmake"
-version = "0.1.49"
-source = "git+https://github.com/rust-lang/cmake-rs#07cbf8fd36168b8a5dc9e107f6e659130dbcdd30"
+version = "0.1.54"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7caa3f9de89ddbe2c607f4101924c5abec803763ae9534e4f4d7d8f84aa81f0"
 dependencies = [
  "cc",
 ]
