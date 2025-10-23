@@ -473,20 +473,19 @@ impl GcWorker {
                         warn!("{} in-used but removed: {:?}", s3_obj.file_id, s3_obj);
                         stat.lock().await.in_used_and_removed += 1;
                         if let Err(e) = gc_worker.s3fs.retain_file(&s3_obj.key).await {
-                            return Err(Error::DfsError(e));
+                            Err(Error::DfsError(e))
+                        } else {
+                            info!("{} is retained", s3_obj.file_id);
+                            stat.lock().await.retained += 1;
+                            Ok(())
                         }
-                        info!("{} is retained", s3_obj.file_id);
-                        stat.lock().await.retained += 1;
                     }
-                    Ok(_) => {}
-                    Err(e) => return Err(e),
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(e),
                 }
-                Ok(())
             };
-
             drop(permit);
             let _ = tx.send((s3_obj.file_id, exec_result)).await;
-            Ok(())
         });
     }
 
