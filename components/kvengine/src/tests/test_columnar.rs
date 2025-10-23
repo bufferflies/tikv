@@ -52,12 +52,8 @@ fn test_columnar_l0_compaction() {
     let keyspace_id = 1;
     let table_id = 30;
     let table_id2 = 31;
-    let mut file_id = 100;
-    let mut allocate_id = || {
-        file_id += 1;
-        file_id
-    };
     let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
+    let allocate_id = || engine.id_allocator.alloc_id(1).unwrap()[0];
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, true);
@@ -190,12 +186,8 @@ fn test_columnar_l1_compaction() {
     let keyspace_id = 1;
     let table_id = 30;
     let table_id2 = 31;
-    let mut file_id = 100;
-    let mut allocate_id = || {
-        file_id += 1;
-        file_id
-    };
     let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
+    let allocate_id = || engine.id_allocator.alloc_id(1).unwrap()[0];
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, true);
@@ -339,12 +331,8 @@ fn test_columnar_major_compaction() {
     ::test_util::init_log_for_test();
     let keyspace_id = KEYSPACE_ID;
     let table_id = 30;
-    let mut file_id = 100;
-    let mut allocate_id = || {
-        file_id += 1;
-        file_id
-    };
     let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
+    let allocate_id = || engine.id_allocator.alloc_id(1).unwrap()[0];
     engine.opts.set_build_columnar(true);
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
@@ -526,12 +514,7 @@ fn test_columnar_major_compaction_multiple_tables() {
         let schema = new_schema(table_id, false);
         schemas.push(schema);
     }
-    let mut file_id = 100;
-    let mut allocate_id = || {
-        file_id += 1;
-        file_id
-    };
-
+    let allocate_id = || engine.id_allocator.alloc_id(1).unwrap()[0];
     let schema_version = 10;
     // Build schema file for the first 3 tables.
     let schemas_1 = schemas[0..3].to_vec();
@@ -803,12 +786,8 @@ fn test_columnar_destroy_range() {
     ::test_util::init_log_for_test();
     let keyspace_id = 1;
     let table_id = 30;
-    let mut file_id = 100;
-    let mut allocate_id = || {
-        file_id += 1;
-        file_id
-    };
     let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
+    let allocate_id = || engine.id_allocator.alloc_id(1).unwrap()[0];
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, true);
@@ -915,12 +894,8 @@ fn test_columnar_truncate_ts() {
     ::test_util::init_log_for_test();
     let keyspace_id = KEYSPACE_ID;
     let table_id = 30;
-    let mut file_id = 100;
-    let mut allocate_id = || {
-        file_id += 1;
-        file_id
-    };
     let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
+    let allocate_id = || engine.id_allocator.alloc_id(1).unwrap()[0];
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, false);
@@ -1030,12 +1005,8 @@ fn test_columnar_trim_over_bound() {
     ::test_util::init_log_for_test();
     let keyspace_id = KEYSPACE_ID;
     let table_id = 30;
-    let mut file_id = 100;
-    let mut allocate_id = || {
-        file_id += 1;
-        file_id
-    };
     let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
+    let allocate_id = || engine.id_allocator.alloc_id(1).unwrap()[0];
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema(table_id, false);
@@ -1298,12 +1269,9 @@ fn test_columnar_not_nullable_to_nullable() {
     let keyspace_id = 1;
     let table_id = 30;
     let table_id2 = 31;
-    let mut file_id = 100;
-    let mut allocate_id = || {
-        file_id += 1;
-        file_id
-    };
+
     let (engine, apply_tx) = new_test_engine_opt(true, DEF_BLOCK_SIZE, "");
+    let allocate_id = || engine.id_allocator.alloc_id(1).unwrap()[0];
     let shard_id = prepare_table_region(&engine, &apply_tx, keyspace_id, table_id);
     let shard = engine.get_shard(shard_id).unwrap();
     let schema = new_schema_with_nullable(table_id, true, false);
