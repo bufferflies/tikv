@@ -5,6 +5,7 @@ use std::{cmp, collections::HashSet, convert::TryFrom};
 use api_version;
 use bytes::Bytes;
 use codec::{buffer::BufferWriter, number::NumberEncoder};
+use itertools::Itertools;
 use schema::schema::{
     StorageClass, StorageClassSpec, STORAGE_CLASS_SPEC_STR_AUTO, STORAGE_CLASS_TIER_IA,
 };
@@ -60,7 +61,7 @@ pub struct EngineStats {
     pub txn_file_locks: usize,
     pub columnar_levels: Vec<ColumnarLevelStats>,
     pub vector_indexes: VectorIndexStats,
-    pub top_10_write: Vec<ShardStats>,
+    pub tops: TopStatCollection,
     pub ia: StorageClassStats,
 }
 
@@ -127,7 +128,7 @@ impl super::Engine {
         self.get_shard(region_id).map(|shard| shard.get_stats())
     }
 
-    pub fn get_engine_stats(&self, mut shard_stats: Vec<ShardStats>) -> EngineStats {
+    pub fn get_engine_stats(&self, shard_stats: Vec<ShardStats>) -> EngineStats {
         let mut engine_stats = EngineStats::new();
         engine_stats.num_shards = shard_stats.len();
         engine_stats.open_files = self.fd_cache.size() as i64;
@@ -174,6 +175,7 @@ impl super::Engine {
             engine_stats.old_entries += shard.old_entries;
             engine_stats.tombs += shard.tombs;
             engine_stats.kv_size += shard.kv_size;
+            let mut shard_file_count = shard.l0_table_count;
             for cf in 0..NUM_CFS {
                 let shard_cf_stat = &shard.cfs[cf];
                 for (i, level_stat) in shard_cf_stat.levels.iter().enumerate() {
@@ -181,27 +183,25 @@ impl super::Engine {
                     engine_stats.cfs_num_files[cf] += level_stat.num_tables;
                     engine_stats.level_total_sizes[i] += level_stat.data_size;
                     engine_stats.cf_total_sizes[cf] += level_stat.data_size;
+                    shard_file_count += level_stat.num_tables;
                 }
             }
             engine_stats.txn_file_locks += shard.txn_file_locks;
             for (i, col_level) in shard.columnar_levels.iter().enumerate() {
                 let engine_col_level = &mut engine_stats.columnar_levels[i];
+                shard_file_count += col_level.num_files;
                 engine_col_level.num_files += col_level.num_files;
                 engine_col_level.data_size += col_level.data_size;
                 engine_col_level.data_kv_size += col_level.data_kv_size;
             }
             engine_stats.vector_indexes.data_size += shard.vector_indexes.data_size;
             engine_stats.vector_indexes.num_files += shard.vector_indexes.num_files;
+            shard_file_count += shard.vector_indexes.num_files;
+            engine_stats.tops.collect(shard, shard_file_count);
             engine_stats.ia.merge(&shard.ia);
         }
         ENGINE_OPEN_FILES.set(engine_stats.open_files);
-        shard_stats.sort_by(|a, b| {
-            let a_size = a.mem_table_size + a.l0_table_size;
-            let b_size = b.mem_table_size + b.l0_table_size;
-            b_size.cmp(&a_size)
-        });
-        shard_stats.truncate(10);
-        engine_stats.top_10_write = shard_stats;
+        engine_stats.tops.sort();
         engine_stats
     }
 
@@ -300,6 +300,111 @@ impl super::Engine {
                 .then(a.index_id.cmp(&b.index_id))
         });
         Ok(res_vec)
+    }
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct TopStatCollection {
+    pub mem_size: TopStat,
+    pub l0_size: TopStat,
+    pub lock_cf_size: TopStat,
+    pub extra_cf_size: TopStat,
+    pub total_size: TopStat,
+    pub columnar_size: TopStat,
+    pub vector_size: TopStat,
+    pub entries: TopStat,
+    pub files_count: TopStat,
+    pub columnar_tables_count: TopStat,
+}
+
+impl TopStatCollection {
+    fn collect(&mut self, shard_stats: &ShardStats, files_count: usize) {
+        let id = shard_stats.id;
+        self.mem_size.add(id, shard_stats.mem_table_size);
+        self.l0_size.add(id, shard_stats.l0_table_size);
+        let lock_cf_size: u64 = shard_stats.cfs[LOCK_CF]
+            .levels
+            .iter()
+            .map(|l| l.data_size)
+            .sum();
+        self.lock_cf_size.add(id, lock_cf_size);
+        let extra_cf_size: u64 = shard_stats.cfs[EXTRA_CF]
+            .levels
+            .iter()
+            .map(|l| l.data_size)
+            .sum();
+        self.extra_cf_size.add(id, extra_cf_size);
+        self.total_size.add(id, shard_stats.total_size);
+        let columnar_size = shard_stats
+            .columnar_levels
+            .iter()
+            .map(|l| l.data_size)
+            .sum();
+        self.columnar_size.add(id, columnar_size);
+        self.vector_size
+            .add(id, shard_stats.vector_indexes.data_size);
+        self.entries.add(id, shard_stats.entries as u64);
+        self.files_count.add(id, files_count as u64);
+        self.columnar_tables_count
+            .add(id, shard_stats.columnar_tables as u64);
+    }
+
+    fn sort(&mut self) {
+        self.mem_size.sort();
+        self.l0_size.sort();
+        self.lock_cf_size.sort();
+        self.extra_cf_size.sort();
+        self.total_size.sort();
+        self.vector_size.sort();
+        self.entries.sort();
+        self.files_count.sort();
+        self.columnar_tables_count.sort();
+    }
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct TopStat {
+    pub shards: Vec<ShardTopValue>,
+    pub max_value: u64,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ShardTopValue {
+    id: u64,
+    value: u64,
+}
+
+impl ShardTopValue {
+    fn new(id: u64, value: u64) -> Self {
+        Self { id, value }
+    }
+}
+
+impl TopStat {
+    fn add(&mut self, shard_id: u64, value: u64) {
+        if value == 0 {
+            return;
+        }
+        if self.shards.len() < 5 {
+            self.shards.push(ShardTopValue::new(shard_id, value));
+            if value > self.max_value {
+                self.max_value = value;
+            }
+        } else if value > self.max_value {
+            let pos = self.shards.iter().map(|v| v.value).position_min().unwrap();
+            self.shards[pos] = ShardTopValue::new(shard_id, value);
+            self.max_value = value;
+        }
+    }
+
+    fn sort(&mut self) {
+        self.shards.sort_by(|a, b| b.value.cmp(&a.value));
     }
 }
 
