@@ -16,7 +16,7 @@ use crate::{log_batch::RaftLogOp, manifest::Manifest, service_worker::ServiceTas
 impl RfEngineCore {
     pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<u64> {
         for (&peer_id, peer_meta) in &manifest.peers {
-            let guard = self.peers.guard();
+            let guard = self.peers.peers.guard();
             let peer_ref = self.get_or_init_peer_data(peer_id, peer_meta.region_id, &guard);
             let mut peer_data = peer_ref.write().unwrap();
             peer_data.meta.merge(peer_meta, false);
@@ -83,7 +83,7 @@ impl RfEngineCore {
                 None
             };
             iterate_peer_batch(data, |peer_batch| {
-                let guard = self.peers.guard();
+                let guard = self.peers.peers.guard();
                 let peer_ref = self.get_or_init_peer_data(
                     peer_batch.peer_id,
                     peer_batch.meta.region_id,
@@ -180,7 +180,7 @@ impl RfEngineCore {
         for _ in 0..header.count {
             end_offs.push(data.get_u32_le());
         }
-        let guard = self.peers.guard();
+        let guard = self.peers.peers.guard();
         let peer_data_ref = self.get_or_init_peer_data(peer_id, region_id, &guard);
         let mut peer_data = peer_data_ref.write().unwrap();
         for i in 0..header.count as usize {
@@ -269,7 +269,7 @@ mod tests {
 
         // RfEngine should be able to recover from the corrupted async wal file.
         let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
-        assert_eq!(engine.peers.len(), 10);
+        assert_eq!(engine.peers.peers.len(), 10);
         check_async_wal(&engine, current_epoch, 0, it.offset, Duration::from_secs(5));
     }
 
@@ -333,7 +333,7 @@ mod tests {
 
         // RfEngine should be able to recover from the last corrupted sync wal file.
         let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
-        assert_eq!(engine.peers.len(), 10);
+        assert_eq!(engine.peers.peers.len(), 10);
 
         let mut sync_it = WalIterator::new(&sync_wal_path, current_epoch).unwrap();
         sync_it.iterate_batch(|_, _| {}).unwrap();

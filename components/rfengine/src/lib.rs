@@ -28,6 +28,7 @@ mod metrics;
 pub use metrics::{
     RFENGINE_DFS_WORKER_BECOME_UNHEALTHY_COUNTER, RFENGINE_DFS_WORKER_HEALTHY_GAUGE,
 };
+pub mod peers;
 pub mod service_worker;
 pub mod traits;
 pub mod utils;

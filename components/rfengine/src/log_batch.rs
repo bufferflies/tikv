@@ -84,7 +84,7 @@ const RAFT_LOG_BLOCK_CAP: usize = 255;
 /// It's the building block of `RaftLogs`. Caller should make sure index is in
 /// the range.
 #[derive(Clone, Debug)]
-pub(crate) struct RaftLogBlock {
+pub struct RaftLogBlock {
     logs: VecDeque<RaftLogOp>,
     size: usize,
 }

@@ -2,7 +2,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     fmt::{Display, Formatter},
     fs,
     fs::{create_dir_all, File, OpenOptions},
@@ -21,9 +21,9 @@ use bytes::{Buf, Bytes};
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use file_system::{open_direct_file, IoRateLimitMode, IoRateLimiter};
 use kvengine::dfs::{Dfs, S3Fs};
-use kvproto::raft_serverpb::{self, StoreIdent};
+use kvproto::raft_serverpb::StoreIdent;
 use protobuf::Message;
-use raft_proto::{eraftpb, eraftpb::Entry};
+use raft_proto::eraftpb;
 use rfenginepb::{ClusterBackupMeta, KeySpaceBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
 use tikv_util::{
     error,
@@ -40,6 +40,7 @@ use crate::{
     log_batch::{RaftLogBlock, RaftLogs},
     manifest::{manifest_path, persist_change_set, Manifest},
     metrics::*,
+    peers::RaftPeers,
     service_worker::{ServiceTask, ServiceWorker, WalProgress},
     write_batch::{PeerBatch, WriteBatch},
     *,
@@ -132,7 +133,7 @@ pub struct RfEngineCore {
 
     pub(crate) writer: Mutex<WalWriterExt>,
 
-    pub(crate) peers: papaya::HashMap<u64, RwLock<PeerData>>,
+    pub(crate) peers: RaftPeers,
 
     pub(crate) dependants: papaya::HashMap<u64, RwLock<HashSet<u64>>>,
 
@@ -151,6 +152,13 @@ pub struct RfEngineCore {
     pub(crate) compacted_epoch: Arc<AtomicU32>,
 
     _lock: fslock::LockFile, // hold lock to avoid release
+}
+
+impl Deref for RfEngineCore {
+    type Target = RaftPeers;
+    fn deref(&self) -> &Self::Target {
+        &self.peers
+    }
 }
 
 impl RfEngineCore {
@@ -306,19 +314,6 @@ impl RfEngineCore {
         self.wal_sync_dir.as_ref().unwrap_or(&self.dir)
     }
 
-    pub(crate) fn get_or_init_peer_data<'a>(
-        &self,
-        peer_id: u64,
-        region_id: u64,
-        guard: &'a papaya::LocalGuard<'a>,
-    ) -> &'a RwLock<PeerData> {
-        self.peers.get_or_insert_with(
-            peer_id,
-            || RwLock::new(PeerData::new(peer_id, region_id)),
-            guard,
-        )
-    }
-
     /// Applies and persists the write batch.
     pub fn write(&self, wb: WriteBatch) -> Result<usize> {
         self.apply(&wb);
@@ -327,24 +322,10 @@ impl RfEngineCore {
 
     /// Applies the write batch to memory without persisting it to WAL.
     pub fn apply(&self, wb: &WriteBatch) {
-        let timer = Instant::now_coarse();
-        let mut truncated_logs = vec![];
-        for (&peer_id, batch_data) in &wb.peers {
-            let region_id = batch_data.meta.region_id;
-            tikv_util::set_current_region_thread_local(region_id);
-            let guard = self.peers.guard();
-            let peer_data = self.get_or_init_peer_data(peer_id, region_id, &guard);
-            let mut peer_data = peer_data.write().unwrap();
-            let truncated = peer_data.apply(batch_data);
-            drop(peer_data);
-            if !truncated.is_empty() {
-                truncated_logs.push(truncated);
-            }
-        }
+        let truncated_logs = self.peers.apply(wb);
         if !truncated_logs.is_empty() {
             self.try_send_task(ServiceTask::Truncates(truncated_logs));
         }
-        ENGINE_APPLY_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
     }
 
     /// Persists the write batch to WAL. It can be used in another thread to
@@ -372,133 +353,6 @@ impl RfEngineCore {
             return Ok(4096);
         }
         Ok(file_off.saturating_sub(old_file_off) as usize)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.peers.is_empty()
-    }
-
-    pub fn get_term(&self, peer_id: u64, index: u64) -> Option<u64> {
-        let peers = self.peers.pin();
-        peers
-            .get(&peer_id)
-            .and_then(|data| data.read().unwrap().term(index))
-    }
-
-    pub fn get_truncated_index(&self, peer_id: u64) -> Option<u64> {
-        let peers = self.peers.pin();
-        let peer_data_ref = peers.get(&peer_id)?;
-        let data = peer_data_ref.read().unwrap();
-        Some(data.truncated_idx)
-    }
-
-    pub fn get_last_index(&self, peer_id: u64) -> Option<u64> {
-        let peers = self.peers.pin();
-        peers
-            .get(&peer_id)
-            .map(|data| data.read().unwrap().raft_logs.last_index())
-            .and_then(|index| if index != 0 { Some(index) } else { None })
-    }
-
-    pub fn get_state(&self, peer_id: u64, key: &[u8]) -> Option<Bytes> {
-        let peers = self.peers.pin();
-        peers.get(&peer_id).and_then(|data| {
-            data.read().unwrap().get_state(key).and_then(|val| {
-                // TODO: seems it's impossible.
-                if !val.is_empty() {
-                    Some(val.clone())
-                } else {
-                    None
-                }
-            })
-        })
-    }
-
-    /// Get the value of the last state key with the `prefix`. `prefix` must be
-    /// non-empty.
-    pub fn get_last_state_with_prefix(&self, peer_id: u64, prefix: &[u8]) -> Option<Bytes> {
-        debug_assert!(!prefix.is_empty());
-        let peers = self.peers.pin();
-        let peer_data = peers.get(&peer_id)?;
-        let peer_data = peer_data.read().unwrap();
-
-        let mut end_prefix = prefix.to_vec();
-        end_prefix[prefix.len() - 1] += 1;
-        let range = Bytes::copy_from_slice(prefix)..Bytes::from(end_prefix);
-        peer_data
-            .meta
-            .states
-            .range(range)
-            .next_back()
-            .map(|(_, v)| v.clone())
-    }
-
-    /// Iterates states of the region in order or in desc order if `desc` is
-    /// true until `f` returns error. The ietrator will stop if the function
-    /// returns false.
-    pub fn iterate_peer_states<F>(&self, peer_id: u64, desc: bool, mut f: F)
-    where
-        F: FnMut(&Bytes, &Bytes) -> bool,
-    {
-        let peers = self.peers.pin();
-        let peer_data = peers.get(&peer_id);
-        let peer_data = match &peer_data {
-            Some(data) => data.read().unwrap(),
-            None => return,
-        };
-
-        let states = &peer_data.meta.states;
-        if desc {
-            for (k, v) in states.iter().rev() {
-                if !f(k, v) {
-                    break;
-                }
-            }
-        } else {
-            for (k, v) in states.iter() {
-                if !f(k, v) {
-                    break;
-                }
-            }
-        }
-    }
-
-    pub fn get_peer_all_states(&self, peer_id: u64, desc: bool) -> Vec<(Bytes, Bytes)> {
-        let mut states = vec![];
-        self.iterate_peer_states(peer_id, desc, |k, v| {
-            states.push((k.clone(), v.clone()));
-            true
-        });
-        states
-    }
-
-    /// Iterates stats of all regions in order or in desc order if `desc` is
-    /// true and breaks one regions iteration if `f` returns false.
-    pub fn iterate_all_states<F>(&self, desc: bool, mut f: F)
-    where
-        F: FnMut(u64, u64, &[u8], &[u8]) -> bool,
-    {
-        let peers = self.peers.pin();
-        peers.iter().for_each(|(_, data)| {
-            let data = data.read().unwrap();
-            if data.truncated_idx == TRUNCATE_ALL_INDEX {
-                return;
-            }
-            let peer_id = data.peer_id;
-            let region_id = data.region_id;
-            if desc {
-                data.states
-                    .iter()
-                    .rev()
-                    .take_while(|(k, v)| f(peer_id, region_id, k, v))
-                    .count();
-            } else {
-                data.states
-                    .iter()
-                    .take_while(|(k, v)| f(peer_id, region_id, k, v))
-                    .count();
-            }
-        });
     }
 
     pub fn stop_worker(&self, force: bool) {
@@ -589,7 +443,7 @@ impl RfEngineCore {
     pub fn get_engine_stats(&self) -> EngineStats {
         let mut total_mem_size = 0;
         let mut total_mem_entries = 0;
-        let peers = self.peers.pin();
+        let peers = self.peers.peers.pin();
         let mut peers_stats = peers
             .iter()
             .map(|(_, data)| {
@@ -624,105 +478,12 @@ impl RfEngineCore {
         }
     }
 
-    /// Dumps the state of the region.
-    pub fn get_peer_stats(&self, peer_id: u64) -> PeerStats {
-        let peers = self.peers.pin();
-        peers
-            .get(&peer_id)
-            .map(|data| data.read().unwrap().get_stats())
-            .unwrap_or_default()
-    }
-
-    /// Returns the index that truncating to the given index can limit the
-    /// memory usage to size.
-    pub fn index_to_truncate_to_size(&self, peer_id: u64, size: usize) -> u64 {
-        let peers = self.peers.pin();
-        peers
-            .get(&peer_id)
-            .map(|data| {
-                data.read()
-                    .unwrap()
-                    .raft_logs
-                    .index_to_truncate_to_size(size)
-            })
-            .unwrap_or_default()
-    }
-
     pub fn set_engine_id(&self, engine_id: u64) {
         self.engine_id.store(engine_id, Ordering::Release)
     }
 
     pub fn get_engine_id(&self) -> u64 {
         self.engine_id.load(Ordering::Acquire)
-    }
-
-    pub fn get_region_peer_map(&self) -> HashMap<u64 /* region_id */, u64 /* peer_id */> {
-        let mut region_to_peer = HashMap::with_capacity(self.peers.len());
-        let mut id_pairs = Vec::with_capacity(self.peers.len());
-        let peers = self.peers.pin();
-        for (_, peer_ref) in peers.iter() {
-            let peer_data = peer_ref.read().unwrap();
-            let is_truncated = peer_data.truncated_idx == TRUNCATE_ALL_INDEX;
-            id_pairs.push((peer_data.peer_id, peer_data.region_id, is_truncated));
-        }
-        // ensure the newer peer_id appear after the older peer_id, so it can replace
-        // older.
-        id_pairs.sort_by(|(peer_a, ..), (peer_b, ..)| peer_a.cmp(peer_b));
-        for (peer_id, region_id, truncated) in id_pairs {
-            if truncated {
-                // The newer peer is already destroyed, the old peer is invalid too.
-                region_to_peer.remove(&region_id);
-            } else {
-                // new peer_id replaces the older peer_id.
-                region_to_peer.insert(region_id, peer_id);
-            }
-        }
-        region_to_peer
-    }
-
-    pub fn get_raft_entry(&self, peer_id: u64, index: u64) -> Option<Entry> {
-        let peers = self.peers.pin();
-        peers
-            .get(&peer_id)
-            .and_then(|data| data.read().unwrap().get(index))
-    }
-
-    pub fn fetch_raft_entries_to(
-        &self,
-        peer_id: u64,
-        low: u64,
-        high: u64,
-        max_size: Option<usize>, // size limit of fetched entries
-        buf: &mut Vec<Entry>,
-    ) -> engine_traits::Result<usize> /* entry count */ {
-        if high <= low {
-            return Ok(0);
-        }
-        let old_len = buf.len();
-        let peers = self.peers.pin();
-        let peer_data = peers
-            .get(&peer_id)
-            .ok_or(engine_traits::Error::EntriesCompacted)?;
-        let peer_data = peer_data.read().unwrap();
-        if low <= peer_data.meta.truncated_idx {
-            return Err(engine_traits::Error::EntriesCompacted);
-        }
-
-        let timer = Instant::now_coarse();
-        let mut total_size = 0;
-        for i in low..high {
-            let entry = peer_data
-                .get(i)
-                .ok_or(engine_traits::Error::EntriesUnavailable)?;
-            total_size += entry.compute_size() as usize;
-            buf.push(entry);
-            if max_size.map_or(false, |s| total_size >= s) {
-                // At least return one entry regardless of size limit.
-                break;
-            }
-        }
-        ENGINE_FETCH_ENTRIES_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
-        Ok(buf.len() - old_len)
     }
 
     // Upload latest wal chunk to object storage
@@ -770,18 +531,6 @@ impl RfEngineCore {
 
     pub fn is_lightweight_backup_enabled(&self) -> bool {
         self.lightweight
-    }
-
-    pub fn load_region_state(
-        &self,
-        peer_id: u64,
-        version: u64,
-    ) -> Option<raft_serverpb::RegionLocalState> {
-        let region_state_key = region_state_key(version);
-        let region_state_val = self.get_state(peer_id, &region_state_key)?;
-        let mut region_state = raft_serverpb::RegionLocalState::new();
-        region_state.merge_from_bytes(&region_state_val).unwrap();
-        Some(region_state)
     }
 
     pub(crate) fn try_send_task(&self, task: ServiceTask) {
@@ -1417,7 +1166,7 @@ mod tests {
             }
             engine.write(wb).unwrap();
         }
-        assert_eq!(engine.peers.len(), 10);
+        assert_eq!(engine.peers.peers.len(), 10);
         let wal_cnt = engine
             .dir
             .read_dir()
@@ -1433,7 +1182,7 @@ mod tests {
         assert_eq!(wal_cnt, 4);
 
         let mut old_entries_map = HashMap::new();
-        let peers = engine.peers.pin();
+        let peers = engine.peers.peers.pin();
         for (peer_id, peer_ref) in peers.iter() {
             let peer_data = peer_ref.read().unwrap();
             assert_eq!(*peer_id, peer_data.peer_id);
@@ -1455,8 +1204,8 @@ mod tests {
                 assert!(old_region_data.get_state(key).is_some());
                 true
             });
-            assert_eq!(engine.peers.len(), 10);
-            let peers = engine.peers.pin();
+            assert_eq!(engine.peers.peers.len(), 10);
+            let peers = engine.peers.peers.pin();
             for (peer_id, new_data_ref) in peers.iter() {
                 let new_data = new_data_ref.read().unwrap();
                 let old_data = old_entries_map.get(peer_id).unwrap();
@@ -1745,11 +1494,11 @@ mod tests {
             }
             engine.write(wb).unwrap();
         }
-        assert_eq!(engine.peers.len(), 10);
+        assert_eq!(engine.peers.peers.len(), 10);
         engine.stop_worker(true);
         for _ in 0..2 {
             let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
-            assert_eq!(engine.peers.len(), 10);
+            assert_eq!(engine.peers.peers.len(), 10);
             engine.stop_worker(true);
         }
         let compacted_epoch = engine.compacted_epoch.load(Ordering::Relaxed);

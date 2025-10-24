@@ -434,7 +434,7 @@ pub mod test_util {
             }
             engine.write(wb).unwrap();
         }
-        assert_eq!(engine.peers.len(), 10);
+        assert_eq!(engine.peers.peers.len(), 10);
     }
 
     pub fn get_epoch_file_off(engine: &RfEngine) -> (u32, u64) {
