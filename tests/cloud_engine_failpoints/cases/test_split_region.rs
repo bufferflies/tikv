@@ -179,9 +179,14 @@ fn test_split_not_to_split_existing_region() {
     pd_client.must_add_peer(region_c.get_id(), new_peer(3, 7));
 
     cluster.put(b"k3", b"v3").unwrap();
-    must_get_equal(&cluster.get_engine(3), region_c.id, b"k3", b"v3");
 
+    // Remove the failpoint before verifying data on store 3.
+    // The failpoint on peer 1003's apply can randomly block peer 7's apply
+    // if they are assigned to the same apply worker thread (pool_size=2),
+    // preventing peer 7 from completing snapshot application and shard creation.
     fail::remove(on_handle_apply_1003_fp);
+
+    must_get_equal(&cluster.get_engine(3), region_c.id, b"k3", b"v3");
 
     let r = pd_client.get_region(b"k0").unwrap();
     // If peer_c_3 is created, this should fail.

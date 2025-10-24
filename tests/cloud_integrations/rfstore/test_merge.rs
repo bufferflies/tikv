@@ -79,6 +79,15 @@ fn test_node_merge_with_slow_learner() {
 
     pd_client.must_merge(left.get_id(), right.get_id());
 
+    // Ensure all other peers have completed initial flush and are ready for split.
+    // After merge, the target region needs to do initial flush to persist metadata
+    // (file list, base_version, data_sequence) and sync state to all followers.
+    // The put operation's Raft log will be blocked by PausedApplyQueue until the
+    // merge's initial flush changeset is applied. So when must_get_equal succeeds,
+    // it guarantees that initial flush has completed on all peers.
+    cluster.must_put(b"k1", b"v11");
+    must_get_equal(&cluster.get_engine(1), right.get_id(), b"k1", b"v11");
+
     // Test slow learner will be cleaned up when merge can't be continued.
     let region = pd_client.get_region(b"k1").unwrap();
     let split_k5 = Key::from_raw(b"k5");
