@@ -4,7 +4,7 @@ use std::{
     cmp,
     cmp::Ordering as CmpOrdering,
     collections::HashMap,
-    fmt::{self, Display, Formatter, Write},
+    fmt::{self, Display, Formatter},
     mem,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -49,7 +49,7 @@ use tikv_util::{
     topn::TopN,
     warn,
     worker::{Runnable, Scheduler},
-    GLOBAL_SERVER_READINESS,
+    Either, GLOBAL_SERVER_READINESS,
 };
 use txn_types::{Key, NULL_KEYSPACE_ID};
 use yatp::Remote;
@@ -1328,12 +1328,9 @@ impl PdRunner {
             match pd_client.get_all_keyspaces_gc_states().await {
                 Ok(cluster_gc_states) => {
                     // Update metrics.
-                    // Use a single String object to format the keyspace id to avoid repeatedly
-                    // allocating for each keyspace.
                     // Skip updating if the GC safe point is 0, so that if some special keyspaces
                     // (null keyspace or default keyspace) exists but never used, it won't
                     // show up as a zero in the metrics.
-                    let mut keyspace_id_str_buffer = String::new();
                     for (&keyspace_id, gc_state) in &cluster_gc_states.keyspace_gc_states {
                         if keyspace_id == NULL_KEYSPACE_ID {
                             if !gc_state.gc_safe_point.is_zero() {
@@ -1341,13 +1338,17 @@ impl PdRunner {
                                     .set(gc_state.gc_safe_point.into_inner() as i64);
                             }
                         } else if !gc_state.gc_safe_point.is_zero() {
-                            if keyspace_id_str_buffer.capacity() < 10 {
-                                keyspace_id_str_buffer.reserve(10);
-                            }
-                            keyspace_id_str_buffer.clear();
-                            write!(&mut keyspace_id_str_buffer, "{}", keyspace_id).unwrap();
+                            let keyspace_name = match to_keyspace_name(keyspace_id) {
+                                Some(name) => Either::Left(name),
+                                None => Either::Right(format!("<unknown_{}>", keyspace_id)),
+                            };
+                            let keyspace_name_ref = match keyspace_name {
+                                Either::Left(ref name) => name.as_str(),
+                                Either::Right(ref name) => name.as_str(),
+                            };
+
                             raftstore::store::metrics::KEYSPACE_GC_SAFE_POINTS_GAUGE_VEC
-                                .with_label_values(&[&keyspace_id_str_buffer])
+                                .with_label_values(&[&keyspace_name_ref])
                                 .set(gc_state.gc_safe_point.into_inner() as i64);
                         }
                     }

@@ -49612,15 +49612,15 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "histogram_quantile(1,(\n    sum(rate(\n    tidb_tikvclient_gc_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance, le) \n    \n    \n))  ",
+              "expr": "histogram_quantile(1,(\n    sum(rate(\n    tidb_tikvclient_gc_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance, stage, keyspace_name, le) \n    \n    \n))  ",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "{{instance}}",
+              "legendFormat": "{{instance}}-{{keyspace_name}}-{{stage}}",
               "metric": "",
-              "query": "histogram_quantile(1,(\n    sum(rate(\n    tidb_tikvclient_gc_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance, le) \n    \n    \n))  ",
+              "query": "histogram_quantile(1,(\n    sum(rate(\n    tidb_tikvclient_gc_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (instance, stage, keyspace_name, le) \n    \n    \n))  ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -49745,15 +49745,15 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum(rate(\n    tidb_tikvclient_gc_worker_actions_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
+              "expr": "sum(rate(\n    tidb_tikvclient_gc_worker_actions_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    [$__rate_interval]\n)) by (type, keyspace_name, $additional_groupby) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "{{type}} {{$additional_groupby}}",
+              "legendFormat": "{{keyspace_name}}-{{type}} {{$additional_groupby}}",
               "metric": "",
-              "query": "sum(rate(\n    tidb_tikvclient_gc_worker_actions_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
+              "query": "sum(rate(\n    tidb_tikvclient_gc_worker_actions_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    [$__rate_interval]\n)) by (type, keyspace_name, $additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -49878,15 +49878,15 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "max((\n    tidb_tikvclient_range_task_stats\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=~\"resolve-locks.*\"}\n    \n)) by (result, $additional_groupby) ",
+              "expr": "max((\n    tidb_tikvclient_range_task_stats\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=~\"resolve-locks.*\"}\n    \n)) by (result, type, keyspace_name, $additional_groupby) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "{{result}} {{$additional_groupby}}",
+              "legendFormat": "{{keyspace_name}} {{type}} {{result}} {{$additional_groupby}}",
               "metric": "",
-              "query": "max((\n    tidb_tikvclient_range_task_stats\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=~\"resolve-locks.*\"}\n    \n)) by (result, $additional_groupby) ",
+              "query": "max((\n    tidb_tikvclient_range_task_stats\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=~\"resolve-locks.*\"}\n    \n)) by (result, type, keyspace_name, $additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -50207,7 +50207,7 @@
           "bars": false,
           "cacheTimeout": null,
           "datasource": "${DS_TEST-CLUSTER}",
-          "description": "The GC safe points used for TiKV's Auto GC",
+          "description": "The GC safe points that has been fetched by TiKV",
           "editable": true,
           "error": false,
           "fieldConfig": {
@@ -50292,15 +50292,15 @@
             },
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "max((\n    tikv_raftstore_keyspace_gc_safe_points\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    \n)) by (instance, keyspace_id, $additional_groupby) / (2^18) != 0",
+              "expr": "max((\n    tikv_raftstore_keyspace_gc_safe_points\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    \n)) by (instance, keyspace_name, $additional_groupby) / (2^18) != 0",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "{{instance}}-keyspace-{{keyspace_id}} {{$additional_groupby}}",
+              "legendFormat": "{{instance}}-{{keyspace_name}} {{$additional_groupby}}",
               "metric": "",
-              "query": "max((\n    tikv_raftstore_keyspace_gc_safe_points\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    \n)) by (instance, keyspace_id, $additional_groupby) / (2^18) != 0",
+              "query": "max((\n    tikv_raftstore_keyspace_gc_safe_points\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\"}\n    \n)) by (instance, keyspace_name, $additional_groupby) / (2^18) != 0",
               "refId": "",
               "step": 10,
               "target": ""
@@ -50309,7 +50309,7 @@
           "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
-          "title": "TiKV Auto GC Safe Points",
+          "title": "TiKV Side GC Safe Points",
           "tooltip": {
             "msResolution": true,
             "shared": true,
@@ -50351,6 +50351,8 @@
           }
         },
         {
+          "aliasColors": {},
+          "bars": false,
           "cacheTimeout": null,
           "datasource": "${DS_TEST-CLUSTER}",
           "description": "The lifetime of TiDB GC",
@@ -50358,17 +50360,19 @@
           "error": false,
           "fieldConfig": {
             "defaults": {
-              "custom": {},
-              "decimals": null,
-              "mappings": null,
-              "noValue": "none",
               "thresholds": {
                 "mode": "absolute",
-                "steps": ""
-              },
-              "unit": "s"
-            },
-            "overrides": []
+                "steps": []
+              }
+            }
+          },
+          "fill": 1,
+          "fillGradient": 1,
+          "grid": {
+            "threshold1": null,
+            "threshold1Color": "rgba(216, 200, 27, 0.27)",
+            "threshold2": null,
+            "threshold2Color": "rgba(234, 112, 112, 0.22)"
           },
           "gridPos": {
             "h": 7,
@@ -50380,52 +50384,108 @@
           "hideTimeOverride": false,
           "id": 364,
           "interval": null,
+          "isNew": true,
+          "legend": {
+            "alignAsTable": true,
+            "avg": false,
+            "current": true,
+            "hideEmpty": true,
+            "hideZero": false,
+            "max": false,
+            "min": false,
+            "rightSide": true,
+            "show": true,
+            "sideWidth": null,
+            "sort": "current",
+            "sortDesc": true,
+            "total": false,
+            "values": true
+          },
+          "lines": true,
+          "linewidth": 1,
           "links": [],
-          "maxDataPoints": 100,
+          "maxDataPoints": null,
           "maxPerRow": null,
           "minSpan": null,
+          "nullPointMode": "null as zero",
           "options": {
-            "colorMode": "value",
-            "graphMode": "none",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": "",
-              "values": false
-            },
-            "textMode": "auto"
+            "alertThreshold": true,
+            "dataLinks": []
           },
+          "percentage": false,
+          "pointradius": 5,
+          "points": false,
+          "renderer": "flot",
           "repeat": null,
           "repeatDirection": null,
+          "seriesOverrides": [],
           "span": null,
+          "stack": false,
+          "steppedLine": false,
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "max((\n    tidb_tikvclient_gc_config\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=\"tikv_gc_life_time\"}\n    \n))  ",
+              "expr": "max((\n    tidb_tikvclient_gc_config\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=\"tikv_gc_life_time\"}\n    \n)) by (keyspace_name) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": null,
+              "legendFormat": "{{keyspace_name}}",
               "metric": "",
-              "query": "max((\n    tidb_tikvclient_gc_config\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=\"tikv_gc_life_time\"}\n    \n))  ",
+              "query": "max((\n    tidb_tikvclient_gc_config\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=\"tikv_gc_life_time\"}\n    \n)) by (keyspace_name) ",
               "refId": "",
               "step": 10,
               "target": ""
             }
           ],
+          "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
           "title": "GC lifetime",
+          "tooltip": {
+            "msResolution": true,
+            "shared": true,
+            "sort": 0,
+            "value_type": "individual"
+          },
           "transformations": [],
           "transparent": false,
-          "type": "stat"
+          "type": "graph",
+          "xaxis": {
+            "mode": "time",
+            "name": null,
+            "show": true,
+            "values": []
+          },
+          "yaxes": [
+            {
+              "decimals": null,
+              "format": "s",
+              "label": null,
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            },
+            {
+              "decimals": null,
+              "format": "short",
+              "label": null,
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            }
+          ],
+          "yaxis": {
+            "align": false,
+            "alignLevel": 0
+          }
         },
         {
+          "aliasColors": {},
+          "bars": false,
           "cacheTimeout": null,
           "datasource": "${DS_TEST-CLUSTER}",
           "description": "The interval of TiDB GC",
@@ -50433,17 +50493,19 @@
           "error": false,
           "fieldConfig": {
             "defaults": {
-              "custom": {},
-              "decimals": null,
-              "mappings": null,
-              "noValue": "none",
               "thresholds": {
                 "mode": "absolute",
-                "steps": ""
-              },
-              "unit": "s"
-            },
-            "overrides": []
+                "steps": []
+              }
+            }
+          },
+          "fill": 1,
+          "fillGradient": 1,
+          "grid": {
+            "threshold1": null,
+            "threshold1Color": "rgba(216, 200, 27, 0.27)",
+            "threshold2": null,
+            "threshold2Color": "rgba(234, 112, 112, 0.22)"
           },
           "gridPos": {
             "h": 7,
@@ -50455,50 +50517,104 @@
           "hideTimeOverride": false,
           "id": 365,
           "interval": null,
+          "isNew": true,
+          "legend": {
+            "alignAsTable": true,
+            "avg": false,
+            "current": true,
+            "hideEmpty": true,
+            "hideZero": false,
+            "max": false,
+            "min": false,
+            "rightSide": true,
+            "show": true,
+            "sideWidth": null,
+            "sort": "current",
+            "sortDesc": true,
+            "total": false,
+            "values": true
+          },
+          "lines": true,
+          "linewidth": 1,
           "links": [],
-          "maxDataPoints": 100,
+          "maxDataPoints": null,
           "maxPerRow": null,
           "minSpan": null,
+          "nullPointMode": "null as zero",
           "options": {
-            "colorMode": "value",
-            "graphMode": "none",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "reduceOptions": {
-              "calcs": [
-                "lastNotNull"
-              ],
-              "fields": "",
-              "values": false
-            },
-            "textMode": "auto"
+            "alertThreshold": true,
+            "dataLinks": []
           },
+          "percentage": false,
+          "pointradius": 5,
+          "points": false,
+          "renderer": "flot",
           "repeat": null,
           "repeatDirection": null,
+          "seriesOverrides": [],
           "span": null,
+          "stack": false,
+          "steppedLine": false,
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "max((\n    tidb_tikvclient_gc_config\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=\"tikv_gc_run_interval\"}\n    \n))  ",
+              "expr": "max((\n    tidb_tikvclient_gc_config\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=\"tikv_gc_run_interval\"}\n    \n)) by (keyspace_name) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": null,
+              "legendFormat": "{{keyspace_name}}",
               "metric": "",
-              "query": "max((\n    tidb_tikvclient_gc_config\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=\"tikv_gc_run_interval\"}\n    \n))  ",
+              "query": "max((\n    tidb_tikvclient_gc_config\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",type=\"tikv_gc_run_interval\"}\n    \n)) by (keyspace_name) ",
               "refId": "",
               "step": 10,
               "target": ""
             }
           ],
+          "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
           "title": "GC interval",
+          "tooltip": {
+            "msResolution": true,
+            "shared": true,
+            "sort": 0,
+            "value_type": "individual"
+          },
           "transformations": [],
           "transparent": false,
-          "type": "stat"
+          "type": "graph",
+          "xaxis": {
+            "mode": "time",
+            "name": null,
+            "show": true,
+            "values": []
+          },
+          "yaxes": [
+            {
+              "decimals": null,
+              "format": "s",
+              "label": null,
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            },
+            {
+              "decimals": null,
+              "format": "short",
+              "label": null,
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            }
+          ],
+          "yaxis": {
+            "align": false,
+            "alignLevel": 0
+          }
         },
         {
           "aliasColors": {},

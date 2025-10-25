@@ -840,7 +840,7 @@ lazy_static! {
     register_int_gauge_vec!(
         "tikv_raftstore_keyspace_gc_safe_points",
         "GC safe points by keyspace that has been received by TiKV",
-        &["keyspace_id"]
+        &["keyspace_name"]
     ).unwrap();
 }
 

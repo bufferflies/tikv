@@ -3689,9 +3689,15 @@ def GC() -> RowPanel:
                 targets=[
                     target(
                         expr=expr_histogram_quantile(
-                            1, "tidb_tikvclient_gc_seconds", by_labels=["instance"]
+                            1,
+                            "tidb_tikvclient_gc_seconds",
+                            by_labels=[
+                                "instance",
+                                "stage",
+                                "keyspace_name",
+                            ],
                         ).skip_default_instance_selector(),
-                        legend_format="{{instance}}",
+                        legend_format="{{instance}}-{{keyspace_name}}-{{stage}}",
                     ),
                 ],
             ),
@@ -3702,9 +3708,10 @@ def GC() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tidb_tikvclient_gc_worker_actions_total",
-                            by_labels=["type"],
+                            by_labels=["type", "keyspace_name"],
                         ).skip_default_instance_selector(),
                         additional_groupby=True,
+                        legend_format="{{keyspace_name}}-{{type}}",
                     ),
                 ],
             ),
@@ -3720,9 +3727,10 @@ def GC() -> RowPanel:
                         expr=expr_max(
                             "tidb_tikvclient_range_task_stats",
                             label_selectors=['type=~"resolve-locks.*"'],
-                            by_labels=["result"],
+                            by_labels=["result", "type", "keyspace_name"],
                         ).skip_default_instance_selector(),
                         additional_groupby=True,
+                        legend_format="{{keyspace_name}} {{type}} {{result}}",
                     ),
                 ],
             ),
@@ -3766,8 +3774,8 @@ def GC() -> RowPanel:
                 ],
             ),
             graph_panel(
-                title="TiKV Auto GC Safe Points",
-                description="The GC safe points used for TiKV's Auto GC",
+                title="TiKV Side GC Safe Points",
+                description="The GC safe points that has been fetched by TiKV",
                 yaxes=yaxes(left_format=UNITS.DATE_TIME_ISO),
                 null_point_mode=NULL_AS_NULL,
                 targets=[
@@ -3783,11 +3791,11 @@ def GC() -> RowPanel:
                     target(
                         expr=expr_max(
                             "tikv_raftstore_keyspace_gc_safe_points",
-                            by_labels=["instance", "keyspace_id"],
+                            by_labels=["instance", "keyspace_name"],
                         )
                         .extra("/ (2^18) != 0")
                         .skip_default_instance_selector(),
-                        legend_format="{{instance}}-keyspace-{{keyspace_id}}",
+                        legend_format="{{instance}}-{{keyspace_name}}",
                         additional_groupby=True,
                     ),
                 ],
@@ -3796,33 +3804,41 @@ def GC() -> RowPanel:
     )
     layout.half_row(
         [
-            stat_panel(
+            graph_panel(
                 title="GC lifetime",
                 description="The lifetime of TiDB GC",
-                format=UNITS.SECONDS,
+                yaxes=yaxes(left_format=UNITS.SECONDS),
                 targets=[
                     target(
                         expr=expr_max(
                             "tidb_tikvclient_gc_config",
                             label_selectors=['type="tikv_gc_life_time"'],
-                            by_labels=[],
+                            by_labels=["keyspace_name"],
                         ).skip_default_instance_selector(),
+                        legend_format=r"{{keyspace_name}}",
                     ),
                 ],
+                legend=graph_legend(
+                    max=False, current=True, hide_zero=False, hide_empty=True
+                ),
             ),
-            stat_panel(
+            graph_panel(
                 title="GC interval",
                 description="The interval of TiDB GC",
-                format=UNITS.SECONDS,
+                yaxes=yaxes(left_format=UNITS.SECONDS),
                 targets=[
                     target(
                         expr=expr_max(
                             "tidb_tikvclient_gc_config",
                             label_selectors=['type="tikv_gc_run_interval"'],
-                            by_labels=[],
+                            by_labels=["keyspace_name"],
                         ).skip_default_instance_selector(),
+                        legend_format=r"{{keyspace_name}}",
                     ),
                 ],
+                legend=graph_legend(
+                    max=False, current=True, hide_zero=False, hide_empty=True
+                ),
             ),
         ]
     )
