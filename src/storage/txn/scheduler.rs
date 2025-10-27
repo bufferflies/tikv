@@ -58,7 +58,10 @@ use tikv_util::{
     time::{duration_to_sec, Instant},
     timer::GLOBAL_TIMER_HANDLE,
 };
-use tracker::{get_tls_tracker_token, set_tls_tracker_token, TrackerToken};
+use tracker::{
+    get_tls_trace_id, get_tls_tracker_token, set_tls_trace_id, set_tls_tracker_token, TraceId,
+    TrackedFuture, TrackerToken,
+};
 use txn_types::TimeStamp;
 
 use crate::{
@@ -114,16 +117,18 @@ type SVec<T> = SmallVec<[T; 4]>;
 pub(super) struct Task {
     pub(super) cid: u64,
     pub(super) tracker: TrackerToken,
+    pub(super) trace_id: TraceId,
     pub(super) cmd: Command,
     pub(super) extra_op: ExtraOp,
 }
 
 impl Task {
     /// Creates a task for a running command.
-    pub(super) fn new(cid: u64, tracker: TrackerToken, cmd: Command) -> Task {
+    pub(super) fn new(cid: u64, tracker: TrackerToken, trace_id: TraceId, cmd: Command) -> Task {
         Task {
             cid,
             tracker,
+            trace_id,
             cmd,
             extra_op: ExtraOp::Noop,
         }
@@ -616,9 +621,13 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         }
         let ts = cmd.ts().into_inner();
         let mut task_slot = self.inner.get_task_slot(cid);
+        let trace_id = get_tls_trace_id();
         let tctx = task_slot.entry(cid).or_insert_with(|| {
-            self.inner
-                .new_task_context(Task::new(cid, tracker, cmd), callback, prepared_latches)
+            self.inner.new_task_context(
+                Task::new(cid, tracker, trace_id, cmd),
+                callback,
+                prepared_latches,
+            )
         });
         tctx.lock.set_region_id_start_ts(region_id, ts);
 
@@ -769,6 +778,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     /// Executes the task in the sched pool.
     fn execute(&self, mut task: Task) {
         set_tls_tracker_token(task.tracker);
+        set_tls_trace_id(task.trace_id.clone());
         txn_debug!(
             "Scheduler::execute";
             "cid" => task.cid, "cmd" => ?task.cmd, "region_id" => task.cmd.ctx().get_region_id(), "tracker" => ?task.tracker
@@ -778,11 +788,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let cid = task.cid;
         let tag = task.cmd.tag();
         self.try_spawn(
-            async move {
-                fail_point!("scheduler_start_execute");
-                if sched.check_task_deadline_exceeded(&task) {
-                    return;
-                }
+	    TrackedFuture::new(async move {
+		fail_point!("scheduler_start_execute");
+		if sched.check_task_deadline_exceeded(&task) {
+		    return;
+		}
 
                 SCHED_STAGE_COUNTER_VEC.get(tag).snapshot.inc();
 
@@ -802,14 +812,14 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 if matches!(
                     task.cmd,
                     Command::FlashbackToVersionReadPhase { .. }
-                        | Command::FlashbackToVersion { .. }
+                    | Command::FlashbackToVersion { .. }
                 ) {
                     snap_ctx.for_flashback = true;
                 }
                 // The program is currently in scheduler worker threads.
                 // Safety: `self.inner.worker_pool` should ensure that a TLS engine exists.
                 match unsafe { with_tls_engine(|engine: &mut E| kv::snapshot(engine, snap_ctx)) }
-                    .await
+                .await
                 {
                     Ok(snapshot) => {
                         SCHED_STAGE_COUNTER_VEC.get(tag).snapshot_ok.inc();
@@ -844,7 +854,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                         sched.finish_with_err(task.cid, Error::from(err));
                     }
                 }
-            },
+            }),
             pri,
             cid,
             tag,

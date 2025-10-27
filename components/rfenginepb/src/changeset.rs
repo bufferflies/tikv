@@ -161,13 +161,13 @@ impl ::protobuf::Message for ChangeSet {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -227,7 +227,7 @@ impl ::protobuf::Clear for ChangeSet {
 
 impl ::protobuf::PbPrint for ChangeSet {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.epoch_id, "epoch_id", buf);
@@ -241,7 +241,7 @@ impl ::protobuf::PbPrint for ChangeSet {
 impl ::std::fmt::Debug for ChangeSet {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.epoch_id, "epoch_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.peers, "peers", &mut s);
         write!(f, "{}", s)
@@ -249,7 +249,7 @@ impl ::std::fmt::Debug for ChangeSet {
 }
 
 impl ::protobuf::reflect::ProtobufValue for ChangeSet {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -490,13 +490,13 @@ impl ::protobuf::Message for PeerMeta {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -574,7 +574,7 @@ impl ::protobuf::Clear for PeerMeta {
 
 impl ::protobuf::PbPrint for PeerMeta {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.peer_id, "peer_id", buf);
@@ -591,7 +591,7 @@ impl ::protobuf::PbPrint for PeerMeta {
 impl ::std::fmt::Debug for PeerMeta {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.peer_id, "peer_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.region_id, "region_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.truncated_index, "truncated_index", &mut s);
@@ -602,7 +602,7 @@ impl ::std::fmt::Debug for PeerMeta {
 }
 
 impl ::protobuf::reflect::ProtobufValue for PeerMeta {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -742,13 +742,13 @@ impl ::protobuf::Message for PeerState {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -808,7 +808,7 @@ impl ::protobuf::Clear for PeerState {
 
 impl ::protobuf::PbPrint for PeerState {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.key, "key", buf);
@@ -822,7 +822,7 @@ impl ::protobuf::PbPrint for PeerState {
 impl ::std::fmt::Debug for PeerState {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.key, "key", &mut s);
         ::protobuf::PbPrint::fmt(&self.value, "value", &mut s);
         write!(f, "{}", s)
@@ -830,7 +830,7 @@ impl ::std::fmt::Debug for PeerState {
 }
 
 impl ::protobuf::reflect::ProtobufValue for PeerState {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -1014,13 +1014,13 @@ impl ::protobuf::Message for RaftLogFile {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -1092,7 +1092,7 @@ impl ::protobuf::Clear for RaftLogFile {
 
 impl ::protobuf::PbPrint for RaftLogFile {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.first_index, "first_index", buf);
@@ -1108,7 +1108,7 @@ impl ::protobuf::PbPrint for RaftLogFile {
 impl ::std::fmt::Debug for RaftLogFile {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.first_index, "first_index", &mut s);
         ::protobuf::PbPrint::fmt(&self.last_index, "last_index", &mut s);
         ::protobuf::PbPrint::fmt(&self.last_term, "last_term", &mut s);
@@ -1118,7 +1118,7 @@ impl ::std::fmt::Debug for RaftLogFile {
 }
 
 impl ::protobuf::reflect::ProtobufValue for RaftLogFile {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -1456,13 +1456,13 @@ impl ::protobuf::Message for StoreBackupMeta {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -1558,7 +1558,7 @@ impl ::protobuf::Clear for StoreBackupMeta {
 
 impl ::protobuf::PbPrint for StoreBackupMeta {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.store_id, "store_id", buf);
@@ -1578,7 +1578,7 @@ impl ::protobuf::PbPrint for StoreBackupMeta {
 impl ::std::fmt::Debug for StoreBackupMeta {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.store_id, "store_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.manifest, "manifest", &mut s);
         ::protobuf::PbPrint::fmt(&self.wal_chunks, "wal_chunks", &mut s);
@@ -1592,7 +1592,7 @@ impl ::std::fmt::Debug for StoreBackupMeta {
 }
 
 impl ::protobuf::reflect::ProtobufValue for StoreBackupMeta {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -1689,13 +1689,13 @@ impl ::protobuf::Message for BackupSize {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -1749,7 +1749,7 @@ impl ::protobuf::Clear for BackupSize {
 
 impl ::protobuf::PbPrint for BackupSize {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.size, "size", buf);
@@ -1762,14 +1762,14 @@ impl ::protobuf::PbPrint for BackupSize {
 impl ::std::fmt::Debug for BackupSize {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.size, "size", &mut s);
         write!(f, "{}", s)
     }
 }
 
 impl ::protobuf::reflect::ProtobufValue for BackupSize {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -1924,13 +1924,13 @@ impl ::protobuf::Message for WalChunk {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -1996,7 +1996,7 @@ impl ::protobuf::Clear for WalChunk {
 
 impl ::protobuf::PbPrint for WalChunk {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.epoch, "epoch", buf);
@@ -2011,7 +2011,7 @@ impl ::protobuf::PbPrint for WalChunk {
 impl ::std::fmt::Debug for WalChunk {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.epoch, "epoch", &mut s);
         ::protobuf::PbPrint::fmt(&self.start_off, "start_off", &mut s);
         ::protobuf::PbPrint::fmt(&self.end_off, "end_off", &mut s);
@@ -2020,7 +2020,7 @@ impl ::std::fmt::Debug for WalChunk {
 }
 
 impl ::protobuf::reflect::ProtobufValue for WalChunk {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -2365,13 +2365,13 @@ impl ::protobuf::Message for ClusterBackupMeta {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -2473,7 +2473,7 @@ impl ::protobuf::Clear for ClusterBackupMeta {
 
 impl ::protobuf::PbPrint for ClusterBackupMeta {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.stores, "stores", buf);
@@ -2494,7 +2494,7 @@ impl ::protobuf::PbPrint for ClusterBackupMeta {
 impl ::std::fmt::Debug for ClusterBackupMeta {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.stores, "stores", &mut s);
         ::protobuf::PbPrint::fmt(&self.cluster_id, "cluster_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.backup_ts, "backup_ts", &mut s);
@@ -2509,7 +2509,7 @@ impl ::std::fmt::Debug for ClusterBackupMeta {
 }
 
 impl ::protobuf::reflect::ProtobufValue for ClusterBackupMeta {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -2722,13 +2722,13 @@ impl ::protobuf::Message for RaftLogBackupFile {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -2806,7 +2806,7 @@ impl ::protobuf::Clear for RaftLogBackupFile {
 
 impl ::protobuf::PbPrint for RaftLogBackupFile {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.peer_id, "peer_id", buf);
@@ -2823,7 +2823,7 @@ impl ::protobuf::PbPrint for RaftLogBackupFile {
 impl ::std::fmt::Debug for RaftLogBackupFile {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.peer_id, "peer_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.first_index, "first_index", &mut s);
         ::protobuf::PbPrint::fmt(&self.last_index, "last_index", &mut s);
@@ -2834,7 +2834,7 @@ impl ::std::fmt::Debug for RaftLogBackupFile {
 }
 
 impl ::protobuf::reflect::ProtobufValue for RaftLogBackupFile {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -2974,13 +2974,13 @@ impl ::protobuf::Message for KeySpaceBackupMeta {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -3040,7 +3040,7 @@ impl ::protobuf::Clear for KeySpaceBackupMeta {
 
 impl ::protobuf::PbPrint for KeySpaceBackupMeta {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.keyspace_id, "keyspace_id", buf);
@@ -3054,7 +3054,7 @@ impl ::protobuf::PbPrint for KeySpaceBackupMeta {
 impl ::std::fmt::Debug for KeySpaceBackupMeta {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.keyspace_id, "keyspace_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.files, "files", &mut s);
         write!(f, "{}", s)
@@ -3062,7 +3062,7 @@ impl ::std::fmt::Debug for KeySpaceBackupMeta {
 }
 
 impl ::protobuf::reflect::ProtobufValue for KeySpaceBackupMeta {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -3188,13 +3188,13 @@ impl ::protobuf::Message for RaftLogMetaHeader {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -3254,7 +3254,7 @@ impl ::protobuf::Clear for RaftLogMetaHeader {
 
 impl ::protobuf::PbPrint for RaftLogMetaHeader {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.version, "version", buf);
@@ -3268,7 +3268,7 @@ impl ::protobuf::PbPrint for RaftLogMetaHeader {
 impl ::std::fmt::Debug for RaftLogMetaHeader {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.version, "version", &mut s);
         ::protobuf::PbPrint::fmt(&self.compression_type, "compression_type", &mut s);
         write!(f, "{}", s)
@@ -3276,7 +3276,7 @@ impl ::std::fmt::Debug for RaftLogMetaHeader {
 }
 
 impl ::protobuf::reflect::ProtobufValue for RaftLogMetaHeader {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -3426,13 +3426,13 @@ impl ::protobuf::Message for StoreRaftLogBackupMeta {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -3492,7 +3492,7 @@ impl ::protobuf::Clear for StoreRaftLogBackupMeta {
 
 impl ::protobuf::PbPrint for StoreRaftLogBackupMeta {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.header, "header", buf);
@@ -3506,7 +3506,7 @@ impl ::protobuf::PbPrint for StoreRaftLogBackupMeta {
 impl ::std::fmt::Debug for StoreRaftLogBackupMeta {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.header, "header", &mut s);
         ::protobuf::PbPrint::fmt(&self.raft_logs, "raft_logs", &mut s);
         write!(f, "{}", s)
@@ -3514,7 +3514,7 @@ impl ::std::fmt::Debug for StoreRaftLogBackupMeta {
 }
 
 impl ::protobuf::reflect::ProtobufValue for StoreRaftLogBackupMeta {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }

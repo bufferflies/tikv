@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+use bytes::Bytes;
 use engine_traits::{CfName, CF_DEFAULT, CF_LOCK, CF_WRITE};
 use external_storage::{BackendConfig, UnpinReader};
 use external_storage_export::{create_storage, ExternalStorage};
@@ -1042,12 +1043,8 @@ impl StreamTaskInfo {
         }
         let min_ts = min_ts.unwrap_or_default();
         let max_ts = max_ts.unwrap_or_default();
-        merged_file_info.set_path(TempFileKey::file_name(
-            metadata.store_id,
-            min_ts,
-            max_ts,
-            is_meta,
-        ));
+        merged_file_info
+            .set_path(TempFileKey::file_name(metadata.store_id, min_ts, max_ts, is_meta).into());
         merged_file_info.set_data_files_info(data_file_infos.into());
         merged_file_info.set_length(stat_length);
         merged_file_info.set_max_ts(max_ts);
@@ -1458,7 +1455,7 @@ impl DataFile {
         meta.set_sha256(
             self.sha256
                 .finish()
-                .map(|bytes| bytes.to_vec())
+                .map(|bytes| bytes.to_vec().into())
                 .map_err(|err| Error::Other(box_err!("openssl hasher failed to init: {}", err)))?,
         );
         meta.set_number_of_entries(self.number_of_entries as _);
@@ -1469,13 +1466,13 @@ impl DataFile {
             self.min_begin_ts
                 .map_or(self.min_ts.into_inner(), |ts| ts.into_inner()),
         );
-        meta.set_start_key(std::mem::take(&mut self.start_key));
-        meta.set_end_key(std::mem::take(&mut self.end_key));
+        meta.set_start_key(Bytes::from(std::mem::take(&mut self.start_key)));
+        meta.set_end_key(Bytes::from(std::mem::take(&mut self.end_key)));
         meta.set_length(self.file_size as _);
 
         meta.set_is_meta(file_key.is_meta);
         meta.set_table_id(file_key.table_id);
-        meta.set_cf(file_key.cf.to_owned());
+        meta.set_cf(file_key.cf.to_owned().into());
         meta.set_region_id(file_key.region_id as i64);
         meta.set_type(file_key.get_file_type());
 

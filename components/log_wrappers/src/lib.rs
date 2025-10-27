@@ -14,7 +14,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use protobuf::atomic_flags::set_redact_bytes as proto_set_redact_bytes;
+use protobuf::atomic_flags::{set_redact_level as proto_set_redact_level, RedactLevel};
 
 pub use crate::hex::*;
 
@@ -94,7 +94,11 @@ static REDACT_INFO_LOG: AtomicBool = AtomicBool::new(false);
 /// Set whether we should avoid user data to slog.
 pub fn set_redact_info_log(v: bool) {
     REDACT_INFO_LOG.store(v, Ordering::Relaxed);
-    proto_set_redact_bytes(v);
+    if v {
+        proto_set_redact_level(RedactLevel::On);
+    } else {
+        proto_set_redact_level(RedactLevel::Off);
+    }
 }
 
 pub struct Value<'a>(pub &'a [u8]);

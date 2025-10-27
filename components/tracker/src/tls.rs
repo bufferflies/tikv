@@ -4,15 +4,45 @@ use std::{
     cell::Cell,
     future::Future,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
 use pin_project::pin_project;
+use slog::{Record, Serializer, Value};
 
 use crate::{slab::TrackerToken, Tracker, GLOBAL_TRACKERS, INVALID_TRACKER_TOKEN};
 
+#[derive(Clone, Default)]
+pub struct TraceId(pub Option<Arc<[u8]>>);
+
+impl TraceId {
+    pub fn new(trace_id: &[u8]) -> TraceId {
+        if !trace_id.is_empty() {
+            TraceId(Some(Arc::from(trace_id)))
+        } else {
+            TraceId(None)
+        }
+    }
+}
+
+impl Value for TraceId {
+    fn serialize(
+        &self,
+        _record: &Record<'_>,
+        key: slog::Key,
+        serializer: &mut dyn Serializer,
+    ) -> slog::Result {
+        match &self.0 {
+            Some(arc) => serializer.emit_str(key, &hex::encode(arc)),
+            None => serializer.emit_str(key, "None"),
+        }
+    }
+}
+
 thread_local! {
     static TLS_TRACKER_TOKEN: Cell<TrackerToken> = Cell::new(INVALID_TRACKER_TOKEN);
+    static TLS_TRACE_ID: Cell<TraceId> = Cell::new(TraceId(None));
 }
 
 pub fn set_tls_tracker_token(token: TrackerToken) {
@@ -21,12 +51,25 @@ pub fn set_tls_tracker_token(token: TrackerToken) {
     })
 }
 
+pub fn set_tls_trace_id(v: TraceId) {
+    TLS_TRACE_ID.with(|c| c.set(v))
+}
+
 pub fn clear_tls_tracker_token() {
     set_tls_tracker_token(INVALID_TRACKER_TOKEN);
 }
 
 pub fn get_tls_tracker_token() -> TrackerToken {
     TLS_TRACKER_TOKEN.with(|c| c.get())
+}
+
+pub fn get_tls_trace_id() -> TraceId {
+    TLS_TRACE_ID.with(|c| {
+        let v = c.take();
+        let ret = v.clone();
+        c.set(v);
+        ret
+    })
 }
 
 pub fn with_tls_tracker<F>(mut f: F)
@@ -43,6 +86,7 @@ pub struct TrackedFuture<F> {
     #[pin]
     future: F,
     tracker: TrackerToken,
+    trace_id: TraceId,
 }
 
 impl<F> TrackedFuture<F> {
@@ -50,6 +94,7 @@ impl<F> TrackedFuture<F> {
         TrackedFuture {
             future,
             tracker: get_tls_tracker_token(),
+            trace_id: get_tls_trace_id(),
         }
     }
 }
@@ -61,9 +106,16 @@ impl<F: Future> Future for TrackedFuture<F> {
         let this = self.project();
         TLS_TRACKER_TOKEN.with(|c| {
             c.set(*this.tracker);
-            let res = this.future.poll(cx);
-            c.set(INVALID_TRACKER_TOKEN);
-            res
-        })
+        });
+        TLS_TRACE_ID.with(|c| {
+            c.set(this.trace_id.clone());
+        });
+
+        let res = this.future.poll(cx);
+
+        TLS_TRACKER_TOKEN.with(|c| c.set(INVALID_TRACKER_TOKEN));
+        TLS_TRACE_ID.with(|c| c.set(TraceId(None)));
+
+        res
     }
 }

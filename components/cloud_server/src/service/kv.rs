@@ -51,6 +51,7 @@ use tikv_util::{
     time::Instant,
     worker::Scheduler,
 };
+use tracker::{set_tls_trace_id, TraceId, TrackedFuture};
 use txn_types::{self, Key};
 
 use super::batch::{BatcherBuilder, ReqBatcher};
@@ -141,7 +142,8 @@ macro_rules! handle_request {
         fn $fn_name(&mut self, ctx: RpcContext<'_>, req: $req_ty, sink: UnarySink<$resp_ty>) {
             forward_unary!(self.proxy, $fn_name, ctx, req, sink);
             let begin_instant = Instant::now_coarse();
-
+	    // trace id should not be added here, it should be added to future_xxx rather than kv_xxx
+	    // That's because there are batch commands, and future_xxx are the common entry for both.
             let resp = $future_name(&self.storage, req);
             let task = async move {
                 let resp = resp.await?;
@@ -1489,6 +1491,8 @@ fn future_get<L: LockManager, F: KvFormat>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
+    let trace_id = req.get_context().get_trace_id();
+    set_tls_trace_id(TraceId::new(trace_id));
     let start = Instant::now();
     let v = storage.get(
         req.take_context(),
@@ -1549,6 +1553,8 @@ fn future_scan<L: LockManager, F: KvFormat>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
+    let trace_id = req.get_context().get_trace_id();
+    set_tls_trace_id(TraceId::new(trace_id));
     let end_key = Key::from_raw_maybe_unbounded(req.get_end_key());
     let rev_range = if req.reverse && req.version == u64::MAX {
         Some((req.start_key.clone(), req.end_key.clone()))
@@ -1566,7 +1572,7 @@ fn future_scan<L: LockManager, F: KvFormat>(
         req.get_reverse(),
     );
 
-    async move {
+    TrackedFuture::new(async move {
         let v = v.await;
         let mut resp = ScanResponse::default();
         if let Some(err) = extract_region_error(&v) {
@@ -1601,7 +1607,7 @@ fn future_scan<L: LockManager, F: KvFormat>(
             }
         }
         Ok(resp)
-    }
+    })
     .boxed()
 }
 
@@ -1612,11 +1618,13 @@ fn future_batch_get<L: LockManager, F: KvFormat>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
+    let trace_id = req.get_context().get_trace_id();
+    set_tls_trace_id(TraceId::new(trace_id));
     let start = Instant::now();
     let keys = req.get_keys().iter().map(|x| Key::from_raw(x)).collect();
     let v = storage.batch_get(req.take_context(), keys, req.get_version().into());
 
-    async move {
+    TrackedFuture::new(async move {
         let v = v.await;
         let duration = start.saturating_elapsed();
         let mut resp = BatchGetResponse::default();
@@ -1643,7 +1651,7 @@ fn future_batch_get<L: LockManager, F: KvFormat>(
             }
         }
         Ok(resp)
-    }
+    })
     .boxed()
 }
 
@@ -1654,6 +1662,8 @@ fn future_scan_lock<L: LockManager, F: KvFormat>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
+    let trace_id = req.get_context().get_trace_id();
+    set_tls_trace_id(TraceId::new(trace_id));
     let start_key = Key::from_raw_maybe_unbounded(req.get_start_key());
     let end_key = Key::from_raw_maybe_unbounded(req.get_end_key());
 
@@ -1665,7 +1675,7 @@ fn future_scan_lock<L: LockManager, F: KvFormat>(
         req.get_limit() as usize,
     );
 
-    async move {
+    TrackedFuture::new(async move {
         let v = v.await;
         let mut resp = ScanLockResponse::default();
         if let Some(err) = extract_region_error(&v) {
@@ -1677,7 +1687,7 @@ fn future_scan_lock<L: LockManager, F: KvFormat>(
             }
         }
         Ok(resp)
-    }
+    })
     .boxed()
 }
 
@@ -1694,6 +1704,8 @@ fn future_delete_range<L: LockManager, F: KvFormat>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
+    let trace_id = req.get_context().get_trace_id();
+    set_tls_trace_id(TraceId::new(trace_id));
     let (cb, f) = paired_future_callback();
     let res = storage.delete_range(
         req.take_context(),
@@ -1703,7 +1715,7 @@ fn future_delete_range<L: LockManager, F: KvFormat>(
         cb,
     );
 
-    async move {
+    TrackedFuture::new(async move {
         let v = match res {
             Err(e) => Err(e),
             Ok(_) => f.await?,
@@ -1715,7 +1727,7 @@ fn future_delete_range<L: LockManager, F: KvFormat>(
             resp.set_error(format!("{}", e));
         }
         Ok(resp)
-    }
+    })
     .boxed()
 }
 
@@ -1727,6 +1739,8 @@ fn future_copr<E: Engine>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
+    let trace_id = req.get_context().get_trace_id();
+    set_tls_trace_id(TraceId::new(trace_id));
     let ret = copr.parse_and_handle_unary_request(req, peer);
     async move { Ok(ret.await) }.boxed()
 }
@@ -1738,10 +1752,12 @@ macro_rules! txn_command_future {
             $req: $req_ty,
         ) -> impl Future<Output = ServerResult<$resp_ty>> {
             $prelude
+            let trace_id = $req.get_context().get_trace_id();
+            set_tls_trace_id(TraceId::new(trace_id));
             let (cb, f) = paired_future_callback();
             let res = storage.sched_txn_command($req.into(), cb);
 
-            async move {
+            TrackedFuture::new(async move {
                 let $v = match res {
                     Err(e) => Err(e),
                     Ok(_) => f.await?,
@@ -1753,7 +1769,7 @@ macro_rules! txn_command_future {
                     $else_branch;
                 }
                 Ok($resp)
-            }
+            })
         }
     };
     ($fn_name: ident, $req_ty: ident, $resp_ty: ident, ($v: ident, $resp: ident) { $else_branch: expr }) => {

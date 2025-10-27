@@ -177,9 +177,9 @@ macro_rules! txn_debug {
     // slog-style: message; key-value pairs
     ($msg:expr; $($args:tt)*) => {
         if $crate::logger::unlikely($crate::logger::txn_info_logging_enabled()) {
-            info!($msg; $($args)*);
+            info!($msg; "trace_id" => tracker::get_tls_trace_id(), $($args)*);
         } else {
-            debug!($msg; $($args)*);
+            debug!($msg; "trace_id" => tracker::get_tls_trace_id(), $($args)*);
         }
     };
     // Standard format string style: message with format args

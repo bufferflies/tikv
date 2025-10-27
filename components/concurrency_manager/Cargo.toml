@@ -21,6 +21,7 @@ slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global
 thiserror = "1.0"
 tikv_util = { workspace = true }
 tokio = { version = "1.5", features = ["macros", "sync", "time"] }
+tracker = { workspace = true }
 txn_types = { workspace = true }
 
 [dev-dependencies]
