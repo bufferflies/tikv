@@ -182,6 +182,10 @@ fn new_test_raft_ctx(
         destroying: HashSet::default(),
         engine_total_bytes_written: Arc::new(AtomicU64::new(0)),
         engine_total_keys_written: Arc::new(AtomicU64::new(0)),
+        busy_apply_status: Arc::new(Mutex::new(BusyApplyStatus {
+            busy_apply_peers: HashSet::default(),
+            completed_apply_peers_count: Some(0),
+        })),
     };
     RaftContext::new(global_ctx)
 }

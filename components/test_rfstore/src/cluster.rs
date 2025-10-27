@@ -32,7 +32,7 @@ use rfstore::{
         load_last_raft_state, load_raft_truncated_state, prepare_bootstrap_cluster,
         state::{RaftApplyState, RaftState, RaftTruncatedState},
         transport::CasualRouter,
-        Callback, CasualMessage, Engines, RaftBatchSystem, StoreMeta, WriteResponse,
+        Callback, CasualMessage, Engines, RaftBatchSystem, StoreMeta, StoreMsg, WriteResponse,
         INIT_EPOCH_CONF_VER, INIT_EPOCH_VER, PENDING_MSG_CAP,
     },
     Error, Result,
@@ -1666,10 +1666,9 @@ impl<T: Simulator> Cluster<T> {
         );
     }
 
-    pub fn must_send_store_heartbeat(&self, _node_id: u64) {
-        unimplemented!()
-        // let router = self.sim.rl().get_router(node_id).unwrap();
-        // router.send_store_msg(StoreMsg::Tick(StoreTick::PdStoreHeartbeat));
+    pub fn must_send_store_heartbeat(&self, node_id: u64) {
+        let router = self.sim.rl().get_router(node_id).unwrap();
+        router.send_store_msg(StoreMsg::PdStoreHeartbeatTick);
     }
 
     pub fn gc_peer(&mut self, region_id: u64, node_id: u64, peer: metapb::Peer) {

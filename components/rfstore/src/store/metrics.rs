@@ -18,6 +18,22 @@ make_auto_flush_static_metric! {
     }
 }
 
+make_static_metric! {
+    pub struct StoreBusyOnApplyRegionsGaugeVec: IntGauge {
+        "type" => {
+            busy_apply_peers,
+            completed_apply_peers,
+        },
+    }
+
+    pub struct StoreBusyStateGaugeVec: IntGauge {
+        "type" => {
+            raftstore_busy,
+            applystore_busy,
+        },
+    }
+}
+
 lazy_static! {
     pub static ref STORE_PROPOSE_SWITCH_MEM_TABLE_COUNTER: IntCounter = register_int_counter!(
         "rfstore_propose_switch_mem_table_counter",
@@ -52,5 +68,22 @@ lazy_static! {
             "rfstore_raft_entry_fetches_task_duration_seconds",
             "Bucketed histogram of raft entry fetches task duration.",
             exponential_buckets(0.0005, 2.0, 21).unwrap()  // 500us ~ 8.7m
+        ).unwrap();
+
+
+    pub static ref STORE_BUSY_ON_APPLY_REGIONS_GAUGE_VEC: StoreBusyOnApplyRegionsGaugeVec =
+        register_static_int_gauge_vec!(
+            StoreBusyOnApplyRegionsGaugeVec,
+            "tikv_raftstore_busy_on_apply_region_total",
+            "Total number of regions busy on apply or complete apply.",
+            &["type"]
+        ).unwrap();
+
+    pub static ref STORE_PROCESS_BUSY_GAUGE_VEC: StoreBusyStateGaugeVec =
+        register_static_int_gauge_vec!(
+            StoreBusyStateGaugeVec,
+            "tikv_raftstore_process_busy",
+            "Is raft process busy or not",
+            &["type"]
         ).unwrap();
 }

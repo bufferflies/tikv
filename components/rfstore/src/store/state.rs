@@ -8,7 +8,7 @@ use crate::store::TERM_KEY;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RaftApplyState {
-    pub(crate) applied_index: u64,
+    pub applied_index: u64,
     pub(crate) applied_index_term: u64,
 }
 

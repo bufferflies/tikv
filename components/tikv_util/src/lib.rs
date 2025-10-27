@@ -760,10 +760,9 @@ lazy_static! {
 pub struct ServerReadiness {
     /// Indicates whether the server has connected to PD.
     pub connected_to_pd: AtomicBool,
-    // TODO: include more conditions.
-    // /// Indicates whether a sufficient number of Raft peers have caught up
-    // /// applying logs.
-    // pub raft_peers_caught_up: AtomicBool,
+    /// Indicates whether a sufficient number of Raft peers have caught up
+    /// applying logs.
+    pub raft_peers_caught_up: AtomicBool,
 }
 
 impl ServerReadiness {
@@ -772,6 +771,7 @@ impl ServerReadiness {
     /// All conditions must be met for the server to be considered ready.
     pub fn is_ready(&self) -> bool {
         self.connected_to_pd.load(Ordering::SeqCst)
+            && self.raft_peers_caught_up.load(Ordering::SeqCst)
     }
 
     pub fn to_json(&self) -> String {

@@ -323,6 +323,11 @@ pub struct Config {
     #[online_config(skip)]
     pub region_split_size: ReadableSize,
 
+    /// The minimal count of region pending on applying raft logs.
+    /// Only when the count of regions which not pending on applying logs is
+    /// less than the threshold, can the raftstore supply service.
+    #[online_config(hidden)]
+    pub min_pending_apply_region_count: u64,
     // =====================================================================
     // Extra configs for Next-gen
     // ---------------------------------------------------------------------
@@ -522,6 +527,7 @@ impl Default for Config {
             switch_mem_table_check_tick_interval: ReadableDuration::minutes(1),
             update_gc_safe_point_interval: ReadableDuration::secs(60),
             raft_log_gc_no_kv_count: 4,
+            min_pending_apply_region_count: 10,
         }
     }
 }
@@ -816,6 +822,12 @@ impl Config {
                     )))
                 }
             }
+        }
+
+        if self.min_pending_apply_region_count == 0 {
+            return Err(box_err!(
+                "min_pending_apply_region_count must be greater than 0"
+            ));
         }
 
         // For tests only.

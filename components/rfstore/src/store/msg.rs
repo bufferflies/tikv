@@ -161,6 +161,7 @@ impl ApplyMsg {
 
 pub enum StoreMsg {
     Tick,
+    PdStoreHeartbeatTick,
     Start {
         store: metapb::Store,
     },
@@ -204,6 +205,7 @@ impl StoreMsg {
     pub(crate) fn to_debug(&self) -> StoreMsgDebug {
         match self {
             StoreMsg::Tick => StoreMsgDebug::Tick,
+            StoreMsg::PdStoreHeartbeatTick => StoreMsgDebug::PdStoreHeartbeatTick,
             StoreMsg::Start { store } => StoreMsgDebug::Start {
                 store: store.clone(),
             },
@@ -263,6 +265,7 @@ impl StoreMsg {
 #[derive(Debug)]
 pub(crate) enum StoreMsgDebug {
     Tick,
+    PdStoreHeartbeatTick,
     Start {
         store: metapb::Store,
     },

@@ -524,6 +524,17 @@ pub(crate) struct Peer {
     // TODO: finished the implementation of read_progress
     pub read_progress: Arc<RegionReadProgress>,
     pub txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
+
+    /// Used for checking whether the peer is busy on apply.
+    /// * `None` => the peer has no pending logs for apply or already finishes
+    ///   applying.
+    /// * `Some(false)` => initial state, not be recorded.
+    /// * `Some(true)` => busy on apply, and already recorded.
+    pub busy_on_apply: Option<bool>,
+    /// The index of last commited idx in the leader. It's used to check whether
+    /// this peer has raft log gaps and whether should be marked busy on
+    /// apply.
+    pub last_leader_committed_idx: Option<u64>,
 }
 
 impl Peer {
@@ -634,6 +645,8 @@ impl Peer {
                 peer_id,
             )),
             txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::Noop)),
+            busy_on_apply: Some(false),
+            last_leader_committed_idx: None,
         };
         // If this region has only one peer and I am the one, campaign directly.
         if region.get_peers().len() == 1 && region.get_peers()[0].get_store_id() == store_id {
@@ -3826,6 +3839,37 @@ impl Peer {
             self.check_stale_conf_ver = check_conf_ver;
             self.check_stale_peers = check_peers;
         }
+    }
+
+    pub fn update_last_leader_committed_idx(&mut self, committed_index: u64) {
+        if self.is_leader() {
+            // Ignore.
+            return;
+        }
+
+        let local_committed_index = self.get_store().commit_index();
+        if committed_index < local_committed_index {
+            debug!(
+                "stale committed index";
+                "region_id" => self.region().get_id(),
+                "peer_id" => self.peer_id(),
+                "last_committed_index" => committed_index,
+                "local_index" => local_committed_index,
+            );
+        } else {
+            self.last_leader_committed_idx = Some(committed_index);
+            debug!(
+                "update last committed index from leader";
+                "region_id" => self.region().get_id(),
+                "peer_id" => self.peer_id(),
+                "last_committed_index" => committed_index,
+                "local_index" => local_committed_index,
+            );
+        }
+    }
+
+    pub fn needs_update_last_leader_committed_idx(&self) -> bool {
+        self.busy_on_apply.is_some() && self.last_leader_committed_idx.is_none()
     }
 }
 
