@@ -105,6 +105,7 @@ const RAFT_MAX_MEM: usize = 2 * GIB as usize;
 pub const LAST_CONFIG_FILE: &str = "last_tikv.toml";
 const TMP_CONFIG_FILE: &str = "tmp_tikv.toml";
 const MAX_BLOCK_SIZE: usize = 32 * MIB as usize;
+const ALIBABA_CLOUD_REGION_ID: &str = "ALIBABA_CLOUD_REGION_ID";
 
 fn memory_limit_for_cf(is_raft_db: bool, cf: &str, total_mem: u64) -> ReadableSize {
     let (ratio, min, max) = match (is_raft_db, cf) {
@@ -3166,6 +3167,12 @@ impl TikvConfig {
             && self.rfengine.wal_secondary_dir == self.rfengine.wal_sync_dir
         {
             return Err("rfengine.wal_secondary_dir can't be same as rfengine.wal_sync_dir".into());
+        }
+        if !self.rfengine.enable_compact_rate_limiter {
+            // enable compact rate limiter in alibaba cloud environment
+            if std::env::var(ALIBABA_CLOUD_REGION_ID).is_ok() {
+                self.rfengine.enable_compact_rate_limiter = true;
+            }
         }
 
         let kv_db_path = self.infer_kv_engine_path(None)?;

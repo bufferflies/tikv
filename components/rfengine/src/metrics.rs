@@ -116,6 +116,12 @@ lazy_static! {
         "Status of healthy wal double write",
     )
     .unwrap();
+    pub static ref RFENGINE_WRITE_THROTTLE_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "raft_engine_write_throttle_duration_seconds",
+        "Bucketed histogram of rfengine write throttle duration",
+        exponential_buckets(0.01, 2.0, 15).unwrap() // start from 0.01s
+    )
+    .unwrap();
 }
 
 #[cfg(feature = "testexport")]

@@ -6,7 +6,7 @@ use std::{
     collections::HashMap,
     fmt, fs,
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     mem,
     path::{Path, PathBuf},
     sync::{
@@ -89,7 +89,7 @@ pub(crate) struct CompactWorker {
     rlog_compression_type: CompressionType,
     healthy: Healthy,
 
-    rate_limiter: Arc<IoRateLimiter>,
+    rate_limiter: Option<Arc<IoRateLimiter>>,
     sync_concurrency: usize,
     files_to_sync: Vec<File>,
 }
@@ -103,7 +103,7 @@ impl CompactWorker {
         lightweight_backup: Option<&(LightweightBackupConfig, Arc<S3Fs>)>,
         healthy: Healthy,
         sync_concurrency: usize,
-        rate_limiter: Arc<IoRateLimiter>,
+        rate_limiter: Option<Arc<IoRateLimiter>>,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
         let (rlog_cache, compress_type, s3fs) = if let Some((config, s3fs)) = lightweight_backup {
@@ -304,18 +304,23 @@ impl CompactWorker {
             self.buf.put_u32_le(checksum);
         }
         let mut file = fs::File::create(filename)?;
-        let synced_size = file_system::write_all_with_rate_limiter(
-            &mut file,
-            &self.buf,
-            &self.rate_limiter,
-            WRITE_RLOG_BATCH_SIZE,
-        )?;
-        let remained_size = self.buf.len() - synced_size;
-        if remained_size > DELAY_SYNC_THRESHOLD {
-            // Sync the last batch if it is large.
-            file.sync_data()?;
-        } else if remained_size > 0 {
-            // delay the small files to sync in parallel.
+        if let Some(rate_limiter) = &self.rate_limiter {
+            let synced_size = file_system::write_all_with_rate_limiter(
+                &mut file,
+                &self.buf,
+                rate_limiter,
+                WRITE_RLOG_BATCH_SIZE,
+            )?;
+            let remained_size = self.buf.len() - synced_size;
+            if remained_size > DELAY_SYNC_THRESHOLD {
+                // Sync the last batch if it is large.
+                file.sync_data()?;
+            } else if remained_size > 0 {
+                // delay the small files to sync in parallel.
+                self.files_to_sync.push(file);
+            }
+        } else {
+            file.write_all(&self.buf)?;
             self.files_to_sync.push(file);
         }
         let mut file = rfenginepb::RaftLogFile::default();
@@ -1066,7 +1071,6 @@ mod tests {
         let (_, rx) = tikv_util::mpsc::unbounded();
         let engine_id = 999;
         let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
-        let rate_limiter = Arc::new(IoRateLimiter::new_for_test());
         let mut worker = CompactWorker::new(
             tmp_path.to_path_buf(),
             rx,
@@ -1075,7 +1079,7 @@ mod tests {
             None,
             dfs_worker::Healthy::default(),
             1,
-            rate_limiter,
+            None,
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 80, RANDOM_STR_MAX_LEN / 2)
@@ -1213,7 +1217,6 @@ mod tests {
         let (_, rx) = tikv_util::mpsc::unbounded();
         let engine_id = 1999;
         let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
-        let rate_limiter = Arc::new(IoRateLimiter::new_for_test());
         let mut worker = CompactWorker::new(
             tmp_path.to_path_buf(),
             rx,
@@ -1222,7 +1225,7 @@ mod tests {
             None,
             dfs_worker::Healthy::default(),
             1,
-            rate_limiter,
+            None,
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 100 * 5, RANDOM_STR_MAX_LEN * 100 / 2)

@@ -413,9 +413,16 @@ impl WalWriter {
         // Check should_rotate or should_chunk after put this write batch to buf avoid
         // file size overflow.
         if self.should_rotate() {
+            let mut total_throttle_dur = Duration::from_secs(0);
             while !self.safe_to_rotate() {
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                let throttle_once_duration = Duration::from_secs(1);
+                std::thread::sleep(throttle_once_duration);
+                total_throttle_dur += throttle_once_duration;
                 warn!("epoch {} is not safe to rotate", self.epoch_id);
+            }
+            if !total_throttle_dur.is_zero() {
+                RFENGINE_WRITE_THROTTLE_DURATION_HISTOGRAM
+                    .observe(total_throttle_dur.as_secs_f64());
             }
             self.rotate()?;
             // Writer epoch increased, also need update epoch_id in buf
@@ -423,6 +430,7 @@ impl WalWriter {
             rotated = true;
         }
         if let Some(duration) = self.need_throttle() {
+            RFENGINE_WRITE_THROTTLE_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
             std::thread::sleep(duration);
         }
 

@@ -286,9 +286,14 @@ impl RfEngineCore {
             } else {
                 None
             };
-            let compact_rate_limiter =
-                Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, false));
-            compact_rate_limiter.set_io_rate_limit(cfg.compact_bytes_per_sec.0 as usize);
+            let compact_rate_limiter = if cfg.enable_compact_rate_limiter {
+                let rate_limiter =
+                    Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, false));
+                rate_limiter.set_io_rate_limit(cfg.compact_bytes_per_sec.0 as usize);
+                Some(rate_limiter)
+            } else {
+                None
+            };
             let epoch_id = en.current_epoch_id.load(Ordering::SeqCst);
             let mut service_worker = ServiceWorker::new(
                 dir.to_owned(),

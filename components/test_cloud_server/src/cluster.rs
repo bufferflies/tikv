@@ -39,6 +39,7 @@ use kvproto::{
 };
 use log_wrappers::Value;
 use pd_client::{check_regions_boundary, pd_control, PdClient};
+use rand::Rng;
 use rfstore::{
     store::{cmd_resp::message_error, Callback, CustomBuilder},
     RaftStoreRouter,
@@ -1388,6 +1389,7 @@ pub fn new_test_config(
     config.rfengine.target_file_size = ReadableSize::kb(128);
     config.rfengine.wal_chunk_target_file_size = ReadableSize::kb(16);
     config.rfengine.wal_sync_dir = format!("{}/{}/wal", base_dir.to_str().unwrap(), node_id);
+    config.rfengine.enable_compact_rate_limiter = rand::thread_rng().gen_bool(0.5);
     // config.rfengine.wal_secondary_dir = format!("{}/{}/wal2",
     // base_dir.to_str().unwrap(), node_id);
     config.kvengine.block_cache_type = BlockCacheType::Quick;

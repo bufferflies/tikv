@@ -81,6 +81,9 @@ pub struct Config {
 
     /// The number of bytes per second to compact WAL files.
     pub compact_bytes_per_sec: ReadableSize,
+
+    /// Enable rate limiter for compact WAL files.
+    pub enable_compact_rate_limiter: bool,
 }
 
 impl Default for Config {
@@ -102,6 +105,7 @@ impl Default for Config {
             write_throttle_duration: ReadableDuration::millis(10),
             compact_wal_sync_concurrency: 2,
             compact_bytes_per_sec: ReadableSize::mb(200),
+            enable_compact_rate_limiter: false,
         }
     }
 }
