@@ -166,12 +166,10 @@ impl CloudReader {
         // when appending a ts. In other words, no key can be a prefix of
         // another key.
         while extra_iter.valid() && extra_iter.key().starts_with(&raw_key) {
-            // Protective check: panic if we find a key prefixed by raw_key with wrong
+            // Protective check: find a key prefixed by raw_key with wrong
             // length (implies possible interleaving)
             if extra_iter.key().len() != raw_key.len() + 8 {
-                // TODO: before go to production, downgrade this level. We hope it panics in
-                // tests.
-                panic!(
+                error!(
                     "Key prefix violation implies possible interleaving in EXTRA CF! Found key prefixed by raw_key but with wrong length. Expected: raw_key({} bytes) + timestamp(8 bytes) = {} bytes, but found {} bytes. Raw key: {}, Found key: {}",
                     raw_key.len(),
                     raw_key.len() + 8,
@@ -471,10 +469,10 @@ impl CloudReader {
             if !extra_iter.key().starts_with(&raw_key) {
                 break;
             }
-            // Protective check: panic if we find a key prefixed by raw_key with wrong
+            // Protective check: find a key prefixed by raw_key with wrong
             // length (implies possible interleaving)
             if extra_iter.key().len() != raw_key.len() + 8 {
-                panic!(
+                error!(
                     "Key prefix violation implies possible interleaving in EXTRA CF! Found key prefixed by raw_key but with wrong length. Expected: raw_key({} bytes) + timestamp(8 bytes) = {} bytes, but found {} bytes. Raw key: {}, Found key: {}",
                     raw_key.len(),
                     raw_key.len() + 8,
