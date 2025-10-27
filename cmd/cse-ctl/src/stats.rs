@@ -71,6 +71,10 @@ pub struct StatsArgs {
     /// Path of file that contains X509 key in PEM format
     #[clap(long, default_value = "")]
     pub key: PathBuf,
+    /// Folders, use `,` to separate multiple folders. For example,
+    /// archive,backup,col,schema,store_backup,txn,vec
+    #[clap(long)]
+    pub folders: Option<String>,
 }
 
 pub(crate) fn execute_stats(arg: StatsArgs) {
@@ -87,7 +91,7 @@ pub(crate) fn execute_stats(arg: StatsArgs) {
         .unwrap();
     let mut stats = || -> Result<()> {
         stats_worker.collect_valid_files()?;
-        runtime.block_on(stats_worker.stats_files())?;
+        runtime.block_on(stats_worker.stats_files(&config.folders))?;
         Ok(())
     };
     if let Err(err) = stats() {
@@ -102,6 +106,7 @@ pub struct StatsConfig {
     pub pd: pd_client::Config,
     pub security: SecurityConfig,
     pub dfs: DFSConfig,
+    pub folders: Option<HashSet<String>>,
 }
 
 impl StatsConfig {
@@ -126,6 +131,10 @@ impl StatsConfig {
         }
         config.dfs.override_from_env();
         config.security.override_from_env();
+        config.folders = args
+            .folders
+            .as_ref()
+            .map(|folders_str| folders_str.split(',').map(|x| format!("{}/", x)).collect());
 
         config
     }
@@ -326,7 +335,7 @@ impl StatsWorker {
         Ok(serde_json::from_slice(body.chunk()).unwrap())
     }
 
-    async fn stats_files(&self) -> Result<()> {
+    async fn stats_files(&self, folders: &Option<HashSet<String>>) -> Result<()> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Result<Stats>)>(self.concurrency);
         let sema = Arc::new(Semaphore::new(self.concurrency));
 
@@ -338,10 +347,34 @@ impl StatsWorker {
             .list_folders("", None)
             .await
             .map_err(|e| Error::DfsError(e))?;
-        let prefixes_len = prefixes.len();
+        let mut prefixes_len = prefixes.len();
         let strip_prefix = format!("{}/", self.s3fs.get_prefix());
         for prefix in prefixes {
             let prefix = prefix.strip_prefix(&strip_prefix).unwrap().to_owned();
+            if let Some(folders) = folders {
+                if folders.contains(&prefix) {
+                    let sub_prefixes = self
+                        .s3fs
+                        .list_folders(&prefix, None)
+                        .await
+                        .map_err(|e| Error::DfsError(e))?;
+                    let sub_prefixes_len = sub_prefixes.len();
+                    info!("prefix {}, sub prefixes {}", prefix, sub_prefixes_len);
+                    if sub_prefixes_len > 0 {
+                        prefixes_len += sub_prefixes_len - 1;
+                        for sub_prefix in sub_prefixes {
+                            let sub_prefix =
+                                sub_prefix.strip_prefix(&strip_prefix).unwrap().to_owned();
+                            self.spawn_stats_files_with_prefix(
+                                sub_prefix,
+                                tx.clone(),
+                                sema.clone(),
+                            );
+                        }
+                        continue;
+                    }
+                }
+            }
             self.spawn_stats_files_with_prefix(prefix, tx.clone(), sema.clone());
         }
         for _ in 0..prefixes_len {
@@ -411,13 +444,13 @@ impl StatsWorker {
         let start_time = Instant::now();
         info!("stats files with prefix: {}", prefix);
         loop {
-            info!("loop start: {}", start_after);
+            info!("loop start: {}{}", prefix, start_after);
             let (files, _, next_start_after) = self
                 .s3fs
                 .list(start_after.as_str(), Some(&prefix), None)
                 .await
                 .map_err(|e| Error::DfsError(e))?;
-            info!("listed {} files", files.len());
+            info!("listed {} {} files", prefix, files.len());
             for obj in files {
                 let size = obj.size;
                 let last_modified: DateTime<chrono::Utc> =
