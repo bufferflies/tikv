@@ -13,6 +13,7 @@
 
 use std::{
     cell::RefCell,
+    convert::TryInto,
     env, fmt,
     fs::{self, File},
     net::SocketAddr,
@@ -25,7 +26,7 @@ use std::{
 use api_version::{dispatch_api_version, KvFormat};
 use causal_ts::CausalTsProviderImpl;
 use cloud_encryption::MasterKey;
-use concurrency_manager::ConcurrencyManager;
+use concurrency_manager::{ConcurrencyManager, PdClientToTsoProvider, LIMIT_VALID_TIME_MULTIPLIER};
 use engine_rocks::from_rocks_compression_type;
 use engine_traits::{KvEngine, RaftEngine, CF_DEFAULT, CF_WRITE};
 use file_system::{
@@ -358,8 +359,20 @@ impl TikvServer {
         if latest_ts.is_none() {
             panic!("failed to get timestamp from PD");
         }
-        let concurrency_manager =
-            ConcurrencyManager::new_opt(latest_ts.unwrap(), config.storage.check_backup_ts);
+        let concurrency_manager = ConcurrencyManager::new_with_config(
+            latest_ts.unwrap(),
+            (config.storage.max_ts.cache_sync_interval * LIMIT_VALID_TIME_MULTIPLIER).into(),
+            config
+                .storage
+                .max_ts
+                .action_on_invalid_update
+                .as_str()
+                .try_into()
+                .unwrap(),
+            Some(pd_client.clone().as_tso_provider()),
+            config.storage.max_ts.max_drift.0,
+            config.storage.check_backup_ts,
+        );
 
         // use different quota for front-end and back-end requests
         let quota_limiter = Arc::new(QuotaLimiter::new(

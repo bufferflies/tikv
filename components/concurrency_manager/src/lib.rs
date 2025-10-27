@@ -82,6 +82,26 @@ impl<T: PdClient> TsoProvider for T {
     }
 }
 
+// Wrapper that allows Arc<dyn PdClient> to be used as Arc<dyn TsoProvider>
+struct PdClientTsoProviderWrapper(Arc<dyn PdClient>);
+
+impl TsoProvider for PdClientTsoProviderWrapper {
+    fn get_tso(&self) -> PdFuture<TimeStamp> {
+        self.0.get_tso()
+    }
+}
+
+// Extension trait to convert Arc<dyn PdClient> to Arc<dyn TsoProvider>
+pub trait PdClientToTsoProvider {
+    fn as_tso_provider(self) -> Arc<dyn TsoProvider>;
+}
+
+impl PdClientToTsoProvider for Arc<dyn PdClient> {
+    fn as_tso_provider(self) -> Arc<dyn TsoProvider> {
+        Arc::new(PdClientTsoProviderWrapper(self))
+    }
+}
+
 // Pay attention that the async functions of ConcurrencyManager should not hold
 // the mutex.
 #[derive(Clone)]
