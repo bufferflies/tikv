@@ -150,6 +150,8 @@ pub(crate) struct RaftWorker {
     tick_millis: u64,
     store_fsm: StoreFsm,
     batch_msg_count: usize,
+    max_batch_msg_limit: usize,
+    max_batch_msg_size: usize,
     aux_task_senders: Vec<Sender<Vec<PeerInbox>>>,
     aux_res_receivers: Vec<Receiver<()>>,
     sent_aux_task: Vec<bool>,
@@ -161,8 +163,6 @@ pub(crate) struct RaftWorker {
     active_aux_count: usize,
 }
 
-const MAX_BATCH_COUNT: usize = 1024;
-const MAX_BATCH_SIZE: usize = 1024 * 1024;
 const PEER_INBOX_STATISTIC_COUNT: usize = 5;
 
 impl RaftWorker {
@@ -174,7 +174,8 @@ impl RaftWorker {
         store_fsm: StoreFsm,
         cpu_util: CpuUtilRef,
     ) -> (Self, Vec<Receiver<Option<ApplyBatch>>>) {
-        let all_apply_pool_size = ctx.cfg.apply_pool_size + ctx.cfg.apply_follower_pool_size;
+        let all_apply_pool_size = ctx.cfg.apply_batch_system.pool_size
+            + ctx.cfg.apply_batch_system.low_priority_pool_size;
         let mut apply_senders = Vec::with_capacity(all_apply_pool_size);
         let mut apply_receivers = Vec::with_capacity(all_apply_pool_size);
         for _ in 0..all_apply_pool_size {
@@ -183,6 +184,7 @@ impl RaftWorker {
             apply_receivers.push(receiver);
         }
         let tick_millis = ctx.cfg.raft_base_tick_interval.as_millis();
+        let max_batch_msg_limit = ctx.cfg.store_batch_system.max_batch_size();
         (
             Self {
                 ctx,
@@ -195,6 +197,9 @@ impl RaftWorker {
                 tick_millis,
                 store_fsm,
                 batch_msg_count: 0,
+                max_batch_msg_limit,
+                max_batch_msg_size: max_batch_msg_limit * 1024, /* Use 1 KB as the approximate
+                                                                 * per-message size */
                 aux_task_senders: vec![],
                 aux_res_receivers: vec![],
                 sent_aux_task: vec![],
@@ -388,7 +393,9 @@ impl RaftWorker {
                 while let Ok((region_id, msg)) = self.receiver.try_recv() {
                     batch_size += msg.size();
                     self.append_msg(inboxes, region_id, msg);
-                    if self.batch_msg_count > MAX_BATCH_COUNT || batch_size > MAX_BATCH_SIZE {
+                    if self.batch_msg_count > self.max_batch_msg_limit
+                        || batch_size > self.max_batch_msg_size
+                    {
                         break;
                     }
                 }

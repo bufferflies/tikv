@@ -47,7 +47,7 @@ use security::SecurityManager;
 use tempfile::TempDir;
 use test_pd_client::TestPdClient;
 use tikv::{
-    config::ConfigController,
+    config::{ConfigController, TikvConfig},
     coprocessor, coprocessor_v2,
     import::{ImportSstService, SstImporter},
     read_pool::ReadPool,
@@ -496,6 +496,7 @@ impl ServerCluster {
         raft_store
             .validate(
                 cfg.coprocessor.region_split_size,
+                cfg.coprocessor.region_split_keys,
                 cfg.coprocessor.enable_region_bucket,
                 cfg.coprocessor.region_bucket_size,
             )
@@ -504,7 +505,9 @@ impl ServerCluster {
         let mut node = Node::new(
             system,
             &server_cfg.value().clone(),
-            Arc::new(VersionTrack::new(raft_store)),
+            Arc::new(VersionTrack::new(
+                TikvConfig::compatible_adjust_to_raftstore(&raft_store),
+            )),
             cfg.storage.api_version(),
             Arc::clone(&self.pd_client),
             state,

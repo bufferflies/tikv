@@ -18,10 +18,8 @@ use file_system::{IoPriority, IoRateLimitMode};
 use kvproto::encryptionpb::EncryptionMethod;
 use pd_client::Config as PdConfig;
 use raft_log_engine::{ReadableSize as RaftEngineReadableSize, RecoveryMode};
-use raftstore::{
-    coprocessor::{Config as CopConfig, ConsistencyCheckMethod},
-    store::Config as RaftstoreConfig,
-};
+use raftstore::coprocessor::{Config as CopConfig, ConsistencyCheckMethod};
+use rfstore::store::config::Config as RaftstoreConfig;
 use security::SecurityConfig;
 use slog::Level;
 use tikv::{
@@ -270,6 +268,7 @@ fn test_serde_custom_tikv_config() {
         check_peers_availability_interval: ReadableDuration::secs(30),
         raft_worker_max_batch_size: ReadableSize::mb(1),
         io_worker_min_write_duration: ReadableDuration::millis(1),
+        ..Default::default()
     };
     value.pd = PdConfig::new(vec!["example.com:443".to_owned()]);
     let titan_cf_config = TitanCfConfig {

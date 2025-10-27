@@ -32,7 +32,7 @@ impl Ticker {
                 config.switch_mem_table_check_tick_interval.as_millis() / base_interval,
             ),
             TickSchedule::new(config.raft_log_gc_tick_interval.as_millis() / base_interval),
-            TickSchedule::new(config.peer_check_long_interval.as_millis() / base_interval),
+            TickSchedule::new(config.peer_long_check_interval.as_millis() / base_interval),
         ];
         Self { tick: 1, schedules }
     }

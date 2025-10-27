@@ -314,7 +314,9 @@ where
         let store_path = Path::new(&config.storage.data_dir).to_owned();
 
         // Initialize raftstore channels.
-        let (router, system) = fsm::create_raft_batch_system(&config.raft_store);
+        let (router, system) = fsm::create_raft_batch_system(
+            &TikvConfig::compatible_adjust_to_raftstore(&config.raft_store),
+        );
 
         let thread_count = config.server.background_thread_count;
         let background_worker = WorkerBuilder::new("background")
@@ -931,11 +933,14 @@ where
             .raft_store
             .validate(
                 self.config.coprocessor.region_split_size,
+                self.config.coprocessor.region_split_keys,
                 self.config.coprocessor.enable_region_bucket,
                 self.config.coprocessor.region_bucket_size,
             )
             .unwrap_or_else(|e| fatal!("failed to validate raftstore config {}", e));
-        let raft_store = Arc::new(VersionTrack::new(self.config.raft_store.clone()));
+        let raft_store = Arc::new(VersionTrack::new(
+            TikvConfig::compatible_adjust_to_raftstore(&self.config.raft_store),
+        ));
         let health_service = HealthService::default();
         let mut node = Node::new(
             self.system.take().unwrap(),

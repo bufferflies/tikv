@@ -23,9 +23,10 @@ use kvproto::{
 use pd_client::PdClient;
 use raft::eraftpb::MessageType;
 use raftstore::{
-    store::{config::Config as RaftstoreConfig, util::is_vote_msg, Callback, PeerMsg},
+    store::{util::is_vote_msg, Callback, PeerMsg},
     Result,
 };
+use rfstore::store::config::Config as RaftstoreConfig;
 use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv::storage::{kv::SnapshotExt, Snapshot};

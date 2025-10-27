@@ -15,7 +15,7 @@ fn test_delete_range() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf: &mut TikvConfig| {
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     });
     let mut client = cluster.new_client();
 
@@ -57,7 +57,7 @@ fn test_delete_range_recover() {
     let (_temp_dir, oss, dfs_config) = oss::prepare_dfs("oss_");
     let mut cluster = ServerCluster::new(node_ids.to_vec(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_config.clone();
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     });
     let region = cluster.get_pd_client().get_region_info(&[]).unwrap();
     let leader_store_id = region.leader.unwrap().store_id;
@@ -121,7 +121,7 @@ fn test_delete_range_delay() {
         // 10 seconds max delay.
         conf.raft_store.local_file_gc_timeout = ReadableDuration(Duration::from_secs(5));
         conf.raft_store.local_file_gc_tick_interval = ReadableDuration(Duration::from_secs(1));
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
         conf.kvengine.max_del_range_delay = ReadableDuration(Duration::from_secs(10));
     });
     let mut client = cluster.new_client();

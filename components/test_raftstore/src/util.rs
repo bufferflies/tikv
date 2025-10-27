@@ -637,6 +637,7 @@ pub fn configure_for_snapshot(cfg: &mut TikvConfig) {
 pub fn configure_for_merge(cfg: &mut TikvConfig) {
     // Avoid log compaction which will prevent merge.
     cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(10);
+    cfg.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(90);
     cfg.raft_store.raft_log_gc_threshold = 1000;
     cfg.raft_store.raft_log_gc_count_limit = Some(1000);
     cfg.raft_store.raft_log_gc_size_limit = Some(ReadableSize::mb(20));

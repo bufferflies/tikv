@@ -49,7 +49,7 @@ const KEYSPACE_ID: u32 = 10;
 fn test_txn_file_commands() {
     test_util::init_log_for_test();
     let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, conf: &mut TikvConfig| {
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     let dfs = cluster.get_dfs().unwrap();
@@ -320,7 +320,7 @@ fn test_txn_file_basic_impl(
         "cluster_id" => cluster_id);
     let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
         conf.dfs = dfs_config.clone();
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     })
     .pd(pd_wrapper)
     .build();
@@ -465,7 +465,7 @@ fn test_txn_file_split_merge() {
     let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
     let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
         conf.dfs = dfs_config.clone();
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     })
     .pd(pd_wrapper)
     .build();
@@ -683,7 +683,7 @@ fn test_txn_file_abnormal_impl(data_count: usize, use_txn_file: bool) {
     info!("test_txn_file_abnormal_process"; "data_count" => data_count, "write_method" => ?write_method, "cluster_id" => cluster_id);
     let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
         conf.dfs = dfs_config.clone();
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     })
     .pd(pd_wrapper)
     .build();
@@ -1007,7 +1007,7 @@ fn test_txn_file_move_down() {
     info!("test_txn_file_move_down"; "cluster_id" => cluster_id);
     let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
         conf.dfs = dfs_config.clone();
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
         conf.kvengine.flush_split_l0 = true;
     })
     .pd(pd_wrapper)
@@ -1076,7 +1076,7 @@ fn test_txn_file_merge() {
 
 fn test_txn_file_merge_impl(ranges: Vec<Range<usize>>) {
     let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, conf| {
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
         conf.storage.scheduler_worker_pool_size = 8;
         conf.kvengine.txn_file_worker_pool_size = Some(16);
     });
@@ -1171,7 +1171,7 @@ fn test_commit_primary_region() {
     let pd_wrapper = PdWrapper::new_test(1, &SecurityConfig::default(), None);
     let mut cluster = ServerClusterBuilder::new(node_ids, |_, conf| {
         conf.dfs = dfs_config.clone();
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     })
     .pd(pd_wrapper)
     .build();

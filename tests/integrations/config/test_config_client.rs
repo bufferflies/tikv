@@ -88,7 +88,8 @@ fn test_dispatch_change() {
     cfg.validate().unwrap();
     let cfg_controller = ConfigController::new(cfg);
     let mut cfg = cfg_controller.get_current();
-    let mgr = CfgManager(Arc::new(Mutex::new(cfg.raft_store.clone())));
+    let raftstore_cfg = TikvConfig::compatible_adjust_to_raftstore(&cfg.raft_store);
+    let mgr = CfgManager(Arc::new(Mutex::new(raftstore_cfg.clone())));
     cfg_controller.register(Module::Raftstore, Box::new(mgr.clone()));
 
     cfg_controller
@@ -220,7 +221,9 @@ fn test_update_from_toml_file() {
     let (cfg, _dir) = TikvConfig::with_tmp().unwrap();
     let cfg_controller = ConfigController::new(cfg);
     let cfg = cfg_controller.get_current();
-    let mgr = CfgManager(Arc::new(Mutex::new(cfg.raft_store.clone())));
+    let mgr = CfgManager(Arc::new(Mutex::new(
+        TikvConfig::compatible_adjust_to_raftstore(&cfg.raft_store),
+    )));
     cfg_controller.register(Module::Raftstore, Box::new(mgr));
 
     // update config file

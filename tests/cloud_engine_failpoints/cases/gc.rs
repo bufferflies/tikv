@@ -22,7 +22,7 @@ fn test_gc_safe_point_passing_to_compaction() {
     )
     .unwrap();
     let cluster = ServerClusterBuilder::new(node_ids.clone(), |_, conf| {
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     })
     .build();
     cluster.wait_region_replicated(&[], 3);

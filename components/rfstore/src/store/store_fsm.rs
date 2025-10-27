@@ -225,7 +225,7 @@ impl RaftBatchSystem {
             .unwrap();
         self.join_handles.push(handle);
         let peer_receiver = self.peer_receiver.take().unwrap();
-        let apply_pool_size = store_ctx.cfg.apply_pool_size;
+        let apply_pool_size = store_ctx.cfg.apply_batch_system.pool_size;
         let (mut rw, mut apply_receivers) = RaftWorker::new(
             store_ctx,
             peer_receiver,

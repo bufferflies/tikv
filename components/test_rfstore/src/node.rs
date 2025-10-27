@@ -109,8 +109,15 @@ impl Simulator for NodeCluster {
         let simulate_trans = SimulateTransport::new(self.trans.clone());
         let bg_worker = WorkerBuilder::new("background").thread_count(2).create();
 
-        let raft_store = cfg.raft_store.clone();
-        let rf_store_cfg = rfstore::store::Config::from_old(&raft_store, &cfg.coprocessor);
+        let mut rf_store_cfg = cfg.raft_store.clone();
+        rf_store_cfg
+            .validate(
+                cfg.coprocessor.region_split_size,
+                cfg.coprocessor.region_split_keys,
+                cfg.coprocessor.enable_region_bucket,
+                cfg.coprocessor.region_bucket_size,
+            )
+            .unwrap();
         let store_cfg_tracker = Arc::new(VersionTrack::new(rf_store_cfg));
 
         let mut node = Node::new(

@@ -66,7 +66,8 @@ fn start_raftstore(
     ApplyRouter<RocksEngine>,
     RaftBatchSystem<RocksEngine, RocksEngine>,
 ) {
-    let (raft_router, mut system) = create_raft_batch_system(&cfg.raft_store);
+    let raftstore_cfg = TikvConfig::compatible_adjust_to_raftstore(&cfg.raft_store);
+    let (raft_router, mut system) = create_raft_batch_system(&raftstore_cfg);
     let engines = create_tmp_engine(dir);
     let host = CoprocessorHost::default();
     let importer = {
@@ -88,7 +89,7 @@ fn start_raftstore(
         SnapManager::new(p)
     };
     let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
-    let cfg_track = Arc::new(VersionTrack::new(cfg.raft_store.clone()));
+    let cfg_track = Arc::new(VersionTrack::new(raftstore_cfg.clone()));
     let pd_worker = LazyWorker::new("store-config");
     let (split_check_scheduler, _) = dummy_scheduler();
 
@@ -168,7 +169,7 @@ fn test_update_raftstore_config() {
     cfg_controller.update(change).unwrap();
 
     // config should be updated
-    let mut raft_store = config.raft_store;
+    let mut raft_store = TikvConfig::compatible_adjust_to_raftstore(&config.raft_store);
     raft_store.messages_per_tick = 12345;
     raft_store.apply_yield_write_size = ReadableSize::kb(10);
     raft_store.raft_log_gc_threshold = 54321;

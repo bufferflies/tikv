@@ -263,10 +263,7 @@ impl<T: Simulator> Cluster<T> {
             // let key_mgr = self.key_managers.last().unwrap().clone();
 
             // Initialize raftstore channels.
-            let mut rfstore_conf =
-                rfstore::store::Config::from_old(&self.cfg.raft_store, &self.cfg.coprocessor);
-            rfstore_conf.enable_inner_key_offset = self.cfg.enable_inner_key_offset;
-            let system = RaftBatchSystem::new(&engines, &rfstore_conf);
+            let system = RaftBatchSystem::new(&engines, &self.cfg.raft_store);
             let router = system.router();
 
             let store_meta = StoreMeta::new(PENDING_MSG_CAP);
@@ -342,10 +339,7 @@ impl<T: Simulator> Cluster<T> {
         // let key_mgr = self.key_managers_map[&node_id].clone();
 
         // Initialize raftstore channels.
-        let mut rfstore_conf =
-            rfstore::store::Config::from_old(&self.cfg.raft_store, &self.cfg.coprocessor);
-        rfstore_conf.enable_inner_key_offset = self.cfg.enable_inner_key_offset;
-        let system = RaftBatchSystem::new(&engines, &rfstore_conf);
+        let system = RaftBatchSystem::new(&engines, &self.cfg.raft_store);
         let router = system.router();
 
         let mut cfg = self.cfg.clone();

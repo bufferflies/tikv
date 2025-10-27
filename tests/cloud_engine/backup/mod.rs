@@ -199,6 +199,8 @@ fn test_backup_and_import() {
 
     // split again make sure the files to be back up ed are same.
     client2.split(b"t_key");
+    // Sleep for a while to Wait split finished.
+    std::thread::sleep(Duration::from_secs(2));
 
     // Backup file should have same contents.
     let resps2 = backup(

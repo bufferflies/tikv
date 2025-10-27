@@ -135,7 +135,7 @@ fn test_region_split_merge() {
 
     let node_ids = vec![alloc_node_id(), alloc_node_id(), alloc_node_id()];
     let mut cluster = ServerCluster::new(node_ids.clone(), |_, conf: &mut TikvConfig| {
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
 
@@ -202,7 +202,7 @@ fn test_region_merge_with_del_prefixes() {
 
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf: &mut TikvConfig| {
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     });
 
     let mut client = cluster.new_client();
@@ -285,7 +285,7 @@ fn test_region_merge_keyspaces() {
     test_util::init_log_for_test();
     let node_id = alloc_node_id();
     let mut cluster = ServerCluster::new(vec![node_id], |_, conf: &mut TikvConfig| {
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     });
 
     let mut client = cluster.new_client();

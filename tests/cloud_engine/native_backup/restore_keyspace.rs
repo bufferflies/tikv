@@ -174,7 +174,7 @@ fn test_restore_keyspace_opt(options: TestRestoreKeyspaceOptions) {
             conf.rfengine.target_file_size = ReadableSize::mb(1);
             conf.rfengine.lightweight_backup = options.lightweight;
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
-            conf.enable_inner_key_offset = true;
+            conf.raft_store.enable_inner_key_offset = true;
             conf.memory.enable_heap_profiling = false;
         },
     );
@@ -542,7 +542,7 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
             conf.rfengine.target_file_size = ReadableSize::kb(512);
             conf.rfengine.lightweight_backup = options.lightweight;
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(32);
-            conf.enable_inner_key_offset = true;
+            conf.raft_store.enable_inner_key_offset = true;
             conf.security = security_config.clone();
         },
     )
@@ -949,7 +949,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
             conf.rfengine.target_file_size = ReadableSize::mb(1);
             conf.rfengine.lightweight_backup = true;
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(128);
-            conf.enable_inner_key_offset = true;
+            conf.raft_store.enable_inner_key_offset = true;
         },
     )
     .pd(pd_wrapper)
@@ -1166,7 +1166,7 @@ fn test_restore_keyspace_with_no_chunk() {
             conf.rfengine.target_file_size = ReadableSize::mb(512); // To prevent WAL to compact.
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::mb(64);
             conf.rfengine.lightweight_backup = true;
-            conf.enable_inner_key_offset = true;
+            conf.raft_store.enable_inner_key_offset = true;
         },
     );
     cluster.wait_region_replicated(&[], 3);
@@ -1244,7 +1244,7 @@ fn test_restore_keyspace_with_slow_dfs() {
             conf.rfengine.target_file_size = ReadableSize::kb(512);
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(32);
             conf.rfengine.lightweight_backup = true;
-            conf.enable_inner_key_offset = true;
+            conf.raft_store.enable_inner_key_offset = true;
         },
     );
     cluster.wait_region_replicated(&[], 3);
@@ -1359,7 +1359,7 @@ fn test_restore_keyspace_with_schema() {
         |_, conf: &mut TikvConfig| {
             conf.dfs = dfs_config.clone();
             conf.rfengine.lightweight_backup = true;
-            conf.enable_inner_key_offset = true;
+            conf.raft_store.enable_inner_key_offset = true;
         },
     );
     cluster.wait_region_replicated(&[], 3);
@@ -1565,7 +1565,7 @@ fn test_restore_keyspace_with_failed_store(
         conf.rfengine.target_file_size = ReadableSize::mb(512); // To prevent WAL to compact.
         conf.rfengine.wal_chunk_target_file_size = ReadableSize::mb(64);
         conf.rfengine.lightweight_backup = true;
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     let mut client = cluster.new_client();
@@ -1827,7 +1827,7 @@ fn test_restore_packed_backup(
         conf.rfengine.target_file_size = ReadableSize::mb(512); // To prevent WAL to compact.
         conf.rfengine.wal_chunk_target_file_size = ReadableSize::mb(64);
         conf.rfengine.lightweight_backup = true;
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
         conf.kvengine
             .per_keyspace_configs
             .push(KvEnginePerKeyspaceConfig {
@@ -1935,7 +1935,7 @@ fn test_restore_packed_backup(
             conf.rfengine.target_file_size = ReadableSize::mb(512); // To prevent WAL to compact.
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::mb(64);
             conf.rfengine.lightweight_backup = true;
-            conf.enable_inner_key_offset = true;
+            conf.raft_store.enable_inner_key_offset = true;
         },
     );
     cluster.wait_region_replicated(&[], 3);

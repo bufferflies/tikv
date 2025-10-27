@@ -324,7 +324,7 @@ fn prepare_cluster(
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
         conf.dfs = (*dfs_config).clone();
         conf.dfs.allow_fallback_local = false;
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
 
         conf.coprocessor.region_split_size = ReadableSize::kb(256);

@@ -333,7 +333,7 @@ pub(crate) fn generate_update_conf_fn<'a>(
         let mut rng = thread_rng();
         conf.dfs = dfs_config.clone();
         conf.dfs.allow_fallback_local = false;
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
         conf.security = security_conf.clone();
 
         conf.coprocessor.region_split_size = REGION_SIZE;

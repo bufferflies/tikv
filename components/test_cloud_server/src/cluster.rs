@@ -1324,7 +1324,7 @@ pub fn new_test_config(
     config.server.cop_max_resp_size = ReadableSize::kb(256);
     config.readpool.unified.max_tasks_per_worker = 4000;
     config.dfs.zstd_compression_level = "3".to_string();
-    config.raft_store.raft_base_tick_interval = ReadableDuration::millis(50); // Note: affect rfstore::Config::from_old.
+    config.raft_store.raft_base_tick_interval = ReadableDuration::millis(50);
     config.raft_store.raft_election_timeout_ticks = 10;
     config.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(450);
     config.raft_store.split_region_check_tick_interval = ReadableDuration::millis(100);

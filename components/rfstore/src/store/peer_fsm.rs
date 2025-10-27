@@ -127,10 +127,11 @@ impl PeerFsm {
             "region" => peer.tag(),
             "peer_id" => peer.peer_id(),
         );
-        let apply_worker_idx = thread_rng().gen_range(0..cfg.apply_pool_size);
+        let apply_worker_idx = thread_rng().gen_range(0..cfg.apply_batch_system.pool_size);
         let leader_apply_worker_idx = apply_worker_idx;
-        let follower_apply_worker_idx = if cfg.apply_follower_pool_size > 0 {
-            cfg.apply_pool_size + thread_rng().gen_range(0..cfg.apply_follower_pool_size)
+        let follower_apply_worker_idx = if cfg.apply_batch_system.low_priority_pool_size > 0 {
+            cfg.apply_batch_system.pool_size
+                + thread_rng().gen_range(0..cfg.apply_batch_system.low_priority_pool_size)
         } else {
             0
         };
@@ -170,10 +171,11 @@ impl PeerFsm {
             "region" => peer.tag(),
             "peer_id" => peer.peer_id(),
         );
-        let apply_worker_idx = thread_rng().gen_range(0..cfg.apply_pool_size);
+        let apply_worker_idx = thread_rng().gen_range(0..cfg.apply_batch_system.pool_size);
         let leader_apply_worker_idx = apply_worker_idx;
-        let follower_apply_worker_idx = if cfg.apply_follower_pool_size > 0 {
-            cfg.apply_pool_size + thread_rng().gen_range(0..cfg.apply_follower_pool_size)
+        let follower_apply_worker_idx = if cfg.apply_batch_system.low_priority_pool_size > 0 {
+            cfg.apply_batch_system.pool_size
+                + thread_rng().gen_range(0..cfg.apply_batch_system.low_priority_pool_size)
         } else {
             0
         };

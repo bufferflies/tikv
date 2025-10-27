@@ -101,7 +101,7 @@ fn prepare_cluster() -> (ServerCluster, Vec<u16>) {
         nodes.push(alloc_node_id());
     }
     let cluster = ServerCluster::new(nodes.clone(), |_, conf| {
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     cluster.get_pd_client().disable_default_operator();

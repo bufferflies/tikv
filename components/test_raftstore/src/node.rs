@@ -34,7 +34,7 @@ use resource_metering::CollectorRegHandle;
 use tempfile::TempDir;
 use test_pd_client::TestPdClient;
 use tikv::{
-    config::{ConfigController, Module},
+    config::{ConfigController, Module, TikvConfig},
     import::SstImporter,
     server::{raftkv::ReplicaReadLockChecker, Node, Result as ServerResult},
 };
@@ -238,6 +238,7 @@ impl Simulator for NodeCluster {
         raft_store
             .validate(
                 cfg.coprocessor.region_split_size,
+                cfg.coprocessor.region_split_keys,
                 cfg.coprocessor.enable_region_bucket,
                 cfg.coprocessor.region_bucket_size,
             )
@@ -246,7 +247,9 @@ impl Simulator for NodeCluster {
         let mut node = Node::new(
             system,
             &cfg.server,
-            Arc::new(VersionTrack::new(raft_store)),
+            Arc::new(VersionTrack::new(
+                TikvConfig::compatible_adjust_to_raftstore(&raft_store),
+            )),
             cfg.storage.api_version(),
             Arc::clone(&self.pd_client),
             Arc::default(),
@@ -346,13 +349,21 @@ impl Simulator for NodeCluster {
         );
 
         let region_split_size = cfg.coprocessor.region_split_size;
+        let region_split_keys = cfg.coprocessor.region_split_keys;
         let enable_region_bucket = cfg.coprocessor.enable_region_bucket;
         let region_bucket_size = cfg.coprocessor.region_bucket_size;
         let mut raftstore_cfg = cfg.tikv.raft_store;
         raftstore_cfg
-            .validate(region_split_size, enable_region_bucket, region_bucket_size)
+            .validate(
+                region_split_size,
+                region_split_keys,
+                enable_region_bucket,
+                region_bucket_size,
+            )
             .unwrap();
-        let raft_store = Arc::new(VersionTrack::new(raftstore_cfg));
+        let raft_store = Arc::new(VersionTrack::new(
+            TikvConfig::compatible_adjust_to_raftstore(&raftstore_cfg),
+        ));
         cfg_controller.register(
             Module::Raftstore,
             Box::new(RaftstoreConfigManager::new(

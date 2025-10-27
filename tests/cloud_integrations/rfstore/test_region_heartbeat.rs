@@ -71,6 +71,8 @@ fn test_down_peers<T: Simulator>(cluster: &mut Cluster<T>) {
 #[test]
 fn test_server_down_peers_without_hibernate_regions() {
     let mut cluster = new_node_cluster(0, 5);
+    // Set a short check interval to trigger region heartbeat more frequently.
+    cluster.cfg.raft_store.peer_stale_state_check_interval = ReadableDuration::millis(1000);
     test_down_peers(&mut cluster);
 }
 

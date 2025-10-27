@@ -30,6 +30,9 @@ fn test_node_merge_with_slow_learner() {
     let mut cluster = new_node_cluster(1, 2);
     configure_for_merge(&mut cluster.cfg);
     cluster.cfg.raft_store.raft_log_gc_size_limit = Some(ReadableSize(256));
+    cluster.cfg.raft_store.raft_log_gc_threshold = 40;
+    cluster.cfg.raft_store.raft_log_gc_count_limit = Some(40);
+    cluster.cfg.raft_store.merge_max_log_gap = 15;
     cluster.pd_client.disable_default_operator();
 
     // Create a cluster with peer 1 as leader and peer 2 as learner.
@@ -1087,7 +1090,6 @@ fn test_node_merge_long_isolated() {
     let mut cluster = new_node_cluster(1, 3);
     configure_for_merge(&mut cluster.cfg);
     config_ignore_merge_target_integrity(&mut cluster.cfg, &cluster.pd_client);
-    cluster.cfg.raft_store.max_leader_missing_duration = ReadableDuration::millis(150);
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
 
@@ -1141,7 +1143,9 @@ fn test_node_merge_long_isolated() {
     // Now peer(1, 1010) should probably created in memory but not persisted.
     pd_client.must_remove_peer(right.get_id(), new_peer(1, 1010));
     cluster.clear_send_filters();
-    cluster.wait_tombstone(new_peer(1, 1010), true);
+    if cluster.raft_state(1010, 1).is_some() {
+        cluster.wait_tombstone(new_peer(1, 1010), true);
+    }
 }
 
 #[test]

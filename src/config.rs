@@ -56,6 +56,7 @@ use raftstore::{
 };
 use resource_metering::Config as ResourceMeteringConfig;
 use rfengine::RfEngineConfig;
+use rfstore::store::Config as RfStoreConfig;
 use security::SecurityConfig;
 use serde::{
     de::{Error as DError, Unexpected},
@@ -2986,10 +2987,6 @@ pub struct TikvConfig {
     #[online_config(skip)]
     pub recovery_mode: bool,
 
-    #[doc(hidden)]
-    #[online_config(skip)]
-    pub enable_inner_key_offset: bool,
-
     #[online_config(submodule)]
     pub log: LogConfig,
 
@@ -3016,7 +3013,7 @@ pub struct TikvConfig {
 
     #[online_config(submodule)]
     #[serde(rename = "raftstore")]
-    pub raft_store: RaftstoreConfig,
+    pub raft_store: RfStoreConfig, // next-gen
 
     #[online_config(submodule)]
     pub coprocessor: CopConfig,
@@ -3100,14 +3097,13 @@ impl Default for TikvConfig {
             memory_usage_high_water: 0.9,
             black_list_path: "".to_owned(),
             recovery_mode: false,
-            enable_inner_key_offset: false,
             log: LogConfig::default(),
             memory: MemoryConfig::default(),
             quota: QuotaConfig::default(),
             readpool: ReadPoolConfig::default(),
             server: ServerConfig::default(),
             metric: MetricConfig::default(),
-            raft_store: RaftstoreConfig::default(),
+            raft_store: RfStoreConfig::default(),
             coprocessor: CopConfig::default(),
             coprocessor_v2: CoprocessorV2Config::default(),
             pd: PdConfig::default(),
@@ -3255,6 +3251,7 @@ impl TikvConfig {
         self.coprocessor.validate()?;
         self.raft_store.validate(
             self.coprocessor.region_split_size,
+            self.coprocessor.region_split_keys,
             self.coprocessor.enable_region_bucket,
             self.coprocessor.region_bucket_size,
         )?;
@@ -3710,6 +3707,116 @@ impl TikvConfig {
             );
         }
         Ok(env)
+    }
+
+    pub fn compatible_adjust_to_raftstore(rfstore: &RfStoreConfig) -> RaftstoreConfig {
+        let mut cfg = RaftstoreConfig::default();
+        macro_rules! assign {
+            ($($field:ident),*) => {
+                $(cfg.$field = rfstore.$field;)*
+            }
+        }
+        // Direct field mappings
+        assign!(
+            raft_base_tick_interval,
+            raft_heartbeat_ticks,
+            split_region_check_tick_interval,
+            raft_election_timeout_ticks,
+            raft_min_election_timeout_ticks,
+            raft_max_election_timeout_ticks,
+            raft_max_size_per_msg,
+            raft_max_inflight_msgs,
+            raft_entry_max_size,
+            raft_store_max_leader_lease,
+            renew_leader_lease_advance_duration,
+            pd_heartbeat_tick_interval,
+            pd_store_heartbeat_tick_interval,
+            max_peer_down_duration,
+            max_leader_missing_duration,
+            abnormal_leader_missing_duration,
+            peer_stale_state_check_interval,
+            leader_transfer_max_log_lag,
+            raft_log_gc_tick_interval,
+            raft_log_gc_size_limit,
+            region_split_size,
+            snap_generator_pool_size,
+            snap_apply_batch_size,
+            max_snapshot_file_raw_size,
+            region_split_check_diff
+        );
+        // Supplement additional fields for full compatibility
+        assign!(
+            raft_log_compact_sync_interval,
+            raft_log_gc_threshold,
+            raft_log_gc_count_limit,
+            raft_log_reserve_max_ticks,
+            raft_engine_purge_interval,
+            raft_entry_cache_life_time,
+            raft_reject_transfer_leader_duration,
+            region_compact_check_interval,
+            region_compact_check_step,
+            region_compact_min_tombstones,
+            region_compact_tombstones_percent,
+            snap_mgr_gc_tick_interval,
+            snap_gc_timeout,
+            lock_cf_compact_interval,
+            lock_cf_compact_bytes_threshold,
+            notify_capacity,
+            messages_per_tick,
+            region_worker_tick_interval,
+            clean_stale_ranges_tick,
+            consistency_check_interval,
+            report_region_flow_interval,
+            check_leader_lease_interval,
+            right_derive_when_split,
+            merge_max_log_gap,
+            merge_check_tick_interval,
+            use_delete_range,
+            cleanup_import_sst_interval,
+            local_read_batch_size,
+            store_io_pool_size,
+            store_io_notify_capacity,
+            future_poll_size,
+            hibernate_regions,
+            dev_assert,
+            apply_yield_duration,
+            apply_yield_write_size,
+            perf_level,
+            evict_cache_on_memory_ratio,
+            cmd_batch,
+            cmd_batch_concurrent_ready_max_count,
+            raft_write_size_limit,
+            waterfall_metrics,
+            io_reschedule_concurrent_max_count,
+            io_reschedule_hotpot_duration,
+            raft_msg_flush_interval,
+            region_max_size,
+            clean_stale_peer_delay,
+            inspect_interval,
+            report_min_resolved_ts_interval,
+            reactive_memory_lock_tick_interval,
+            reactive_memory_lock_timeout_tick,
+            report_region_buckets_tick_interval,
+            local_file_gc_tick_interval,
+            local_file_gc_timeout,
+            check_long_uncommitted_interval,
+            long_uncommitted_base_threshold,
+            max_entry_cache_warmup_duration,
+            unreachable_backoff,
+            check_peers_availability_interval,
+            raft_worker_max_batch_size,
+            io_worker_min_write_duration
+        );
+        // BatchSystemConfig submodules
+        cfg.apply_batch_system.pool_size = rfstore.apply_batch_system.pool_size;
+        cfg.apply_batch_system.max_batch_size = rfstore.apply_batch_system.max_batch_size;
+        cfg.apply_batch_system.low_priority_pool_size =
+            rfstore.apply_batch_system.low_priority_pool_size;
+        cfg.store_batch_system.pool_size = rfstore.store_batch_system.pool_size;
+        cfg.store_batch_system.max_batch_size = rfstore.store_batch_system.max_batch_size;
+        cfg.store_batch_system.low_priority_pool_size =
+            rfstore.store_batch_system.low_priority_pool_size;
+        cfg
     }
 }
 
@@ -4396,7 +4503,7 @@ mod tests {
     fn test_flatten_cfg() {
         let mut cfg = TikvConfig::default();
         cfg.server.labels.insert("zone".into(), "test".into());
-        cfg.raft_store.raft_log_gc_count_limit = Some(123);
+        cfg.raft_store.raft_log_gc_size_limit = Some(ReadableSize::kb(1));
 
         let flattened = to_flatten_config_info(&cfg);
 
@@ -4405,8 +4512,8 @@ mod tests {
         labels.insert("zone".into(), Value::String("test".into()));
         expected.insert("server.labels", Value::Object(labels));
         expected.insert(
-            "raftstore.raft-log-gc-count-limit",
-            Value::Number(123.into()),
+            "raftstore.raft-log-gc-size-limit",
+            Value::Number(1024.into()),
         );
 
         for v in &flattened {

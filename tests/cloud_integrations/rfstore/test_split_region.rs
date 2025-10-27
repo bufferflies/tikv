@@ -352,6 +352,7 @@ fn test_apply_new_version_snapshot() {
     // truncate the log quickly so that we can force sending snapshot.
     cluster.cfg.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(20);
     cluster.cfg.raft_store.raft_log_gc_count_limit = Some(5);
+    cluster.cfg.raft_store.merge_max_log_gap = 4;
     cluster.cfg.raft_store.raft_log_gc_threshold = 5;
 
     // We use three nodes([1, 2, 3]) for this test.
@@ -405,6 +406,9 @@ fn test_apply_new_version_snapshot() {
 #[test]
 fn test_server_split_with_stale_peer() {
     let mut cluster = new_node_cluster(0, 3);
+    cluster.cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(10);
+    cluster.cfg.raft_store.raft_election_timeout_ticks = 10;
+    cluster.cfg.raft_store.raft_store_max_leader_lease = ReadableDuration::millis(90);
     // disable raft log gc.
     cluster.cfg.raft_store.raft_log_gc_tick_interval = ReadableDuration::secs(60);
     cluster.cfg.raft_store.peer_stale_state_check_interval = ReadableDuration::millis(500);

@@ -324,7 +324,7 @@ impl std::ops::DerefMut for RecordingClient {
 fn delta_scanner_multi_versions_same_key() {
     test_util::init_log_for_test();
     let cluster = ServerCluster::new(alloc_node_id_vec(1), |_, conf| {
-        conf.enable_inner_key_offset = false;
+        conf.raft_store.enable_inner_key_offset = false;
         conf.coprocessor.region_split_size = ReadableSize::gb(1);
     });
     let client = cluster.new_client();
@@ -372,7 +372,7 @@ fn delta_scanner_multi_versions_same_key() {
 fn delta_scanner_versions_and_lock_on_same_key() {
     test_util::init_log_for_test();
     let cluster = ServerCluster::new(alloc_node_id_vec(1), |_, conf| {
-        conf.enable_inner_key_offset = false;
+        conf.raft_store.enable_inner_key_offset = false;
         conf.coprocessor.region_split_size = ReadableSize::gb(1);
     });
     let client = cluster.new_client();
@@ -422,7 +422,7 @@ fn delta_scanner_versions_and_lock_on_same_key() {
 fn delta_scanner_mixed_keys_committed_and_uncommitted() {
     test_util::init_log_for_test();
     let cluster = ServerCluster::new(alloc_node_id_vec(1), |_, conf| {
-        conf.enable_inner_key_offset = false;
+        conf.raft_store.enable_inner_key_offset = false;
         conf.coprocessor.region_split_size = ReadableSize::gb(1);
     });
     let client = cluster.new_client();
@@ -475,7 +475,7 @@ fn delta_scanner_mixed_keys_committed_and_uncommitted() {
 #[test]
 fn delta_scanner_filtered_by_start_ts() {
     let cluster = ServerCluster::new(alloc_node_id_vec(1), |_, conf| {
-        conf.enable_inner_key_offset = false;
+        conf.raft_store.enable_inner_key_offset = false;
         conf.coprocessor.region_split_size = ReadableSize::gb(1);
     });
     let client = cluster.new_client();
@@ -541,7 +541,7 @@ fn delta_scanner_filtered_by_start_ts() {
 fn randomized_writes_and_verify(key_space: usize) {
     // Separate helper so we can run multiple sizes in a single test.
     let cluster = ServerCluster::new(alloc_node_id_vec(1), |_, conf| {
-        conf.enable_inner_key_offset = false;
+        conf.raft_store.enable_inner_key_offset = false;
         conf.coprocessor.region_split_size = ReadableSize::gb(1);
     });
     let client = cluster.new_client();

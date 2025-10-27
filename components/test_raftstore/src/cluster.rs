@@ -48,7 +48,7 @@ use raftstore::{
 };
 use tempfile::TempDir;
 use test_pd_client::{PdClientExt, TestPdClient};
-use tikv::server::Result as ServerResult;
+use tikv::{config::TikvConfig, server::Result as ServerResult};
 use tikv_util::{
     thread_group::GroupProperties,
     time::{Instant, ThreadReadId},
@@ -266,7 +266,9 @@ impl<T: Simulator> Cluster<T> {
 
         // Try start new nodes.
         for _ in 0..self.count - self.engines.len() {
-            let (router, system) = create_raft_batch_system(&self.cfg.raft_store);
+            let (router, system) = create_raft_batch_system(
+                &TikvConfig::compatible_adjust_to_raftstore(&self.cfg.raft_store),
+            );
             self.create_engine(Some(router.clone()));
 
             let engines = self.dbs.last().unwrap().clone();
@@ -335,7 +337,9 @@ impl<T: Simulator> Cluster<T> {
         debug!("starting node {}", node_id);
         let engines = self.engines[&node_id].clone();
         let key_mgr = self.key_managers_map[&node_id].clone();
-        let (router, system) = create_raft_batch_system(&self.cfg.raft_store);
+        let (router, system) = create_raft_batch_system(
+            &TikvConfig::compatible_adjust_to_raftstore(&self.cfg.raft_store),
+        );
         let mut cfg = self.cfg.clone();
         if let Some(labels) = self.labels.get(&node_id) {
             cfg.server.labels = labels.to_owned();

@@ -248,7 +248,7 @@ fn test_periodic_backup() {
     let mut cluster = ServerCluster::new(nodes.clone(), |_, conf: &mut TikvConfig| {
         conf.dfs = dfs_config.clone();
         conf.rfengine.lightweight_backup = true;
-        conf.enable_inner_key_offset = true;
+        conf.raft_store.enable_inner_key_offset = true;
     });
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();

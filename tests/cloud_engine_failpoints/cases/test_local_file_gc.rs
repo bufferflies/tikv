@@ -128,7 +128,7 @@ fn test_no_mistakenly_delete_txn_files() {
     let node_id = alloc_node_id();
     let mut cluster = ServerClusterBuilder::new(vec![node_id], |_, cfg| {
         cfg.dfs = dfs_config.clone();
-        cfg.enable_inner_key_offset = true;
+        cfg.raft_store.enable_inner_key_offset = true;
         // Set a short GC timeout and tick interval to trigger the GC procedure faster
         cfg.raft_store.local_file_gc_timeout = ReadableDuration::secs(1);
         cfg.raft_store.local_file_gc_tick_interval = ReadableDuration::secs(1);
@@ -212,7 +212,7 @@ fn test_no_mistakenly_delete_txn_files_when_region_split() {
     let node_id = alloc_node_id();
     let mut cluster = ServerClusterBuilder::new(vec![node_id], |_, cfg| {
         cfg.dfs = dfs_config.clone();
-        cfg.enable_inner_key_offset = true;
+        cfg.raft_store.enable_inner_key_offset = true;
         // Set a short GC timeout and tick interval to trigger the GC procedure faster
         cfg.raft_store.local_file_gc_timeout = ReadableDuration::millis(500);
         cfg.raft_store.local_file_gc_tick_interval = ReadableDuration::millis(500);
@@ -390,7 +390,7 @@ fn test_no_mistakenly_delete_files_when_node_restart_and_failed_to_persist_shard
     let node_id = alloc_node_id();
     let mut cluster = ServerClusterBuilder::new(vec![node_id], |_, cfg| {
         cfg.dfs = dfs_config.clone();
-        cfg.enable_inner_key_offset = true;
+        cfg.raft_store.enable_inner_key_offset = true;
         // Set a small write buffer size to trigger flush faster
         cfg.rocksdb.writecf.write_buffer_size = ReadableSize::kb(1);
     })
@@ -557,7 +557,7 @@ fn test_no_pending_files_leak_when_abort_txn_file_apply() {
     let node_id = alloc_node_id();
     let mut cluster = ServerClusterBuilder::new(vec![node_id], |_, cfg| {
         cfg.dfs = dfs_config.clone();
-        cfg.enable_inner_key_offset = true;
+        cfg.raft_store.enable_inner_key_offset = true;
     })
     .pd(pd_wrapper)
     .build();
