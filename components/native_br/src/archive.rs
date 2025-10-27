@@ -7,7 +7,9 @@ use bytes::{Buf, BufMut, Bytes};
 use chrono::NaiveDate;
 use collections::{HashMap, HashSet};
 use engine_traits::GetObjectOptions;
-use kvengine::dfs::{self, DFSConfig, Dfs, FileType, Options, S3Fs, STORAGE_CLASS_GLACIER_IR};
+use kvengine::dfs::{
+    self, DFSConfig, Dfs, FileType, Options, S3Fs, STORAGE_CLASS_GLACIER, STORAGE_CLASS_GLACIER_IR,
+};
 use pd_client::PdClient;
 use protobuf::Message;
 use rfenginepb::ClusterBackupMeta;
@@ -1387,13 +1389,21 @@ impl ArchiveWriter {
         let runtime = self.s3fs.get_runtime();
         let key = archive_package_key(self.s3fs.get_prefix(), self.date.clone(), self.package_id);
         let data = Bytes::from(self.buf.to_vec());
+        let storage_class = if self.s3fs.is_on_aws() {
+            STORAGE_CLASS_GLACIER_IR
+        } else {
+            // alibaba cloud only support "STANDARD", "STANDARD_IA" and "GLACIER"
+            // unknown storage class will be treated as "STANDARD"
+            // ref: https://www.alibabacloud.com/help/en/oss/developer-reference/compatibility-with-amazon-s3
+            STORAGE_CLASS_GLACIER
+        };
         runtime
             .block_on(self.s3fs.put_object_with_options(
                 key.clone(),
                 data,
                 key.clone(),
                 None,
-                Some(STORAGE_CLASS_GLACIER_IR),
+                Some(storage_class),
                 None,
             ))
             .unwrap();

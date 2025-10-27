@@ -42,6 +42,7 @@ pub const STORAGE_CLASS_DEFAULT: &str = STORAGE_CLASS_INTELLIGENT_TIERING;
 pub const STORAGE_CLASS_INTELLIGENT_TIERING: &str = "INTELLIGENT_TIERING";
 pub const STORAGE_CLASS_STANDARD: &str = "STANDARD";
 pub const STORAGE_CLASS_STANDARD_IA: &str = "STANDARD_IA";
+pub const STORAGE_CLASS_GLACIER: &str = "GLACIER";
 pub const STORAGE_CLASS_GLACIER_IR: &str = "GLACIER_IR";
 
 const AWS_DOMAIN_STRING: &str = "amazonaws";
@@ -251,6 +252,10 @@ impl S3FsCore {
 
     pub fn is_on_aws(&self) -> bool {
         self.hostname.contains(AWS_DOMAIN_STRING)
+    }
+
+    pub fn is_on_aliyun(&self) -> bool {
+        self.hostname.contains(aliyun::DOMAIN_STRING)
     }
 
     // parse the sst file's suffix with format {idx}/{file_id}.sst
@@ -755,7 +760,7 @@ impl S3FsCore {
                 req.add_header("x-amz-tagging", &tagging.to_url_encoded());
             }
             if let Some(storage_class) = storage_class.as_ref() {
-                if self.is_on_aws() {
+                if self.is_on_aws() || self.is_on_aliyun() {
                     req.add_header("x-amz-storage-class", storage_class);
                 } else {
                     debug!(
@@ -906,7 +911,7 @@ impl S3FsCore {
                 req.add_header("x-amz-tagging-directive", "REPLACE");
             }
             if let Some(target_storage_class) = target_storage_class.as_ref() {
-                if self.is_on_aws() {
+                if self.is_on_aws() || self.is_on_aliyun() {
                     req.add_header("x-amz-storage-class", target_storage_class);
                 } else {
                     debug!(
@@ -1121,7 +1126,7 @@ impl Dfs for S3Fs {
     /// `DfsGc`.
     async fn remove(&self, file_id: u64, file_len: Option<u64>, opts: Options) {
         // Only AWS supports storage class.
-        let target_storage_class = if self.is_on_aws() {
+        let target_storage_class = if self.is_on_aws() || self.is_on_aliyun() {
             let new_storage_class = self.choose_storage_class_for_removed_files(file_len);
             (new_storage_class != STORAGE_CLASS_DEFAULT).then_some(new_storage_class)
         } else {
@@ -1142,9 +1147,9 @@ impl Dfs for S3Fs {
     /// Permanently remove the file on S3.
     /// This method should be used by `DfsGc` ONLY to meet GC rules.
     async fn permanently_remove(&self, file_id: u64, opts: Options) -> crate::dfs::Result<()> {
-        if self.is_on_aws() {
+        if self.is_on_aws() || self.is_on_aliyun() {
             return Err(Error::Other(format!(
-                "{} permanently_remove is forbidden on AWS",
+                "{} permanently_remove is forbidden on AWS or alibaba cloud",
                 file_id
             )));
         }
