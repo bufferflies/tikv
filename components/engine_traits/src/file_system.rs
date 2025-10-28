@@ -1,6 +1,6 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::{result::Result as StdResult, sync::Arc};
 
 use bytes::Bytes;
 use file_system::{get_io_rate_limiter, get_io_type, IoOp, IoRateLimiter};
@@ -100,21 +100,68 @@ pub struct ListObjectContent {
 }
 
 pub trait ObjectStorage: Sync + Send {
-    fn put_objects(&self, objects: Vec<(String, Bytes)>) -> std::result::Result<(), String>;
+    fn put_objects(&self, objects: Vec<(String, Bytes)>) -> StdResult<(), String>;
 
     /// Note: The order of returned objects may not be the same as `keys`.
     fn get_objects(
         &self,
         keys: Vec<(String, GetObjectOptions)>,
-        cache: Option<&ObjectCache>,
-    ) -> std::result::Result<Vec<(String, Bytes)>, String>;
+        cache: Option<&ObjectCacheWithHook>,
+    ) -> StdResult<Vec<(String, Bytes)>, String>;
 
     fn list_objects(
         &self,
         start_after: &str, // The key to start after when listing objects (exclusive).
         prefix: Option<&str>,
         max_keys: Option<u32>,
-    ) -> std::result::Result<(Vec<ListObjectContent>, Option<String>), String>;
+    ) -> StdResult<(Vec<ListObjectContent>, Option<String>), String>;
+}
+
+/// The hook will be invoked when the object insert to object cache.
+pub type CacheInsertHookFn = Arc<dyn Fn(Bytes) -> StdResult<Bytes, String> + Sync + Send>;
+
+#[derive(Clone)]
+pub enum CacheInsertHook {
+    None,
+    Hook(CacheInsertHookFn),
+}
+
+impl CacheInsertHook {
+    pub fn invoke(&self, bytes: Bytes) -> StdResult<Bytes, String> {
+        match self {
+            Self::None => Ok(bytes),
+            Self::Hook(f) => f(bytes),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ObjectCacheWithHook {
+    pub cache: ObjectCache,
+    pub hook: CacheInsertHook,
+}
+
+impl ObjectCacheWithHook {
+    #[must_use]
+    pub fn with_hook(self, hook_fn: CacheInsertHookFn) -> Self {
+        Self {
+            cache: self.cache,
+            hook: CacheInsertHook::Hook(hook_fn),
+        }
+    }
+
+    pub fn has_hook(&self) -> bool {
+        !matches!(self.hook, CacheInsertHook::None)
+    }
+}
+
+impl From<ObjectCache> for ObjectCacheWithHook {
+    fn from(cache: ObjectCache) -> Self {
+        Self {
+            cache,
+            hook: CacheInsertHook::None,
+        }
+    }
 }
 
 #[derive(Clone)]

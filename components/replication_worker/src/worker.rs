@@ -1259,7 +1259,7 @@ impl ReplicationWorker {
             complete_wal_chunks: true,
             fetch_wal_timeout: FETCH_WAL_TIMEOUT,
             cache_dir: Some(cache_dir),
-            object_cache: None,
+            wal_chunks_cache: None,
         };
         let tag = format!("{}:{}", store_id, epoch_id);
         // there is no online chunk for this epoch.
@@ -1269,7 +1269,7 @@ impl ReplicationWorker {
         debug_assert!(has_last_chunk);
 
         // Assemble WAL chunks.
-        let mut epoch_wal = assemble_wal_chunks(chunks)?;
+        let mut epoch_wal = assemble_wal_chunks(chunks, false)?;
         epoch_wal.freeze();
         Ok(epoch_wal)
     }

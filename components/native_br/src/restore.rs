@@ -300,7 +300,8 @@ fn setup_raft_engine(
             fetch_wal_timeout: Duration::from_secs(1), /* NOTE: Retry is unnecessary for full
                                                         * restoration. */
             cache_dir,
-            object_cache: None,
+            wal_chunks_cache: None,
+            from_archive: false,
         };
         replay_wal_logs_from_backup(tag, &ctx, snap_epoch_opt.unwrap())?;
     }
@@ -508,6 +509,11 @@ pub struct RestoreConfig {
 
     /// Whether to use lower memory (by cache remote WAL chunks in local disks).
     pub lower_memory: bool,
+
+    /// Whether to cache compressed or decompressed WAL chunks in object cache.
+    ///
+    /// Note: this only takes effect when compression type of rlogs is lz4.
+    pub cache_for_decompressed_wal_chunks: bool,
 }
 
 impl Default for RestoreConfig {
@@ -529,6 +535,7 @@ impl Default for RestoreConfig {
             store_concurrency: RESTORE_RFENGINE_CONCURRENCY,
             coarse_split_regions_factor: 64, // It's about 32 GiB when region size is 500 MiB.
             lower_memory: false,
+            cache_for_decompressed_wal_chunks: false,
         }
     }
 }
@@ -539,6 +546,7 @@ impl RestoreConfig {
         Self {
             tolerate_err: 1,
             lower_memory: Self::use_lower_memory(),
+            cache_for_decompressed_wal_chunks: Self::cache_for_decompressed_wal_chunks(),
             ..Default::default()
         }
     }
@@ -547,6 +555,16 @@ impl RestoreConfig {
         use rand::Rng;
         if rand::thread_rng().gen_bool(0.5) {
             info!("lower memory enabled");
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn cache_for_decompressed_wal_chunks() -> bool {
+        use rand::Rng;
+        if rand::thread_rng().gen_bool(0.5) {
+            info!("cache_for_decompressed_wal_chunks enabled");
             true
         } else {
             false

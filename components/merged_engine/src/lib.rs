@@ -820,7 +820,8 @@ impl MergedEngine {
             full_restore: false,
             fetch_wal_timeout: ctx.config.timeout_fetch_wal.0,
             cache_dir: Some(cache_dir),
-            object_cache: None,
+            wal_chunks_cache: None,
+            from_archive: false,
         };
         let tag = &format!("merged_{}", store_id);
         replay_wal_logs_from_backup(tag, &ctx, rlog_files.snap_epoch)?;

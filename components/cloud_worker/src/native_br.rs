@@ -1090,6 +1090,7 @@ pub struct NativeBrConfig {
     pub restore_store_concurrency: usize,
     pub restore_concurrency_per_core: f64,
     pub restore_object_cache_capacity: AbsoluteOrPercentSize,
+    pub restore_cache_for_decompressed_wal_chunks: bool,
     pub wal_chunk_target_file_size: ReadableSize,
 
     /// See `RestoreConfig::lower_memory`.
@@ -1118,8 +1119,19 @@ impl Default for NativeBrConfig {
             restore_store_concurrency: restore_keyspace::RESTORE_RFENGINE_CONCURRENCY,
             restore_concurrency_per_core: 1.0,
             restore_object_cache_capacity: 0.into(),
+            restore_cache_for_decompressed_wal_chunks: false,
             wal_chunk_target_file_size: ReadableSize::mb(64),
             lower_memory: false,
+        }
+    }
+}
+
+impl NativeBrConfig {
+    fn object_cache_average_item_size(&self) -> u64 {
+        if self.restore_cache_for_decompressed_wal_chunks {
+            self.wal_chunk_target_file_size.0
+        } else {
+            self.wal_chunk_target_file_size.0 / 3
         }
     }
 }
@@ -1159,7 +1171,7 @@ impl NativeBrManager {
             info!("native_br: create object cache"; "capacity" => object_cache_capacity);
             ObjectCache::new(
                 object_cache_capacity,
-                config.native_br.wal_chunk_target_file_size.0 / 3,
+                config.native_br.object_cache_average_item_size(),
             )
         });
         let mut context = BrContext {

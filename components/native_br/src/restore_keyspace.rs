@@ -19,6 +19,7 @@ use cloud_encryption::{EncryptionKey, MasterKey};
 use cloud_server::{RestoreShardResponse, TikvServer};
 use collections::{HashMap, HashMapExt, HashSet};
 pub use engine_traits::ObjectCache;
+use engine_traits::ObjectCacheWithHook;
 use file_system::{IoRateLimitMode, IoRateLimiter};
 use http::{header, Request};
 use hyper::Body;
@@ -37,7 +38,7 @@ use pb::VectorIndex;
 use pd_client::{pd_control::PdControl, PdClient};
 use protobuf::Message;
 use raft::eraftpb;
-use rfengine::RfEngine;
+use rfengine::{convert_to_decompressed_wal_chunk, RfEngine};
 use rfenginepb::ClusterBackupMeta;
 use rfstore::store::{
     load_raft_engine_meta, parse_raft_cmd, rlog, state::RaftState, ApplyMsgs, PdIdAllocator,
@@ -791,6 +792,7 @@ impl BackupCluster {
             } else {
                 None
             };
+            let restore_conf_cp = restore_conf.clone();
             let object_cache = object_cache.clone();
             std::thread::spawn(move || {
                 let res = BackupCluster::setup_raft_engine(
@@ -804,7 +806,7 @@ impl BackupCluster {
                     fetch_wal_timeout,
                     archiving,
                     archive_store_meta,
-                    restore_conf.lower_memory,
+                    &restore_conf_cp,
                     object_cache,
                 );
                 if let Err(err) = &res {
@@ -876,9 +878,10 @@ impl BackupCluster {
         fetch_wal_timeout: Duration,
         archiving: bool,
         archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
-        lower_memory: bool,
+        restore_conf: &RestoreConfig,
         object_cache: Option<ObjectCache>,
     ) -> Result<RfEngine> {
+        let object_cache_no_hook: Option<ObjectCacheWithHook> = object_cache.map(Into::into);
         let rlog_files = if let Some((date, store_meta)) = &archive_store_meta {
             ArchiveReader::read_store_rlog_files(&dfs, date, store_meta)?
         } else {
@@ -887,7 +890,7 @@ impl BackupCluster {
                 &dfs.get_prefix(),
                 cluster_backup,
                 store_id,
-                object_cache.as_ref(),
+                object_cache_no_hook.as_ref(),
             )?
         };
         rfengine::lightweight_restore(
@@ -904,12 +907,21 @@ impl BackupCluster {
 
         // When archiving, the dfs should have complete wal chunks.
         let complete_wal_chunks = archiving;
-        let cache_dir = if lower_memory {
+        let cache_dir = if restore_conf.lower_memory {
             let dir = Path::new(&conf.storage.data_dir).join("cache");
             box_try!(fs::create_dir_all(&dir));
             Some(dir)
         } else {
             None
+        };
+        let wal_chunks_cache = if restore_conf.cache_for_decompressed_wal_chunks {
+            object_cache_no_hook.map(|cache| {
+                let hook =
+                    |chunk| convert_to_decompressed_wal_chunk(chunk).map_err(|e| e.to_string());
+                cache.with_hook(Arc::new(hook))
+            })
+        } else {
+            object_cache_no_hook
         };
         let ctx = ReplayWalLogsContext {
             pd_client,
@@ -921,7 +933,8 @@ impl BackupCluster {
             full_restore: false,
             fetch_wal_timeout,
             cache_dir,
-            object_cache,
+            wal_chunks_cache,
+            from_archive: archive_store_meta.is_some(),
         };
         replay_wal_logs(tag, ctx, archive_store_meta, rlog_files.snap_epoch)?;
         Ok(rf_engine)
@@ -955,7 +968,7 @@ impl BackupCluster {
         fetch_wal_timeout: Duration,
         archiving: bool,
         archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
-        low_memory: bool,
+        restore_conf: &RestoreConfig,
         object_cache: Option<ObjectCache>,
     ) -> Result<RfEngine> {
         if cluster_backup.is_lightweight {
@@ -970,7 +983,7 @@ impl BackupCluster {
                 fetch_wal_timeout,
                 archiving,
                 archive_store_meta,
-                low_memory,
+                restore_conf,
                 object_cache,
             )
         } else {

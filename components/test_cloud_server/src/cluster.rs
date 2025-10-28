@@ -1217,6 +1217,7 @@ impl ServerCluster {
         use rand::prelude::*;
         let factor = *[0, 4, 32, 128].choose(&mut thread_rng()).unwrap();
         (factor > 0).then(|| {
+            // Ignore the "cache_for_decompressed_wal_chunks" for simplicity.
             let compressed_wal_chunk_size = self
                 .get_any_node_config()
                 .unwrap()

@@ -8,8 +8,7 @@ lazy_static! {
         "tikv_worker_native_br_duration_seconds",
         "Bucketed histogram of native br duration",
         &["type"],
-        // Start from 10ms.
-        exponential_buckets(0.01, 2.0, 16).unwrap()
+        exponential_buckets(1.0, 1.5, 20).unwrap() // 1s ~ 0.9h
     )
     .unwrap();
 

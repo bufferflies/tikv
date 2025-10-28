@@ -14,6 +14,10 @@ use crate::{
 /// Data of remote WAL chunk. Resides in memory or local file.
 pub enum WalChunkData {
     Memory(Bytes),
+    MemoryWithMeta {
+        meta: WalChunkMeta,
+        bytes: Bytes,
+    },
     LocalFile {
         meta: WalChunkMeta,
         local_obj: TempLocalObject,
@@ -22,20 +26,34 @@ pub enum WalChunkData {
 
 impl WalChunkData {
     pub fn in_memory(&self) -> bool {
-        matches!(self, Self::Memory(_))
+        matches!(self, Self::Memory(_) | Self::MemoryWithMeta { .. })
     }
 
     pub fn must_get_bytes(&self) -> Bytes {
         match self {
             Self::Memory(bytes) => bytes.clone(),
+            Self::MemoryWithMeta { bytes, .. } => bytes.clone(),
             Self::LocalFile { .. } => unreachable!(),
         }
     }
 
-    pub fn must_into_local_file(self) -> (WalChunkMeta, TempLocalObject) {
+    pub fn must_get_bytes_as_data_holder(&self) -> (WalChunkMeta, WalChunkDataHolder) {
         match self {
             Self::Memory(_) => unreachable!(),
-            Self::LocalFile { meta, local_obj } => (meta.clone(), local_obj),
+            Self::MemoryWithMeta { meta, bytes } => {
+                (meta.clone(), WalChunkDataHolder::Memory(bytes.clone()))
+            }
+            Self::LocalFile { .. } => unreachable!(),
+        }
+    }
+
+    pub fn must_into_local_file(self) -> (WalChunkMeta, WalChunkDataHolder) {
+        match self {
+            Self::Memory(_) => unreachable!(),
+            Self::MemoryWithMeta { .. } => unreachable!(),
+            Self::LocalFile { meta, local_obj } => {
+                (meta.clone(), WalChunkDataHolder::LocalObject(local_obj))
+            }
         }
     }
 }
@@ -133,18 +151,68 @@ impl AssembledWalData {
     }
 }
 
+pub enum WalChunkDataHolder {
+    LocalObject(TempLocalObject),
+    Memory(Bytes),
+}
+
+impl WalChunkDataHolder {
+    fn close(&mut self) {
+        match self {
+            Self::LocalObject(local_object) => local_object.close(),
+            Self::Memory(_) => {}
+        }
+    }
+
+    fn reader(&self) -> WalChunkDataHolderForReader {
+        match self {
+            Self::LocalObject(local_object) => {
+                WalChunkDataHolderForReader::Local(local_object.clone_inner())
+            }
+            Self::Memory(bytes) => WalChunkDataHolderForReader::Memory(bytes.clone()),
+        }
+    }
+}
+
+pub enum WalChunkDataHolderForReader {
+    Local(LocalObject),
+    Memory(Bytes),
+}
+
+impl WalChunkDataHolderForReader {
+    fn load_chunk_data(&mut self) -> io::Result<Bytes> {
+        match self {
+            Self::Local(local_object) => {
+                let mut buf = vec![0; local_object.len as usize];
+                local_object.file(true)?.read_exact_at(buf.as_mut(), 0)?;
+                rfengine::decompress_wal_chunk(&Bytes::from(buf)).map_err(|e| io::Error::other(e))
+            }
+            Self::Memory(bytes) => {
+                rfengine::decompress_wal_chunk(bytes).map_err(|e| io::Error::other(e))
+            }
+        }
+    }
+
+    fn close(&mut self) {
+        match self {
+            Self::Local(local_object) => local_object.close(),
+            Self::Memory(_) => {}
+        }
+    }
+}
+
 pub struct LocalWalChunks {
     metas: Arc<Vec<WalChunkMeta>>,
-    local_objs: Vec<TempLocalObject>,
+    data_holders: Vec<WalChunkDataHolder>,
     online_chunk: Option<WalOnlineChunk>,
 }
 
 impl LocalWalChunks {
-    pub fn new(chunks: Vec<(WalChunkMeta, TempLocalObject)>) -> Self {
-        let (metas, local_objs) = chunks.into_iter().unzip();
+    pub fn new(chunks: Vec<(WalChunkMeta, WalChunkDataHolder)>) -> Self {
+        let (metas, data_holders) = chunks.into_iter().unzip();
         Self {
             metas: Arc::new(metas),
-            local_objs,
+            data_holders,
             online_chunk: None,
         }
     }
@@ -175,8 +243,8 @@ impl LocalWalChunks {
     }
 
     pub fn close(&mut self) {
-        for obj in &mut self.local_objs {
-            obj.close();
+        for holder in &mut self.data_holders {
+            holder.close();
         }
     }
 
@@ -211,7 +279,7 @@ impl LocalWalChunks {
 
 struct LocalWalChunksForReader {
     metas: Arc<Vec<WalChunkMeta>>,
-    local_objs: Vec<LocalObject>,
+    data_holders: Vec<WalChunkDataHolderForReader>,
     online_chunk: Option<WalOnlineChunk>,
 }
 
@@ -219,7 +287,7 @@ impl From<&LocalWalChunks> for LocalWalChunksForReader {
     fn from(chunks: &LocalWalChunks) -> Self {
         Self {
             metas: chunks.metas.clone(),
-            local_objs: chunks.local_objs.iter().map(|x| x.clone_inner()).collect(),
+            data_holders: chunks.data_holders.iter().map(|x| x.reader()).collect(),
             online_chunk: chunks.online_chunk.clone(),
         }
     }
@@ -308,13 +376,8 @@ impl LocalWalChunksReader {
 
         let chunk = if idx < self.chunks.metas.len() {
             let meta = &self.chunks.metas[idx];
-            let local_obj = &mut self.chunks.local_objs[idx];
-
-            let mut buf = vec![0; local_obj.len as usize];
-            local_obj.file(true)?.read_exact_at(buf.as_mut(), 0)?;
-            let data =
-                rfengine::decompress_wal_chunk(buf.into()).map_err(|e| io::Error::other(e))?;
-
+            let data_holder = &mut self.chunks.data_holders[idx];
+            let data = data_holder.load_chunk_data()?;
             Some(CurrentChunk {
                 start_off: meta.start_off,
                 data,
@@ -361,8 +424,8 @@ impl LocalWalChunksReader {
             debug_assert_eq!(self.read_off, current_chunk.end_off());
             self.current_chunk = None;
             let current_chunk_idx = self.current_chunk_idx.as_mut().unwrap();
-            if let Some(local_obj) = self.chunks.local_objs.get_mut(*current_chunk_idx) {
-                local_obj.close();
+            if let Some(holder) = self.chunks.data_holders.get_mut(*current_chunk_idx) {
+                holder.close();
             }
             *current_chunk_idx += 1;
         }
@@ -411,16 +474,20 @@ mod tests {
 
     #[test]
     fn test_local_wal_chunks() {
-        proptest!(|(arb in arb_wal_chunks())| {
-            test_local_wal_chunks_impl(arb)?;
+        proptest!(|(arb in arb_wal_chunks(), local_obj in any::<bool>())| {
+            test_local_wal_chunks_impl(arb, local_obj)?;
         });
     }
 
-    fn test_local_wal_chunks_impl(arb: ArbWalChunks) -> TestCaseResult {
+    fn test_local_wal_chunks_impl(arb: ArbWalChunks, local_obj: bool) -> TestCaseResult {
         // println!("{:?}", arb);
         let dir = TempDir::new("test_local_wal_chunks").unwrap();
         let assembled = arb.assembled.clone();
-        let local_wal_chunks = make_local_wal_chunks(arb, dir.path());
+        let local_wal_chunks = if local_obj {
+            make_local_wal_chunks(arb, dir.path())
+        } else {
+            make_memory_wal_chunks(arb)
+        };
 
         {
             let mut reader = local_wal_chunks.reader();
@@ -506,7 +573,7 @@ mod tests {
     }
 
     fn make_local_wal_chunks(arb: ArbWalChunks, dir: &Path) -> LocalWalChunks {
-        let mut local_objs = vec![];
+        let mut data_holders = vec![];
 
         let ArbWalChunks {
             metas,
@@ -520,12 +587,33 @@ mod tests {
             let mut obj = TempLocalObject::create(path).unwrap();
             obj.write_all(&chunk).unwrap();
             obj.close();
-            local_objs.push(obj);
+            data_holders.push(WalChunkDataHolder::LocalObject(obj));
         }
 
         LocalWalChunks {
             metas: Arc::new(metas),
-            local_objs,
+            data_holders,
+            online_chunk,
+        }
+    }
+
+    fn make_memory_wal_chunks(arb: ArbWalChunks) -> LocalWalChunks {
+        let mut data_holders = vec![];
+
+        let ArbWalChunks {
+            metas,
+            chunks,
+            online_chunk,
+            ..
+        } = arb;
+
+        for chunk in chunks {
+            data_holders.push(WalChunkDataHolder::Memory(chunk));
+        }
+
+        LocalWalChunks {
+            metas: Arc::new(metas),
+            data_holders,
             online_chunk,
         }
     }

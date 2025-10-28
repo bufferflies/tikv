@@ -431,6 +431,8 @@ pub enum Error {
     TxnChunkNotExists(u64),
     #[error("S3 error {0}")]
     S3(String),
+    #[error("Hook error {0}")]
+    Hook(String),
     #[error("Other error {0}")]
     Other(String),
     #[error("The specified key {0} does not exist.")]

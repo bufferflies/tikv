@@ -916,6 +916,9 @@ impl Config {
             tolerate_err,
             coarse_split_regions_factor: self.native_br.restore_coarse_split_regions_factor,
             lower_memory: self.native_br.lower_memory,
+            cache_for_decompressed_wal_chunks: self
+                .native_br
+                .restore_cache_for_decompressed_wal_chunks,
             ..Default::default()
         }
     }

@@ -56,6 +56,26 @@ pub fn decompress_lz4(content: &[u8]) -> std::io::Result<Vec<u8>> {
     lz4::block::decompress(content, None)
 }
 
+// Ref: https://github.com/10XGenomics/lz4-rs/blob/v1.25/src/block/mod.rs#L169
+// Must use the above `compress_lz4` to compress (and `prepend_size` must be
+// true).
+// Besides, it's safe as `decompress_to_buffer` will check the size again.
+pub fn get_lz4_decompressed_size(src: &[u8]) -> std::io::Result<usize> {
+    if src.len() < 4 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Source buffer must at least contain size prefix.",
+        ));
+    }
+    let size =
+        (src[0] as i32) | (src[1] as i32) << 8 | (src[2] as i32) << 16 | (src[3] as i32) << 24;
+    Ok(size as usize)
+}
+
+pub fn decompress_lz4_to_buffer(src: &[u8], buffer: &mut [u8]) -> std::io::Result<usize> {
+    lz4::block::decompress_to_buffer(src, None, buffer)
+}
+
 pub(crate) fn raft_log_file_name(dir: &Path, peer_id: u64, first: u64, last: u64) -> PathBuf {
     dir.join(format!(
         "{:016x}_{:016x}_{:016x}.rlog",

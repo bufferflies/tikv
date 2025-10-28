@@ -11,7 +11,7 @@ use std::{
 use async_trait::async_trait;
 use bstr::ByteSlice;
 use bytes::{BufMut, Bytes, BytesMut};
-use engine_traits::{GetObjectOptions, ListObjectContent, ObjectCache, ObjectStorage};
+use engine_traits::{GetObjectOptions, ListObjectContent, ObjectCacheWithHook, ObjectStorage};
 use fail::fail_point;
 use farmhash::fingerprint64;
 use futures::StreamExt;
@@ -637,11 +637,17 @@ impl S3FsCore {
         key: String,
         file_name: String,
         opts: GetObjectOptions,
-        cache: Option<&ObjectCache>,
+        cache_with_hook: Option<&ObjectCacheWithHook>,
     ) -> crate::dfs::Result<Bytes> {
-        match cache {
-            Some(cache) => {
-                let with = async { self.get_object(key.clone(), file_name, opts).await };
+        match cache_with_hook {
+            Some(cache_with_hook) => {
+                let ObjectCacheWithHook { cache, hook } = cache_with_hook;
+                let with = async {
+                    match self.get_object(key.clone(), file_name, opts).await {
+                        Ok(data) => hook.invoke(data).map_err(|e| Error::Hook(e)),
+                        Err(err) => Err(err),
+                    }
+                };
                 cache.get_or_insert_async(&key, with).await
             }
             None => self.get_object(key, file_name, opts).await,
@@ -1028,22 +1034,23 @@ impl ObjectStorage for S3Fs {
     fn get_objects(
         &self,
         keys: Vec<(String, GetObjectOptions)>,
-        cache: Option<&ObjectCache>,
+        cache: Option<&ObjectCacheWithHook>,
     ) -> Result<Vec<(String, Bytes)>, String> {
-        let get_object = |key: String, opts: GetObjectOptions, cache: Option<&ObjectCache>| {
-            let full_key = format!("{}/{}", self.prefix, key);
-            let fs = self.clone();
-            let cache = cache.cloned();
-            async move {
-                match fs
-                    .get_object_with_cache(full_key, key.clone(), opts, cache.as_ref())
-                    .await
-                {
-                    Ok(data) => Ok((key, data)),
-                    Err(err) => Err(format!("get {} failed {:?}", &key, err)),
+        let get_object =
+            |key: String, opts: GetObjectOptions, cache: Option<&ObjectCacheWithHook>| {
+                let full_key = format!("{}/{}", self.prefix, key);
+                let fs = self.clone();
+                let cache = cache.cloned();
+                async move {
+                    match fs
+                        .get_object_with_cache(full_key, key.clone(), opts, cache.as_ref())
+                        .await
+                    {
+                        Ok(data) => Ok((key, data)),
+                        Err(err) => Err(format!("get {} failed {:?}", &key, err)),
+                    }
                 }
-            }
-        };
+            };
 
         let runtime = self.get_runtime();
         if keys.len() == 1 {

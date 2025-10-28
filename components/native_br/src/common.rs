@@ -19,7 +19,7 @@ use bstr::ByteSlice;
 use bytes::{Buf, Bytes, BytesMut};
 use chrono::{NaiveTime, Utc};
 use collections::HashMap;
-use engine_traits::{GetObjectOptions, ObjectCache, ObjectStorage};
+use engine_traits::{GetObjectOptions, ObjectCacheWithHook, ObjectStorage};
 use etcd_client::{ConnectOptions, OpenSslClientConfig};
 use grpcio::EnvBuilder;
 use http::{Request, StatusCode};
@@ -357,7 +357,8 @@ pub struct ReplayWalLogsContext<'a> {
     pub full_restore: bool,
     pub fetch_wal_timeout: Duration,
     pub cache_dir: Option<PathBuf>,
-    pub object_cache: Option<ObjectCache>,
+    pub wal_chunks_cache: Option<ObjectCacheWithHook>,
+    pub from_archive: bool,
 }
 
 // TODO: Filter out the write batches of specified keyspace to replay to save
@@ -448,7 +449,7 @@ pub struct CollectWalChunksContext {
     pub complete_wal_chunks: bool,
     pub fetch_wal_timeout: Duration,
     pub cache_dir: Option<PathBuf>,
-    pub object_cache: Option<ObjectCache>,
+    pub wal_chunks_cache: Option<ObjectCacheWithHook>,
 }
 
 impl From<&ReplayWalLogsContext<'_>> for CollectWalChunksContext {
@@ -460,7 +461,7 @@ impl From<&ReplayWalLogsContext<'_>> for CollectWalChunksContext {
             complete_wal_chunks: ctx.complete_wal_chunks,
             fetch_wal_timeout: ctx.fetch_wal_timeout,
             cache_dir: ctx.cache_dir.clone(),
-            object_cache: ctx.object_cache.clone(),
+            wal_chunks_cache: ctx.wal_chunks_cache.clone(),
         }
     }
 }
@@ -513,7 +514,7 @@ pub fn collect_wal_chunks_with_retry(
                     ctx.dfs.as_ref(),
                     epoch_id,
                     chunk_metas.clone(),
-                    ctx.object_cache.as_ref(),
+                    ctx.wal_chunks_cache.as_ref(),
                 )
             }
         },
@@ -754,28 +755,30 @@ fn collect_all_chunk_files(
     dfs: &S3Fs,
     epoch_id: u32,
     chunk_metas: Vec<WalChunkMeta>,
-    object_cache: Option<&ObjectCache>,
+    wal_chunks_cache: Option<&ObjectCacheWithHook>,
 ) -> Result<Vec<WalChunkData>> {
-    let chunk_keys_with_option = chunk_metas
+    let chunk_metas_with_option = chunk_metas
         .into_iter()
-        .map(|meta| (meta.key, GetObjectOptions::default()))
+        .map(|chunk| (chunk, GetObjectOptions::default()))
         .collect::<Vec<_>>();
 
-    let mut chunks = dfs
-        .get_objects(chunk_keys_with_option, object_cache)
-        .map_err(|e| Error::DfsError(dfs::Error::S3(e)))?;
-
-    chunks.sort_by(|a, b| a.0.cmp(&b.0));
+    let runtime = dfs.get_runtime();
+    let mut chunks = runtime.block_on(get_objects_with_cache(
+        dfs,
+        chunk_metas_with_option,
+        wal_chunks_cache,
+    ))?;
+    chunks.sort_by(|a, b| a.0.start_off.cmp(&b.0.start_off));
     let chunks_data = chunks
         .into_iter()
-        .map(|(key, data)| {
+        .map(|(meta, bytes)| {
             info!(
                 "collect wal chunk file {} epoch {} size {}",
-                key,
+                meta.key,
                 epoch_id,
-                data.len()
+                bytes.len()
             );
-            WalChunkData::Memory(data)
+            WalChunkData::MemoryWithMeta { meta, bytes }
         })
         .collect::<Vec<_>>();
     Ok(chunks_data)
@@ -812,25 +815,38 @@ fn collect_all_chunk_files_with_cache_dir(
     Ok(chunks_data)
 }
 
-pub fn assemble_wal_chunks(chunks: Vec<WalChunkData>) -> Result<AssembledWalData> {
+pub fn assemble_wal_chunks(
+    chunks: Vec<WalChunkData>,
+    use_object_cache: bool,
+) -> Result<AssembledWalData> {
     if chunks.is_empty() {
         return Ok(AssembledWalData::BytesMut(BytesMut::new()));
     }
 
     let in_memory = chunks.first().unwrap().in_memory();
-    Ok(if in_memory {
-        let memory_chunks = chunks
-            .into_iter()
-            .map(|c| c.must_get_bytes())
-            .collect::<Vec<_>>();
-        let epoch_wal = rfengine::assemble_wal_chunks(memory_chunks)?;
-        AssembledWalData::BytesMut(epoch_wal)
-    } else {
-        let wal_chunks = chunks
-            .into_iter()
-            .map(|x| x.must_into_local_file())
-            .collect::<Vec<_>>();
-        AssembledWalData::LocalChunks(LocalWalChunks::new(wal_chunks))
+    Ok(match (in_memory, use_object_cache) {
+        (true, false) => {
+            let memory_chunks = chunks
+                .into_iter()
+                .map(|c| c.must_get_bytes())
+                .collect::<Vec<_>>();
+            let epoch_wal = rfengine::assemble_wal_chunks(memory_chunks)?;
+            AssembledWalData::BytesMut(epoch_wal)
+        }
+        (true, true) => {
+            let wal_chunks = chunks
+                .into_iter()
+                .map(|x| x.must_get_bytes_as_data_holder())
+                .collect::<Vec<_>>();
+            AssembledWalData::LocalChunks(LocalWalChunks::new(wal_chunks))
+        }
+        (false, _) => {
+            let wal_chunks = chunks
+                .into_iter()
+                .map(|x| x.must_into_local_file())
+                .collect::<Vec<_>>();
+            AssembledWalData::LocalChunks(LocalWalChunks::new(wal_chunks))
+        }
     })
 }
 
@@ -844,7 +860,9 @@ fn replay_wal_chunks(
     backup_offset: u64,
 ) -> Result<()> {
     // Assemble WAL chunks in memory.
-    let mut epoch_wal = assemble_wal_chunks(chunks)?;
+    // TODO: support archive.
+    let mut epoch_wal =
+        assemble_wal_chunks(chunks, ctx.wal_chunks_cache.is_some() && !ctx.from_archive)?;
     info!(
         "{} assemble wal from chunks done, epoch {} wal size {} backup_epoch {} backup_offset {}",
         tag,
@@ -895,8 +913,11 @@ pub fn collect_snapshot_meta_rlog_files(
     prefix: &str,
     cluster_backup: &ClusterBackupMeta,
     store_id: u64,
-    object_cache: Option<&ObjectCache>,
+    object_cache_no_hook: Option<&ObjectCacheWithHook>,
 ) -> Result<StoreRlog> {
+    // Must have no hook.
+    debug_assert!(object_cache_no_hook.map_or(true, |x| !x.has_hook()));
+
     let store_meta = cluster_backup
         .get_stores()
         .iter()
@@ -950,7 +971,7 @@ pub fn collect_snapshot_meta_rlog_files(
             full_key,
             store_meta_key.clone(),
             GetObjectOptions::default(),
-            object_cache,
+            object_cache_no_hook,
         ))
         .map_err(|e| {
             tikv_util::error!(
@@ -980,7 +1001,7 @@ pub fn collect_snapshot_meta_rlog_files(
             full_key,
             raft_file_key.clone(),
             GetObjectOptions::default(),
-            object_cache,
+            object_cache_no_hook,
         ))
         .map_err(|e| {
             tikv_util::error!(
@@ -1092,7 +1113,7 @@ pub fn collect_store_wal_rlog_files(
         complete_wal_chunks: true,
         fetch_wal_timeout: timeout,
         cache_dir: None, // TODO: cache_dir
-        object_cache: None,
+        wal_chunks_cache: None,
     };
     // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found, the
     // `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
@@ -1464,6 +1485,51 @@ where
     let mut join_set = tokio::task::JoinSet::new();
     for (meta, opts) in metas {
         join_set.spawn_on(get_object(meta, opts), dfs.get_runtime().handle());
+    }
+
+    let mut objects = vec![];
+    while let Some(res) = join_set.join_next().await {
+        let res = box_try_join!(res)?;
+        objects.push(res);
+    }
+    Ok(objects)
+}
+
+// Note: The order of metas in result will change.
+// TODO: eliminate duplicated codes with `get_objects_to_files`.
+pub async fn get_objects_with_cache<M>(
+    dfs: &S3Fs,
+    metas: Vec<(M, GetObjectOptions)>,
+    cache: Option<&ObjectCacheWithHook>,
+) -> Result<Vec<(M, Bytes)>>
+where
+    M: ObjectMeta + Clone + Send + 'static,
+{
+    let get_object = |meta: M, opts: GetObjectOptions, cache: Option<&ObjectCacheWithHook>| {
+        let meta_key = meta.key().to_string();
+        let full_key = format!("{}/{}", dfs.get_prefix(), meta_key);
+        let dfs = dfs.clone();
+        let cache = cache.cloned();
+        async move {
+            match dfs
+                .get_object_with_cache(full_key, meta_key, opts, cache.as_ref())
+                .await
+            {
+                Ok(data) => Ok((meta, data)),
+                Err(err) => Err(Error::DfsError(err)),
+            }
+        }
+    };
+
+    if metas.len() == 1 {
+        let mut metas = metas;
+        let (key, opts) = metas.pop().unwrap();
+        return get_object(key, opts, cache).await.map(|res| vec![res]);
+    }
+
+    let mut join_set = tokio::task::JoinSet::new();
+    for (meta, opts) in metas {
+        join_set.spawn_on(get_object(meta, opts, cache), dfs.get_runtime().handle());
     }
 
     let mut objects = vec![];

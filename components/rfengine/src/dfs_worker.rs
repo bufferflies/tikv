@@ -22,10 +22,10 @@ use tikv_util::{
 };
 
 use crate::{
-    compact_worker::CompactTask, compress_lz4, decompress_lz4, get_integral_wal_chunks,
-    last_wal_chunk_file_key, manifest::Manifest, metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE,
-    wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name, writer::EPOCH_ROTATE_LEN, Error,
-    Result, WalChunkMeta,
+    compact_worker::CompactTask, compress_lz4, decompress_lz4, decompress_lz4_to_buffer,
+    get_integral_wal_chunks, get_lz4_decompressed_size, last_wal_chunk_file_key,
+    manifest::Manifest, metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE, wal_chunk_file_key,
+    wal_chunk_file_prefix, wal_file_name, writer::EPOCH_ROTATE_LEN, Error, Result, WalChunkMeta,
 };
 
 #[derive(Debug)]
@@ -518,12 +518,12 @@ impl ObjectStorageWorker {
 pub fn assemble_wal_chunks(chunks: Vec<Bytes>) -> Result<BytesMut> {
     let mut epoch_wal = BytesMut::new();
     for chunk in chunks.into_iter() {
-        epoch_wal.put(decompress_wal_chunk(chunk)?);
+        epoch_wal.put(decompress_wal_chunk(&chunk)?);
     }
     Ok(epoch_wal)
 }
 
-pub fn decompress_wal_chunk(chunk: Bytes) -> Result<Bytes> {
+pub fn decompress_wal_chunk(chunk: &Bytes) -> Result<Bytes> {
     // Read chunk header.
     let header = ChunkHeader::decode(chunk.slice(0..ChunkHeader::len()).chunk())?;
     let decompressed_data = match header.compression_type {
@@ -533,6 +533,29 @@ pub fn decompress_wal_chunk(chunk: Bytes) -> Result<Bytes> {
         CompressionType::NoCompression => chunk.slice(ChunkHeader::len()..),
     };
     Ok(decompressed_data)
+}
+
+pub fn convert_to_decompressed_wal_chunk(chunk: Bytes) -> Result<Bytes> {
+    let header = ChunkHeader::decode(chunk.slice(0..ChunkHeader::len()).chunk())?;
+    match header.compression_type {
+        CompressionType::Lz4Compression => {
+            let src = chunk.slice(ChunkHeader::len()..);
+
+            let decompressed_size = get_lz4_decompressed_size(&src).ctx("get_decompressed_size")?;
+            let cap = ChunkHeader::len() + decompressed_size;
+            let mut buffer = Vec::with_capacity(cap);
+
+            let chunk_header = ChunkHeader::new(CompressionType::NoCompression);
+            chunk_header.encode_to(&mut buffer);
+            buffer.resize(cap, 0);
+            let size = decompress_lz4_to_buffer(&src, &mut buffer[ChunkHeader::len()..])
+                .ctx("decompress_to_buffer")?;
+            debug_assert_eq!(size, decompressed_size);
+
+            Ok(Bytes::from(buffer))
+        }
+        CompressionType::NoCompression => Ok(chunk),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -733,7 +756,7 @@ impl Drop for MemoryLimiterGuard {
 mod tests {
     use bytes::Bytes;
     use kvengine::dfs::DFSConfig;
-    use rand::Rng;
+    use rand::prelude::*;
 
     use super::*;
 
@@ -744,6 +767,22 @@ mod tests {
         header.encode_to(&mut buf);
         let header2 = ChunkHeader::decode(&buf).unwrap();
         assert_eq!(header, header2);
+    }
+
+    #[test]
+    fn test_chunk() {
+        let mut data = vec![0u8; 1024];
+        thread_rng().fill_bytes(data.as_mut_slice());
+
+        let chunk_compressed = make_wal_chunk(&data, CompressionType::Lz4Compression);
+        assert_eq!(&decompress_wal_chunk(&chunk_compressed).unwrap(), &data);
+
+        let chunk_no_compress = make_wal_chunk(&data, CompressionType::NoCompression);
+        assert_eq!(&decompress_wal_chunk(&chunk_no_compress).unwrap(), &data);
+
+        let chunk_no_compress1 = convert_to_decompressed_wal_chunk(chunk_compressed).unwrap();
+        assert_eq!(chunk_no_compress1, chunk_no_compress);
+        assert_eq!(decompress_wal_chunk(&chunk_no_compress1).unwrap(), data);
     }
 
     #[test]
@@ -846,5 +885,18 @@ mod tests {
         }
 
         random_bytes
+    }
+
+    fn make_wal_chunk(buf: &[u8], compression_type: CompressionType) -> Bytes {
+        let chunk_header = ChunkHeader::new(compression_type);
+        let buf_len = buf.len();
+        let mut chunk = Vec::with_capacity(ChunkHeader::len() + buf_len);
+        chunk_header.encode_to(&mut chunk);
+        if compression_type == CompressionType::Lz4Compression {
+            compress_lz4(buf, &mut chunk).unwrap();
+        } else {
+            chunk.extend_from_slice(buf);
+        };
+        chunk.into()
     }
 }
