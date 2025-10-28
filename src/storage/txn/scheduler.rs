@@ -551,7 +551,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     pub(in crate::storage) fn run_cmd(&self, cmd: Command, callback: StorageCallback) {
         txn_debug!(
             "Scheduler::run_cmd";
-            "cmd" => ?cmd, "region_id" => cmd.ctx().get_region_id()
+            "cmd" => ?cmd, "region_id" => cmd.ctx().get_region_id(),
+            "request_source" => cmd.ctx().get_request_source()
         );
 
         // write flow control

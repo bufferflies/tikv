@@ -104,6 +104,12 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLock {
                 .expect("txn status not found");
 
             let released = if commit_ts.is_zero() {
+                info!(
+                    "resolve_lock rolling back transaction";
+                    "trace_id" => tracker::get_tls_trace_id(),
+                    "key" => %current_key,
+                    "start_ts" => current_lock.ts,
+                );
                 cleanup(
                     &mut txn,
                     &mut reader,
@@ -116,6 +122,13 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLock {
                 // Continue to resolve locks if the not found committed locks are pessimistic
                 // type. They could be left if the transaction is finally committed and
                 // pessimistic conflict retry happens during execution.
+                info!(
+                    "resolve_lock committing transaction";
+                    "trace_id" => tracker::get_tls_trace_id(),
+                    "key" => %current_key,
+                    "start_ts" => current_lock.ts,
+                    "commit_ts" => commit_ts,
+                );
                 match commit(&mut txn, &mut reader, current_key.clone(), commit_ts).await {
                     Ok(res) => {
                         known_txn_status.push((current_lock.ts, commit_ts));
