@@ -1978,6 +1978,7 @@ fn test_restore_packed_backup(
     client
         .verify_data_with_given_ref_store(&ref_store, None, &Default::default())
         .unwrap();
+    cluster.stop();
     dfs.oss.shutdown()
 }
 

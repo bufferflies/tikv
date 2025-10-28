@@ -151,6 +151,11 @@ lazy_static! {
         "Status of healthy wal double write",
     )
     .unwrap();
+    pub static ref RFENGINE_DFS_RUNNING_UPLOADS: IntGauge = register_int_gauge!(
+        "raft_engine_dfs_running_uploads",
+        "Number of running uploads to DFS",
+    )
+    .unwrap();
 }
 
 #[cfg(feature = "testexport")]

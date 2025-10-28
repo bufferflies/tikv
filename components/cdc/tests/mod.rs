@@ -580,9 +580,18 @@ impl TestCluster {
         match self {
             TestCluster::Tikv(c) => c.leader_of_region(region_id),
             TestCluster::CloudEngine { server: c, .. } => {
-                block_on(c.cluster.get_pd_client().get_region_leader_by_id(region_id))
-                    .unwrap()
-                    .map(|v| v.1)
+                for _ in 0..50 {
+                    match block_on(c.cluster.get_pd_client().get_region_leader_by_id(region_id))
+                        .unwrap()
+                        .map(|v| v.1)
+                        .filter(|peer| peer.store_id != 0)
+                    {
+                        Some(peer) => return Some(peer),
+                        // The leader may not be reported to PD yet, wait a while.
+                        None => std::thread::sleep(Duration::from_millis(100)),
+                    }
+                }
+                None
             }
         }
     }

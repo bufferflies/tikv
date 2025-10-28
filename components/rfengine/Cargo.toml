@@ -41,6 +41,7 @@ slog-term = "2.4"
 thiserror = "1.0"
 tikv_alloc = { path = "../tikv_alloc" }
 tikv_util = { path = "../tikv_util" }
+tokio = { version = "1.5", features = ["rt"] } # For `JoinHandle`...
 tracker = { path = "../tracker" }
 
 [dev-dependencies]
