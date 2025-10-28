@@ -54,6 +54,7 @@ grpcio = { version = "0.10", default-features = false, features = ["openssl-vend
 grpcio-health = { version = "0.10", default-features = false, features = ["protobuf-codec"] }
 hex = "0.4"
 hyper = { version = "0.14", features = ["full"] }
+hyper-rustls = "0.24.2"
 itertools = "0.10"
 keys = { path = "../keys", default-features = false }
 kvengine = { path = "../kvengine", default-features = false }
@@ -111,7 +112,6 @@ tikv_alloc = { path = "../tikv_alloc" }
 tikv_kv = { path = "../tikv_kv" }
 tikv_util = { path = "../tikv_util", default-features = false }
 tokio = { version = "1.12", features = ["full"] }
-tokio-openssl = "0.6"
 tokio-timer = { git = "https://github.com/tikv/tokio", branch = "tokio-timer-hotfix" }
 tokio-util = "0.7"
 toml = "0.5"

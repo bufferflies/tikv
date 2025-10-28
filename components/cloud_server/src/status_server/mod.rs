@@ -8,24 +8,17 @@ use std::{
     env::args,
     error::Error as StdError,
     net::SocketAddr,
-    pin::Pin,
     str::{self, FromStr},
     sync::Arc,
-    task::{Context, Poll},
     time::Duration,
 };
 
 use api_version::{api_v2::TXN_KEY_PREFIX, ApiV2};
-use async_stream::stream;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use flate2::{write::GzEncoder, Compression};
-use futures::{
-    compat::Compat01As03,
-    future::{ok, poll_fn},
-    prelude::*,
-};
+use futures::{compat::Compat01As03, future::ok, prelude::*};
 use hyper::{
     self, header,
     header::{HeaderValue, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE},
@@ -37,6 +30,7 @@ use hyper::{
     service::{make_service_fn, service_fn},
     Body, Method, Request, Response, Server, StatusCode,
 };
+use hyper_rustls::acceptor::TlsStream;
 use kvengine::{
     dfs::FileType,
     table::{BoundedDataSet, InnerKey, SnapVersion},
@@ -52,12 +46,7 @@ use kvproto::{
     raft_serverpb::{PeerState, StoreIdent},
 };
 use online_config::OnlineConfig;
-use openssl::{
-    ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslVerifyMode},
-    x509::X509,
-};
 use pd_client::PdClient;
-use pin_project::pin_project;
 use profile::*;
 use prometheus::TEXT_FORMAT;
 use protobuf::Message;
@@ -94,6 +83,7 @@ use tikv_util::{
     sys::thread::ThreadBuildWrapper,
     time::{Instant, UnixSecs},
     timer::GLOBAL_TIMER_HANDLE,
+    Either,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -104,7 +94,6 @@ use tokio::{
     },
     task::JoinSet,
 };
-use tokio_openssl::SslStream;
 use txn_types::TsSet;
 
 use crate::{
@@ -2802,26 +2791,19 @@ impl StatusServer {
         incoming.set_nodelay(true);
 
         self.addr = Some(incoming.local_addr());
-        if !self.security_config.cert_path.is_empty()
-            && !self.security_config.key_path.is_empty()
-            && !self.security_config.ca_path.is_empty()
-        {
-            let mut acceptor = SslAcceptor::mozilla_modern(SslMethod::tls())?;
-            acceptor.set_ca_file(&self.security_config.ca_path)?;
-            acceptor.set_certificate_chain_file(&self.security_config.cert_path)?;
-            acceptor.set_private_key_file(&self.security_config.key_path, SslFiletype::PEM)?;
-            if !self.security_config.cert_allowed_cn.is_empty() {
-                acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+
+        match self.pd_client.get_security_mgr().acceptor(incoming)? {
+            Either::Left(addr_incoming) => {
+                let server =
+                    Server::builder(addr_incoming).http1_header_read_timeout(SERVER_READ_TIMEOUT);
+                self.start_serve(server);
             }
-            let acceptor = acceptor.build();
-            let tls_incoming = tls_incoming(acceptor, incoming);
-            let server =
-                Server::builder(tls_incoming).http1_header_read_timeout(SERVER_READ_TIMEOUT);
-            self.start_serve(server);
-        } else {
-            let server = Server::builder(incoming).http1_header_read_timeout(SERVER_READ_TIMEOUT);
-            self.start_serve(server);
-        }
+            Either::Right(tls_acceptor) => {
+                let server =
+                    Server::builder(tls_acceptor).http1_header_read_timeout(SERVER_READ_TIMEOUT);
+                self.start_serve(server);
+            }
+        };
         Ok(())
     }
 }
@@ -2844,9 +2826,10 @@ trait ServerConnection {
     fn get_x509(&self) -> Option<X509>;
 }
 
-impl ServerConnection for SslStream<AddrStream> {
+impl ServerConnection for TlsStream<AddrStream> {
     fn get_x509(&self) -> Option<X509> {
-        self.ssl().peer_certificate()
+        // TODO: support return x509
+        None
     }
 }
 
@@ -2856,97 +2839,27 @@ impl ServerConnection for AddrStream {
     }
 }
 
+#[derive(Clone)]
+struct X509 {
+    common_name: String,
+}
+
 // Check if the peer's x509 certificate meets the requirements, this should
 // be called where the access should be controlled.
 //
 // For now, the check only verifies the role of the peer certificate.
-fn check_cert(security_config: &SecurityConfig, cert: Option<X509>) -> bool {
+fn check_cert(security_config: &SecurityConfig, x509: Option<X509>) -> bool {
     // if `cert_allowed_cn` is empty, skip check and return true
     if !security_config.cert_allowed_cn.is_empty() {
-        if let Some(x509) = cert {
-            if let Some(name) = x509
-                .subject_name()
-                .entries_by_nid(openssl::nid::Nid::COMMONNAME)
-                .next()
-            {
-                let data = name.data().as_slice();
-                // Check common name in peer cert
-                return security::match_peer_names(
-                    &security_config.cert_allowed_cn,
-                    std::str::from_utf8(data).unwrap(),
-                );
-            }
+        if let Some(x509) = x509 {
+            // Check common name in peer cert
+            return security::match_peer_names(&security_config.cert_allowed_cn, &x509.common_name);
         }
         false
     } else {
         true
     }
 }
-
-fn tls_incoming(
-    acceptor: SslAcceptor,
-    mut incoming: AddrIncoming,
-) -> impl Accept<Conn = SslStream<AddrStream>, Error = std::io::Error> {
-    let context = acceptor.into_context();
-    let s = stream! {
-        loop {
-            let stream = match poll_fn(|cx| Pin::new(&mut incoming).poll_accept(cx)).await {
-                Some(Ok(stream)) => stream,
-                Some(Err(e)) => {
-                    yield Err(e);
-                    continue;
-                }
-                None => break,
-            };
-            let ssl = match Ssl::new(&context) {
-                Ok(ssl) => ssl,
-                Err(err) => {
-                    error!("Status server error: {}", err);
-                    continue;
-                }
-            };
-            match tokio_openssl::SslStream::new(ssl, stream) {
-                Ok(mut ssl_stream) => match Pin::new(&mut ssl_stream).accept().await {
-                    Err(e) => {
-                        error!(
-                            "Status server error: TLS handshake error";
-                            "remote_addr" => ssl_stream.get_ref().remote_addr(),
-                            "err" => e.to_string()
-                        );
-                        continue;
-                    },
-                    Ok(()) => {
-                        yield Ok(ssl_stream);
-                    },
-                }
-                Err(err) => {
-                    error!("Status server error: {}", err);
-                    continue;
-                }
-            };
-        }
-    };
-    TlsIncoming(s)
-}
-
-#[pin_project]
-struct TlsIncoming<S>(#[pin] S);
-
-impl<S> Accept for TlsIncoming<S>
-where
-    S: Stream<Item = std::io::Result<SslStream<AddrStream>>>,
-{
-    type Conn = SslStream<AddrStream>;
-    type Error = std::io::Error;
-
-    fn poll_accept(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<std::io::Result<Self::Conn>>> {
-        self.project().0.poll_next(cx)
-    }
-}
-
 // For handling fail points related requests
 #[cfg(feature = "failpoints")]
 async fn handle_fail_points_request(req: Request<Body>) -> hyper::Result<Response<Body>> {
