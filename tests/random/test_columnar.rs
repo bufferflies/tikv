@@ -29,6 +29,7 @@ use crate::{
         get_engine_hint, is_db_error_retryable, wait_tiflash_or_columnar_replicas_available,
         DEADLOCK_ERR_MSG,
     },
+    test_tidb::Switches,
     Running, COLUMNAR_RETRY_COUNTER, COLUMNAR_WRITE_COUNTER,
 };
 
@@ -36,6 +37,7 @@ const COLUMNAR_DB_NAME: &str = "columnar_db";
 const COLUMNAR_TABLE_NAME: &str = "columnar_table";
 const EMBEDDED_DOC_TABLE_NAME: &str = "embedded_documents";
 const DYNAMIC_TABLE_NAME: &str = "dynamic_columns_test";
+const PARTITION_TABLE_NAME: &str = "partition_test_table";
 const WORKLOAD_CONCURRENCY: usize = 1;
 const COLUMNAR_REPLICAS_AVAILABLE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -198,9 +200,8 @@ pub(crate) async fn run_columnar_workload(
     keyspace_manager: KeyspaceManager,
     keyspace_id: u32,
     running: Running,
-    vector_common_handle: bool,
+    switches: Switches,
 ) {
-    info!("run workload with columnar");
     let keyspace_name = keyspace_manager
         .get_keyspace_meta(keyspace_id)
         .unwrap()
@@ -210,96 +211,45 @@ pub(crate) async fn run_columnar_workload(
     let conn_string = params.conn_string(COLUMNAR_DB_NAME);
     let pool = sqlx::MySqlPool::connect(&conn_string).await.unwrap();
 
-    let mut handles = Vec::with_capacity(WORKLOAD_CONCURRENCY);
-    let max_id = Arc::new(AtomicU64::new(0));
-    let running_mutex = Arc::new(Mutex::new(()));
-    for tid in 0..WORKLOAD_CONCURRENCY {
-        let pool = pool.clone();
-        let running = running.clone();
-        let max_id = max_id.clone();
-        let handle = tokio::spawn(async move {
-            let tag = format!("columnar-{}-{}", keyspace_id, tid);
-            let start_time = Instant::now();
-            while running.get() {
-                let mut sqls = generate_insert_sqls(10);
-                let del_sqls = generate_delete_sqls(10, max_id.load(Relaxed), vector_common_handle);
-                sqls.extend(del_sqls);
-                max_id.fetch_add(10, Relaxed);
-                let ok = insert_delete_random_records(&tag, &pool, &sqls)
-                    .await
-                    .unwrap_or_else(|err| {
-                        panic!("{} columnar insert/delete error: {:?}", tag, err);
-                    });
-                if ok {
-                    COLUMNAR_WRITE_COUNTER.fetch_add(1, Relaxed);
-                } else {
-                    COLUMNAR_RETRY_COUNTER.fetch_add(1, Relaxed);
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            info!("columnar workload exit"; "tag" => tag, "dur" => ?start_time.saturating_elapsed());
-        });
-        handles.push(handle);
+    let mut handles = Vec::new();
+
+    if switches.enable_columnar_normal_workload {
+        info!("run_columnar_workload, run normal columnar workload");
+        let normal_workload = NormalColumnarWorkload::new(
+            pool.clone(),
+            pd_client.clone(),
+            running.clone(),
+            keyspace_id,
+            switches.vector_common_handle,
+        );
+        handles.push(tokio::spawn(async move {
+            normal_workload.run_workload().await;
+        }));
     }
 
-    let pool_copy = pool.clone();
-    let running_mutex_copy = running_mutex.clone();
-    let running_copy = running.clone();
-    handles.push(tokio::spawn(async move {
-        let start_time = Instant::now();
-        while running_copy.get() {
-            let guard = running_mutex_copy.lock().await;
-            info!("verify_data randomly");
-            match verify_data(&pool_copy, false, vector_common_handle).await {
-                Ok(_) => {
-                    info!("verify_data randomly success");
-                }
-                Err(err) => {
-                    panic!("verify_data randomly error: {}", err);
-                }
-            }
-            drop(guard);
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-        info!("columnar verify thread exit"; "dur" => ?start_time.saturating_elapsed());
-    }));
+    if switches.enable_columnar_dynamic_workload {
+        info!("run_columnar_workload, run dynamic column management workload");
+        let pool_copy = pool.clone();
+        let running_copy = running.clone();
+        handles.push(tokio::spawn(async move {
+            let dynamic_workload = DynamicColumnWorkload::new(pool_copy, running_copy, keyspace_id);
+            dynamic_workload.run_workload().await;
+        }));
+    }
 
-    let pool_copy = pool.clone();
-    let running_mutex_copy = running_mutex.clone();
-    handles.push(tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        info!("pause columnar workload trigger columnar major compaction");
-        let _guard = running_mutex_copy.lock().await;
-        trigger_columnar_major_compaction(&pool_copy).await;
-    }));
-
-    let pd_client_copy = pd_client.clone();
-    let running_copy = running.clone();
-    handles.push(tokio::spawn(async move {
-        while running_copy.get() {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            trigger_manual_columnar_major_compaction(pd_client_copy.clone(), keyspace_id).await;
-        }
-    }));
-
-    // Add independent dynamic column management workload
-    let pool_copy = pool.clone();
-    let running_copy = running.clone();
-    handles.push(tokio::spawn(async move {
-        let dynamic_workload = DynamicColumnWorkload::new(pool_copy, running_copy, keyspace_id);
-        dynamic_workload.run_workload().await;
-    }));
+    if switches.enable_columnar_partition_workload {
+        info!("run_columnar_workload, run partition table workload");
+        let pool_copy = pool.clone();
+        let running_copy = running.clone();
+        handles.push(tokio::spawn(async move {
+            let partition_count = rand::random::<u32>() % 64 + 64;
+            let partition_workload =
+                PartitionTableWorkload::new(pool_copy, running_copy, keyspace_id, partition_count);
+            partition_workload.run_workload().await;
+        }));
+    }
 
     join_all(handles).await;
-
-    match verify_data(&pool, true, vector_common_handle).await {
-        Ok(_) => {
-            info!("verify_data columnar success");
-        }
-        Err(err) => {
-            panic!("verify_data columnar error: {}", err);
-        }
-    }
 }
 
 fn random_str(rng: &mut ThreadRng, len: usize, is_var: bool) -> String {
@@ -1123,6 +1073,164 @@ fn generate_complex_where_condition() -> String {
     combined
 }
 
+/// Normal columnar workload for testing basic columnar storage operations
+/// including insert, delete, query, and consistency verification
+struct NormalColumnarWorkload {
+    pool: Pool<MySql>,
+    pd_client: Arc<dyn PdClient>,
+    running: Running,
+    keyspace_id: u32,
+    vector_common_handle: bool,
+    max_id: Arc<AtomicU64>,
+    running_mutex: Arc<Mutex<()>>,
+}
+
+impl NormalColumnarWorkload {
+    fn new(
+        pool: Pool<MySql>,
+        pd_client: Arc<dyn PdClient>,
+        running: Running,
+        keyspace_id: u32,
+        vector_common_handle: bool,
+    ) -> Self {
+        Self {
+            pool,
+            pd_client,
+            running,
+            keyspace_id,
+            vector_common_handle,
+            max_id: Arc::new(AtomicU64::new(0)),
+            running_mutex: Arc::new(Mutex::new(())),
+        }
+    }
+
+    /// Execute insert/delete workload for a single thread
+    async fn run_insert_delete_thread(&self, tid: usize) {
+        let tag = format!("columnar-{}-{}", self.keyspace_id, tid);
+        let start_time = Instant::now();
+
+        while self.running.get() {
+            let mut sqls = generate_insert_sqls(10);
+            let del_sqls =
+                generate_delete_sqls(10, self.max_id.load(Relaxed), self.vector_common_handle);
+            sqls.extend(del_sqls);
+            self.max_id.fetch_add(10, Relaxed);
+
+            let ok = insert_delete_random_records(&tag, &self.pool, &sqls)
+                .await
+                .unwrap_or_else(|err| {
+                    panic!("{} columnar insert/delete error: {:?}", tag, err);
+                });
+
+            if ok {
+                COLUMNAR_WRITE_COUNTER.fetch_add(1, Relaxed);
+            } else {
+                COLUMNAR_RETRY_COUNTER.fetch_add(1, Relaxed);
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        info!("columnar workload exit"; "tag" => tag, "dur" => ?start_time.saturating_elapsed());
+    }
+
+    /// Periodic verification workload
+    async fn run_verification_workload(&self) {
+        let tag = format!("columnar-verify-{}", self.keyspace_id);
+        let start_time = Instant::now();
+
+        while self.running.get() {
+            let guard = self.running_mutex.lock().await;
+            info!("{} verify_data randomly", tag);
+            match verify_data(&self.pool, false, self.vector_common_handle).await {
+                Ok(_) => {
+                    info!("{} verify_data randomly success", tag);
+                }
+                Err(err) => {
+                    panic!("{} verify_data randomly error: {}", tag, err);
+                }
+            }
+            drop(guard);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+
+        info!("{} columnar verify thread exit", tag; "dur" => ?start_time.saturating_elapsed());
+    }
+
+    /// Trigger columnar major compaction once after initial delay
+    async fn run_major_compaction_once(&self) {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        info!("pause columnar workload trigger columnar major compaction");
+        let _guard = self.running_mutex.lock().await;
+        trigger_columnar_major_compaction(&self.pool).await;
+    }
+
+    /// Periodically trigger manual major compaction
+    async fn run_periodic_manual_compaction(&self) {
+        let tag = format!("columnar-manual-compact-{}", self.keyspace_id);
+
+        while self.running.get() {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            trigger_manual_columnar_major_compaction(self.pd_client.clone(), self.keyspace_id)
+                .await;
+        }
+
+        info!("{} manual compaction thread exit", tag);
+    }
+
+    /// Main workload entry point
+    async fn run_workload(&self) {
+        let tag = format!("normal-columnar-{}", self.keyspace_id);
+        info!("{} starting normal columnar workload", tag);
+
+        let mut handles = Vec::with_capacity(WORKLOAD_CONCURRENCY + 3);
+
+        // Start multiple insert/delete threads
+        for tid in 0..WORKLOAD_CONCURRENCY {
+            let self_clone = self.clone_for_workload();
+            handles.push(tokio::spawn(async move {
+                self_clone.run_insert_delete_thread(tid).await;
+            }));
+        }
+
+        // Start verification thread
+        let self_clone = self.clone_for_workload();
+        handles.push(tokio::spawn(async move {
+            self_clone.run_verification_workload().await;
+        }));
+
+        // Start one-time major compaction thread
+        let self_clone = self.clone_for_workload();
+        handles.push(tokio::spawn(async move {
+            self_clone.run_major_compaction_once().await;
+        }));
+
+        // Start periodic manual compaction thread
+        let self_clone = self.clone_for_workload();
+        handles.push(tokio::spawn(async move {
+            self_clone.run_periodic_manual_compaction().await;
+        }));
+
+        // Wait for all threads to complete
+        join_all(handles).await;
+
+        info!("{} normal columnar workload completed", tag);
+    }
+
+    /// Clone necessary fields for workload tasks
+    fn clone_for_workload(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            pd_client: self.pd_client.clone(),
+            running: self.running.clone(),
+            keyspace_id: self.keyspace_id,
+            vector_common_handle: self.vector_common_handle,
+            max_id: self.max_id.clone(),
+            running_mutex: self.running_mutex.clone(),
+        }
+    }
+}
+
 /// Independent dynamic column management workload with simplified schema
 struct DynamicColumnWorkload {
     pool: Pool<MySql>,
@@ -1679,5 +1787,444 @@ impl DynamicColumnWorkload {
         }
 
         info!("{} query workload exit", tag; "dur" => ?start_time.saturating_elapsed());
+    }
+}
+
+/// Workload for testing massive partition tables
+struct PartitionTableWorkload {
+    pool: Pool<MySql>,
+    running: Running,
+    keyspace_id: u32,
+    max_id: Arc<AtomicU64>,
+    partition_count: u32,
+}
+
+impl PartitionTableWorkload {
+    fn new(pool: Pool<MySql>, running: Running, keyspace_id: u32, partition_count: u32) -> Self {
+        Self {
+            pool,
+            running,
+            keyspace_id,
+            max_id: Arc::new(AtomicU64::new(0)),
+            partition_count,
+        }
+    }
+
+    /// Initialize the partition test table with hash partitioning
+    async fn prepare_partition_table(&self) -> Result<()> {
+        let tag = format!("partition-table-{}", self.keyspace_id);
+
+        // Create table with simplified schema and HASH partitioning on id
+        let sql = format!(
+            "CREATE TABLE IF NOT EXISTS `{COLUMNAR_DB_NAME}`.`{PARTITION_TABLE_NAME}` (
+                id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                data VARCHAR(100),
+                created_at DATETIME
+            ) PARTITION BY HASH(id) PARTITIONS {}",
+            self.partition_count
+        );
+
+        info!(
+            "{} creating partition test table with {} partitions: {}",
+            tag, self.partition_count, sql
+        );
+        sqlx::query(&sql)
+            .execute(&self.pool)
+            .await
+            .with_context(|| "Failed to create partition test table")?;
+
+        // Set tiflash replica for the partitioned table
+        let replica_sql = format!(
+            "ALTER TABLE `{COLUMNAR_DB_NAME}`.`{PARTITION_TABLE_NAME}` SET tiflash replica 1"
+        );
+        info!("{} setting tiflash replica: {}", tag, replica_sql);
+        sqlx::query(&replica_sql)
+            .execute(&self.pool)
+            .await
+            .with_context(|| "Failed to set tiflash replica")?;
+
+        // Wait for replica to be available
+        wait_tiflash_or_columnar_replicas_available(
+            &tag,
+            &self.pool,
+            COLUMNAR_DB_NAME,
+            PARTITION_TABLE_NAME,
+            COLUMNAR_REPLICAS_AVAILABLE_TIMEOUT * 5,
+        )
+        .await;
+
+        // Analyze the table to improve query multiple partitions.
+        let analyze_sql = format!("ANALYZE TABLE `{COLUMNAR_DB_NAME}`.`{PARTITION_TABLE_NAME}`");
+        info!("{} analyzing table: {}", tag, analyze_sql);
+        sqlx::query(&analyze_sql)
+            .execute(&self.pool)
+            .await
+            .with_context(|| "Failed to analyze table")?;
+
+        info!("{} partition table prepared, columnar table is ready", tag);
+
+        Ok(())
+    }
+
+    /// Generate insert SQLs for partition table, data will be distributed
+    /// across partitions by HASH(id)
+    fn generate_insert_sqls(&self, count: usize) -> Vec<String> {
+        let mut rng = rand::thread_rng();
+        let mut sqls = vec!["BEGIN".to_string()];
+
+        for _ in 0..count {
+            let data = random_str(&mut rng, 50, true);
+            let created_at = NaiveDateTime::from_timestamp_opt(
+                rng.gen_range(946684800..1893456000), // 2000-01-01 to 2030-01-01
+                0,
+            )
+            .unwrap_or(NaiveDateTime::MIN);
+
+            let sql = format!(
+                "INSERT INTO `{COLUMNAR_DB_NAME}`.`{PARTITION_TABLE_NAME}` 
+                (data, created_at) 
+                VALUES ('{}', '{}')",
+                data,
+                created_at.format("%Y-%m-%d %H:%M:%S")
+            );
+            sqls.push(sql);
+        }
+
+        sqls.push("COMMIT".to_string());
+        sqls
+    }
+
+    /// Generate delete SQLs, deletion by id will test partition pruning
+    fn generate_delete_sqls(&self, count: usize) -> Vec<String> {
+        let mut rng = rand::thread_rng();
+        let max_id = self.max_id.load(Relaxed);
+        let mut sqls = vec![];
+
+        if max_id > 0 {
+            for _ in 0..count {
+                let operation_type = rng.gen_range(0..3);
+
+                let sql = match operation_type {
+                    0 => {
+                        // Delete by id range
+                        let id = rng.gen_range(1..=max_id);
+                        format!(
+                            "DELETE FROM `{COLUMNAR_DB_NAME}`.`{PARTITION_TABLE_NAME}` 
+                            WHERE id BETWEEN {} AND {} LIMIT 5",
+                            id,
+                            id + 10
+                        )
+                    }
+                    1 => {
+                        // Delete by specific id (tests partition pruning)
+                        let id = rng.gen_range(1..=max_id);
+                        format!(
+                            "DELETE FROM `{COLUMNAR_DB_NAME}`.`{PARTITION_TABLE_NAME}` 
+                            WHERE id = {}",
+                            id
+                        )
+                    }
+                    _ => {
+                        // Delete by data condition
+                        format!(
+                            "DELETE FROM `{COLUMNAR_DB_NAME}`.`{PARTITION_TABLE_NAME}` 
+                            WHERE data LIKE '%{}%' LIMIT 3",
+                            random_str(&mut rng, 2, true)
+                        )
+                    }
+                };
+                sqls.push(sql);
+            }
+        }
+
+        sqls
+    }
+
+    /// Execute insert/delete workload
+    async fn execute_insert_delete_workload(&self) -> Result<()> {
+        let tag = format!("partition-insert-delete-{}", self.keyspace_id);
+
+        // Generate insert and delete SQLs
+        let insert_sqls = self.generate_insert_sqls(10);
+        let delete_sqls = self.generate_delete_sqls(3);
+
+        let mut all_sqls = insert_sqls;
+        all_sqls.extend(delete_sqls);
+
+        // Execute all SQLs
+        for sql in &all_sqls {
+            info!("{} executing: {}", tag, sql);
+            match sqlx::query(sql).execute(&self.pool).await {
+                Ok(_) => {
+                    if sql.starts_with("INSERT") {
+                        self.max_id.fetch_add(1, Relaxed);
+                    }
+                }
+                Err(sqlx::Error::Database(err)) if err.message().contains(DEADLOCK_ERR_MSG) => {
+                    info!("{} ignore deadlock, retry next time", tag; "err" => ?err);
+                }
+                Err(err) if is_db_error_retryable(&err) => {
+                    info!("{} ignore retryable error", tag; "err" => ?err);
+                }
+                Err(err) => {
+                    error!("{} execution failed: {}", tag, err);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Verify consistency between TiFlash and TiKV for partition table
+    async fn verify_consistency(&self) -> Result<()> {
+        let tag = format!("partition-verify-{}", self.keyspace_id);
+        info!("{} starting consistency verification", tag);
+
+        let mut tx = self.pool.begin().await.context("begin transaction")?;
+
+        // Step 1: Verify row count consistency
+        let count_query = |use_tiflash: bool| {
+            format!(
+                "SELECT {} COUNT(*) as count FROM `{COLUMNAR_DB_NAME}`.`{PARTITION_TABLE_NAME}`",
+                get_engine_hint(use_tiflash, PARTITION_TABLE_NAME)
+            )
+        };
+
+        let tikv_count_row = sqlx::query(&count_query(false))
+            .fetch_one(&mut tx)
+            .await
+            .context("fetch count from TiKV")?;
+        let tikv_count: i64 = tikv_count_row.get("count");
+
+        let tiflash_count_row = sqlx::query(&count_query(true))
+            .fetch_one(&mut tx)
+            .await
+            .context("fetch count from TiFlash")?;
+        let tiflash_count: i64 = tiflash_count_row.get("count");
+
+        if tikv_count != tiflash_count {
+            error!(
+                "{} row count mismatch: TiKV={}, TiFlash={}",
+                tag, tikv_count, tiflash_count
+            );
+            return Err(anyhow::anyhow!(
+                "Row count mismatch: TiKV={}, TiFlash={}",
+                tikv_count,
+                tiflash_count
+            ));
+        }
+        info!("{} row count matched: {} rows", tag, tikv_count);
+
+        if tikv_count == 0 {
+            info!("{} empty dataset, verification complete", tag);
+            return Ok(());
+        }
+
+        // Step 2: Verify data consistency with id range query (tests partition pruning)
+        let id_start = rand::random::<u64>() % tikv_count.max(1) as u64;
+        let id_end = id_start + 50;
+        let verify_query = |use_tiflash: bool| {
+            format!(
+                "SELECT {} id, data, created_at 
+                FROM `{COLUMNAR_DB_NAME}`.`{PARTITION_TABLE_NAME}` 
+                WHERE id BETWEEN {} AND {} 
+                ORDER BY id 
+                LIMIT 50",
+                get_engine_hint(use_tiflash, PARTITION_TABLE_NAME),
+                id_start,
+                id_end
+            )
+        };
+
+        info!(
+            "{} verifying data with id range [{}, {}]",
+            tag, id_start, id_end
+        );
+        let tikv_rows = sqlx::query(&verify_query(false))
+            .fetch_all(&mut tx)
+            .await
+            .context("fetch data from TiKV")?;
+
+        let tiflash_rows = sqlx::query(&verify_query(true))
+            .fetch_all(&mut tx)
+            .await
+            .context("fetch data from TiFlash")?;
+
+        if tikv_rows.len() != tiflash_rows.len() {
+            error!(
+                "{} result count mismatch: TiKV={}, TiFlash={}",
+                tag,
+                tikv_rows.len(),
+                tiflash_rows.len()
+            );
+            return Err(anyhow::anyhow!(
+                "Result count mismatch: TiKV={}, TiFlash={}",
+                tikv_rows.len(),
+                tiflash_rows.len()
+            ));
+        }
+
+        // Step 3: Compare row data
+        for (tikv_row, tiflash_row) in tikv_rows.iter().zip(tiflash_rows.iter()) {
+            let tikv_id: i64 = tikv_row.get("id");
+            let tiflash_id: i64 = tiflash_row.get("id");
+            if tikv_id != tiflash_id {
+                error!(
+                    "{} id mismatch: TiKV id={}, TiFlash id={}",
+                    tag, tikv_id, tiflash_id
+                );
+                return Err(anyhow::anyhow!(
+                    "ID mismatch: TiKV id={}, TiFlash id={}",
+                    tikv_id,
+                    tiflash_id
+                ));
+            }
+
+            let tikv_data: &str = tikv_row.get("data");
+            let tiflash_data: &str = tiflash_row.get("data");
+            if tikv_data != tiflash_data {
+                error!(
+                    "{} data mismatch for id={}: TiKV={}, TiFlash={}",
+                    tag, tikv_id, tikv_data, tiflash_data
+                );
+                return Err(anyhow::anyhow!(
+                    "Data mismatch for id={}: TiKV={}, TiFlash={}",
+                    tikv_id,
+                    tikv_data,
+                    tiflash_data
+                ));
+            }
+        }
+
+        info!(
+            "{} consistency verification passed: {} rows verified",
+            tag,
+            tikv_rows.len()
+        );
+
+        // Step 4: Verify aggregation across all partitions
+        let agg_query = |use_tiflash: bool| {
+            format!(
+                "SELECT {} 
+                COUNT(*) as cnt 
+                FROM `{COLUMNAR_DB_NAME}`.`{PARTITION_TABLE_NAME}`",
+                get_engine_hint(use_tiflash, PARTITION_TABLE_NAME)
+            )
+        };
+
+        let tikv_agg = sqlx::query(&agg_query(false))
+            .fetch_one(&mut tx)
+            .await
+            .context("fetch aggregation from TiKV")?;
+
+        let tiflash_agg = sqlx::query(&agg_query(true))
+            .fetch_one(&mut tx)
+            .await
+            .context("fetch aggregation from TiFlash")?;
+
+        let tikv_cnt: i64 = tikv_agg.get("cnt");
+        let tiflash_cnt: i64 = tiflash_agg.get("cnt");
+        if tikv_cnt != tiflash_cnt {
+            error!(
+                "{} aggregation count mismatch: TiKV={}, TiFlash={}",
+                tag, tikv_cnt, tiflash_cnt
+            );
+            return Err(anyhow::anyhow!(
+                "Aggregation count mismatch: TiKV={}, TiFlash={}",
+                tikv_cnt,
+                tiflash_cnt
+            ));
+        }
+
+        info!(
+            "{} aggregation verification passed: count={}",
+            tag, tikv_cnt
+        );
+
+        Ok(())
+    }
+
+    /// Main workload entry point
+    async fn run_workload(&self) {
+        let tag = format!("partition-workload-{}", self.keyspace_id);
+        info!(
+            "{} starting partition table workload with {} partitions",
+            tag, self.partition_count
+        );
+
+        // Step 1: Prepare the partition test table
+        if let Err(err) = self.prepare_partition_table().await {
+            error!("{} failed to prepare partition table: {}", tag, err);
+            return;
+        }
+
+        // Step 2: Start concurrent workloads
+        let mut handles = Vec::new();
+
+        // Insert/Delete workload
+        let self_clone = self.clone_for_workload();
+        handles.push(tokio::spawn(async move {
+            self_clone.run_insert_delete_workload().await;
+        }));
+
+        // Consistency verification workload
+        let self_clone = self.clone_for_workload();
+        handles.push(tokio::spawn(async move {
+            self_clone.run_verification_workload().await;
+        }));
+
+        // Wait for all workloads to complete
+        futures::future::join_all(handles).await;
+
+        info!("{} partition workload completed", tag);
+    }
+
+    /// Clone necessary fields for workload tasks
+    fn clone_for_workload(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            running: self.running.clone(),
+            keyspace_id: self.keyspace_id,
+            max_id: self.max_id.clone(),
+            partition_count: self.partition_count,
+        }
+    }
+
+    /// Insert/Delete workload loop
+    async fn run_insert_delete_workload(&self) {
+        let tag = format!("partition-insert-delete-{}", self.keyspace_id);
+        let start_time = Instant::now();
+
+        while self.running.get() {
+            if let Err(err) = self.execute_insert_delete_workload().await {
+                error!("{} insert/delete workload error: {}", tag, err);
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+
+        info!("{} insert/delete workload exit", tag; "dur" => ?start_time.saturating_elapsed());
+    }
+
+    /// Consistency verification workload loop
+    async fn run_verification_workload(&self) {
+        let tag = format!("partition-verify-{}", self.keyspace_id);
+        let start_time = Instant::now();
+
+        // Wait a bit before starting verification to allow some data to be inserted
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        while self.running.get() {
+            match self.verify_consistency().await {
+                Ok(_) => {
+                    info!("{} consistency verification passed", tag);
+                }
+                Err(err) => {
+                    panic!("{} consistency verification failed: {}", tag, err);
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(8)).await;
+        }
+
+        info!("{} verification workload exit", tag; "dur" => ?start_time.saturating_elapsed());
     }
 }

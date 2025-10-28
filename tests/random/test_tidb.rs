@@ -732,7 +732,7 @@ pub(crate) fn start_workloads(
             keyspace_manager.clone(),
             COLUMNAR_WORKLOAD_KEYSPACE,
             running.clone(),
-            switches.vector_common_handle,
+            switches.clone(),
         )));
     }
     if switches.ia_table_ratio > 0.0 && !tables.is_empty() {
@@ -1038,7 +1038,7 @@ async fn query_table_meta(
     ))
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Switches {
     pub remote_cop_min_block_size: usize,
     pub columnar_switch_on: bool,
@@ -1060,6 +1060,9 @@ pub(crate) struct Switches {
     pub tidb_gc_lifetime: String, // ReadableDuration, e.g. "90s".
     pub rfengine_target_file_size: ReadableSize,
     pub enable_oss_chaos: bool,
+    pub enable_columnar_normal_workload: bool,
+    pub enable_columnar_dynamic_workload: bool,
+    pub enable_columnar_partition_workload: bool,
 }
 
 impl Switches {
@@ -1090,6 +1093,9 @@ impl Switches {
         let tidb_gc_lifetime = env_param("TIDB_GC_LIFETIME", TIDB_GC_LIFETIME.to_string());
         let rfengine_target_file_size = ReadableSize::mb(8);
         let enable_oss_chaos = rng.gen_bool(env_param("OSS_CHAOS_RATIO", 0.2));
+        let enable_columnar_normal_workload = env_switch("ENABLE_COLUMNAR_NORMAL_WORKLOAD");
+        let enable_columnar_dynamic_workload = env_switch("ENABLE_COLUMNAR_DYNAMIC_WORKLOAD");
+        let enable_columnar_partition_workload = env_switch("ENABLE_COLUMNAR_PARTITION_WORKLOAD");
 
         Self {
             remote_cop_min_block_size,
@@ -1112,6 +1118,9 @@ impl Switches {
             tidb_gc_lifetime,
             rfengine_target_file_size,
             enable_oss_chaos,
+            enable_columnar_normal_workload,
+            enable_columnar_dynamic_workload,
+            enable_columnar_partition_workload,
         }
     }
 }

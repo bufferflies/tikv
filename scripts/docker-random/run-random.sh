@@ -38,6 +38,9 @@ UPGRADE_TEST_DURATION="60s"
 
 ENABLE_VALUE_CACHE=1
 ENABLE_TIFLASH_WRITE_NODE=0
+ENABLE_COLUMNAR_NORMAL_WORKLOAD=1
+ENABLE_COLUMNAR_DYNAMIC_WORKLOAD=1
+ENABLE_COLUMNAR_PARTITION_WORKLOAD=1
 
 TIDB_NEXT_GEN=0
 
@@ -117,6 +120,15 @@ while [ $# -gt 0 ]; do
     --enable-tiflash-write-node)
         ENABLE_TIFLASH_WRITE_NODE=1
         ;;
+    --disable-columnar-normal-workload)
+        ENABLE_COLUMNAR_NORMAL_WORKLOAD=0
+        ;;
+    --disable-columnar-dynamic-workload)
+        ENABLE_COLUMNAR_DYNAMIC_WORKLOAD=0
+        ;;
+    --disable-columnar-partition-workload)
+        ENABLE_COLUMNAR_PARTITION_WORKLOAD=0
+        ;;
     --tidb-next-gen)
         TIDB_NEXT_GEN=1
         ;;
@@ -164,6 +176,9 @@ export TEST_DUR_AFTER_DOWNGRADE="$UPGRADE_TEST_DURATION"
 export ENABLE_VALUE_CACHE
 export ENABLE_WAL_DOUBLE_WRITE
 export ENABLE_TIFLASH_WRITE_NODE
+export ENABLE_COLUMNAR_NORMAL_WORKLOAD
+export ENABLE_COLUMNAR_DYNAMIC_WORKLOAD
+export ENABLE_COLUMNAR_PARTITION_WORKLOAD
 
 export TIDB_NEXT_GEN
 

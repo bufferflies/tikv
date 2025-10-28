@@ -435,6 +435,7 @@ impl TidbServers {
         if options.tiflash_disaggregated_mode {
             config.disaggregated_tiflash = true;
             config.use_autoscaler = false;
+            config.split_table = false;
             let tiflash_replicas_config = TiFlashReplicas {
                 group_id: "enable_s3_wn_region".to_string(),
                 extra_s3_rule: false,

@@ -139,6 +139,15 @@ while [[ $# -gt 0 ]]; do
 	--enable-tiflash-write-node)
 		RUN_ARGS+=("--enable-tiflash-write-node")
 		;;
+	--disable-columnar-normal-workload)
+		RUN_ARGS+=("--disable-columnar-normal-workload")
+		;;
+	--disable-columnar-dynamic-workload)
+		RUN_ARGS+=("--disable-columnar-dynamic-workload")
+		;;
+	--disable-columnar-partition-workload)
+		RUN_ARGS+=("--disable-columnar-partition-workload")
+		;;
 	--tidb-next-gen)
 		RUN_ARGS+=("--tidb-next-gen")
 		;;
