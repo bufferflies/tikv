@@ -1,6 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    convert::TryInto,
     fs,
     io::{Read, Seek, SeekFrom},
     os::unix::fs::FileExt,
@@ -23,8 +24,8 @@ use tikv_util::{
 use crate::{
     compact_worker::CompactTask, compress_lz4, decompress_lz4, get_integral_wal_chunks,
     last_wal_chunk_file_key, manifest::Manifest, metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE,
-    parse_wal_chunk_key, wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name,
-    writer::EPOCH_ROTATE_LEN, Error, Result,
+    wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name, writer::EPOCH_ROTATE_LEN, Error,
+    Result, WalChunkMeta,
 };
 
 #[derive(Default)]
@@ -159,7 +160,7 @@ impl ObjectStorageWorker {
         info!("{}: dfs worker start init.", store_id);
         let mut rebuild_epoch = self.epoch_id;
         let store_id = self.get_engine_id();
-        let mut last_chunk_key = None;
+        let mut last_chunk = None;
         loop {
             let scan_prefix = wal_chunk_file_prefix(store_id, rebuild_epoch);
             info!(
@@ -171,12 +172,20 @@ impl ObjectStorageWorker {
             let (chunks, has_more) = self.s3fs.list_objects("", Some(&scan_prefix), None)?;
             debug_assert_eq!(has_more, None);
             if !chunks.is_empty() {
-                let chunk_keys = chunks.into_iter().map(|x| x.key).collect::<Vec<_>>();
-                if let Ok((mut integral_chunks, ..)) = get_integral_wal_chunks(&chunk_keys) {
-                    last_chunk_key = integral_chunks.pop();
-                    if last_chunk_key.is_some() {
+                let chunk_metas: Vec<WalChunkMeta> = chunks
+                    .into_iter()
+                    .filter_map(|x| {
+                        x.key
+                            .try_into()
+                            .map_err(|e| warn!("skip invalid WAL chunk: {:?}", e))
+                            .ok()
+                    })
+                    .collect();
+                if let Ok((mut integral_chunks, ..)) = get_integral_wal_chunks(&chunk_metas) {
+                    last_chunk = integral_chunks.pop();
+                    if last_chunk.is_some() {
                         info!("{}: found integral wal chunks", store_id;
-                            "integral_chunks" => ?integral_chunks, "last_chunk" => ?last_chunk_key);
+                            "integral_chunks" => ?integral_chunks, "last_chunk" => ?last_chunk);
                         break;
                     }
                 }
@@ -188,7 +197,7 @@ impl ObjectStorageWorker {
             }
             rebuild_epoch -= 1;
         }
-        match last_chunk_key {
+        match last_chunk {
             None => {
                 // Rebuild from the earliest epoch.
                 self.epoch_id = rebuild_epoch;
@@ -199,18 +208,15 @@ impl ObjectStorageWorker {
                     store_id, rebuild_epoch
                 );
             }
-            Some(key) => match parse_wal_chunk_key(Some(&key)) {
-                Some((epoch_id, _, file_off, _)) => {
-                    self.epoch_id = epoch_id;
-                    self.start_off = file_off;
-                    self.sync_off = file_off;
-                    info!(
-                        "{}: found the last wal chunk {} rebuild from epoch {} offset {}",
-                        store_id, key, epoch_id, file_off
-                    );
-                }
-                None => return Err(Error::Other(format!("parse wal chunk key {} failed", key))),
-            },
+            Some(chunk) => {
+                self.epoch_id = chunk.epoch;
+                self.start_off = chunk.end_off;
+                self.sync_off = chunk.end_off;
+                info!(
+                    "{}: found the last wal chunk {} rebuild from epoch {} offset {}",
+                    store_id, chunk.key, chunk.epoch, chunk.end_off
+                );
+            }
         }
 
         Ok(need_snapshot)
@@ -550,17 +556,21 @@ impl ObjectStorageWorker {
 pub fn assemble_wal_chunks(chunks: Vec<Bytes>) -> Result<BytesMut> {
     let mut epoch_wal = BytesMut::new();
     for chunk in chunks.into_iter() {
-        // Read chunk header.
-        let header = ChunkHeader::decode(chunk.slice(0..ChunkHeader::len()).chunk())?;
-        let decompressed_data = match header.compression_type {
-            CompressionType::Lz4Compression => Bytes::from(
-                decompress_lz4(chunk.slice(ChunkHeader::len()..).chunk()).map_err(Error::from)?,
-            ),
-            CompressionType::NoCompression => chunk.slice(ChunkHeader::len()..),
-        };
-        epoch_wal.put(decompressed_data);
+        epoch_wal.put(decompress_wal_chunk(chunk)?);
     }
     Ok(epoch_wal)
+}
+
+pub fn decompress_wal_chunk(chunk: Bytes) -> Result<Bytes> {
+    // Read chunk header.
+    let header = ChunkHeader::decode(chunk.slice(0..ChunkHeader::len()).chunk())?;
+    let decompressed_data = match header.compression_type {
+        CompressionType::Lz4Compression => {
+            Bytes::from(decompress_lz4(chunk.slice(ChunkHeader::len()..).chunk())?)
+        }
+        CompressionType::NoCompression => chunk.slice(ChunkHeader::len()..),
+    };
+    Ok(decompressed_data)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -621,7 +631,7 @@ impl ChunkHeader {
         8
     }
 
-    pub(crate) fn encode_to(&self, buf: &mut Vec<u8>) {
+    pub fn encode_to(&self, buf: &mut Vec<u8>) {
         buf.put_u32_le(self.version as u32);
         buf.put_u32_le(self.compression_type as u32);
     }

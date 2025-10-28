@@ -5377,6 +5377,7 @@ dependencies = [
  "log_wrappers",
  "pd_client",
  "prometheus",
+ "proptest",
  "protobuf",
  "raft",
  "rand 0.8.5",

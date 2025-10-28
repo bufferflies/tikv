@@ -24,6 +24,7 @@ use crate::{
     error::{Error, Result},
     restore::RestoreConfig,
     restore_keyspace::{BackupCluster, RESTORE_RFENGINE_CONCURRENCY},
+    wal::WalChunkData,
 };
 
 pub const DEFAULT_MAX_ARCHIVE_FILE_SIZE: u64 = 1024 * 1024 * 1024;
@@ -848,7 +849,7 @@ pub fn get_archived_wals_from_addresses(
     s3fs: &S3Fs,
     date: &str,
     addrs: Vec<ObjectAddress>,
-) -> Result<Vec<Bytes>> {
+) -> Result<Vec<WalChunkData>> {
     let runtime = s3fs.get_runtime();
     let addrs_len = addrs.len();
     let mut handles = Vec::with_capacity(addrs_len);
@@ -870,7 +871,8 @@ pub fn get_archived_wals_from_addresses(
     for res in runtime.block_on(futures::future::join_all(handles)) {
         match res.unwrap() {
             Ok(data) => {
-                wal_chunks.push(data);
+                // TODO: use `ChunkData::LocalFile`.
+                wal_chunks.push(WalChunkData::Memory(data));
             }
             Err(err) => {
                 errs.push(err);
@@ -887,7 +889,7 @@ pub fn get_archived_wals(
     s3fs: &S3Fs,
     date: &str,
     store_meta: &StoreMeta,
-) -> Result<Vec<(u32, Vec<Bytes>)>> {
+) -> Result<Vec<(u32, Vec<WalChunkData>)>> {
     let wal_addrs = get_archived_wal_addresses(store_meta)?;
     let mut wals = Vec::with_capacity(wal_addrs.len());
     for (epoch, addrs) in wal_addrs {
@@ -1935,7 +1937,7 @@ mod tests {
                     get_archived_wals(&reader.s3fs, reader.get_start_date(), &store_meta).unwrap();
                 assert_eq!(wals.len(), 1);
                 assert_eq!(wals[0].0, get_wal_epoch(store_id));
-                assert_eq!(wals[0].1[0], get_wal_chunk(store_id));
+                assert_eq!(wals[0].1[0].must_get_bytes(), get_wal_chunk(store_id));
             }
         }
         for j in 0..NUM_DATES {

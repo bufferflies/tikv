@@ -279,9 +279,9 @@ impl CompactWorker {
 
     fn load_wal(&self, epoch_id: u32) -> Result<WriteBatch> {
         let mut batch = WriteBatch::default();
-        let mut it = WalIterator::new(self.dir.clone(), epoch_id);
+        let mut it = WalIterator::new(&self.dir, epoch_id)?;
         it.iterate_batch(|data, _| {
-            WalIterator::iterate_peer_batch(data, |region_batch| {
+            iterate_peer_batch(data, |region_batch| {
                 batch.merge_peer(region_batch);
             });
         })?;

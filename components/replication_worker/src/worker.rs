@@ -38,11 +38,12 @@ use kvproto::{
 };
 use merged_engine::{MergedEngine, MergedEngineContext};
 use native_br::common::{
-    collect_wal_chunks_with_retry, get_latest_backup_meta, CollectWalChunksContext,
+    assemble_wal_chunks, collect_wal_chunks_with_retry, get_latest_backup_meta,
+    CollectWalChunksContext,
 };
 use pd_client::{PdClient, RegionStat, RpcClient};
 use resolved_ts::TsSource;
-use rfengine::{assemble_wal_chunks, RfEngine, TRUNCATE_ALL_INDEX};
+use rfengine::{RfEngine, TRUNCATE_ALL_INDEX};
 use rfstore::store::ApplyContext;
 use security::{HttpClient, SecurityConfig, SecurityManager};
 use tikv_util::{
@@ -731,8 +732,14 @@ impl ReplicationWorker {
                 return Err(Error::OtherError(err_str.to_string()));
             }
             let data_len = data.len();
-            self.merged_engine
-                .update_wal(store_id, epoch, start_off, data.clone())?;
+            let end_off = start_off + data_len as u64;
+            self.merged_engine.update_wal(
+                store_id,
+                epoch,
+                start_off,
+                end_off,
+                std::io::Cursor::new(data.clone()),
+            )?;
             if status == StatusCode::PARTIAL_CONTENT {
                 self.merged_engine
                     .rotate_wal(store_id, epoch, start_off + data_len as u64)?;
@@ -776,17 +783,19 @@ impl ReplicationWorker {
             store_id,
             complete_wal_chunks: true,
             fetch_wal_timeout: FETCH_WAL_TIMEOUT,
+            cache_dir: None,
         };
         let tag = format!("{}:{}", store_id, epoch_id);
         // there is no online chunk for this epoch.
-        let (chunks, _) =
+        let (chunks, ..) =
             collect_wal_chunks_with_retry(&tag, &collect_ctx, epoch_id, epoch_id + 1, 0)
                 .map_err(|e| Error::from(e))?;
-        let wal_data = assemble_wal_chunks(chunks)?.freeze();
+        let mut wal_data = assemble_wal_chunks(chunks)?;
+        wal_data.freeze();
         let end_off = wal_data.len() as u64;
-        let remained_wal_data = wal_data.slice((start_off as usize)..);
+        let remained_wal_data = wal_data.range_reader(start_off, end_off)?;
         self.merged_engine
-            .update_wal(store_id, epoch_id, start_off, remained_wal_data)?;
+            .update_wal(store_id, epoch_id, start_off, end_off, remained_wal_data)?;
         self.merged_engine.rotate_wal(store_id, epoch_id, end_off)?;
         Ok(())
     }

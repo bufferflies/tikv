@@ -327,7 +327,8 @@ pub(crate) fn generate_update_conf_fn<'a>(
     switches: &'a Switches,
     disable_ia: bool,
 ) -> impl Fn(u16, &mut TikvConfig) + 'a {
-    let cpu_cores = SysQuota::cpu_cores_quota() as usize;
+    let cpu_cores = SysQuota::cpu_cores_quota() as u64;
+    let rfengine_target_file_size = switches.rfengine_target_file_size;
 
     move |_node_id: u16, conf: &mut TikvConfig| {
         let mut rng = thread_rng();
@@ -351,10 +352,10 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.rocksdb.writecf.block_size = ReadableSize::kb(2);
         conf.rocksdb.writecf.target_file_size_base = KV_TARGET_FILE_SIZE;
 
-        conf.rfengine.target_file_size = ReadableSize::mb(8);
+        conf.rfengine.target_file_size = rfengine_target_file_size;
         conf.rfengine.batch_compression_threshold = ReadableSize::kb(rng.gen_range(0..2));
         conf.rfengine.lightweight_backup = true;
-        conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(512);
+        conf.rfengine.wal_chunk_target_file_size = rfengine_target_file_size / 16;
         conf.rfengine.dfs_worker_memory_limit = (conf.rfengine.target_file_size * 8).into();
 
         conf.kvengine.compaction_tombs_count = 100;
@@ -381,8 +382,8 @@ pub(crate) fn generate_update_conf_fn<'a>(
             conf.enable_ia();
         }
 
+        conf.storage.scheduler_worker_pool_size = cpu_cores as usize;
         conf.storage.flow_control.enable = true;
-        conf.storage.scheduler_worker_pool_size = cpu_cores;
         conf.storage.check_backup_ts = switches.txn_check_backup_ts;
         conf.gc.enable_safe_point_v2 = true;
 
@@ -928,6 +929,7 @@ pub(crate) struct Switches {
     pub async_commit_switch_on: bool,
     pub ia_table_ratio: f64,
     pub txn_check_backup_ts: bool,
+    pub rfengine_target_file_size: ReadableSize,
 }
 
 impl Switches {
@@ -954,8 +956,9 @@ impl Switches {
 
         let restart_tso_svc = env_switch(RESTART_TSO_SVC_ENV_KEY);
         let async_commit_switch_on = rng.gen_bool(env_param("ASYNC_COMMIT_RATIO", 0.1));
-        let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
-        let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.2);
+        let txn_check_backup_ts = env_switch("TXN_CHECK_BACKUP_TS");
+        let ia_table_ratio = env_param("IA_TABLE_RATIO", 0.5);
+        let rfengine_target_file_size = ReadableSize::mb(8);
 
         Self {
             remote_cop_min_block_size,
@@ -971,6 +974,7 @@ impl Switches {
             async_commit_switch_on,
             ia_table_ratio,
             txn_check_backup_ts,
+            rfengine_target_file_size,
         }
     }
 }

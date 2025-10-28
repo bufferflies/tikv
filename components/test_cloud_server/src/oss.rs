@@ -1156,6 +1156,7 @@ mod tests {
             ];
 
             for (start_off, end_off, expected) in cases {
+                let s3fs = s3fs.clone();
                 let key = s3fs.file_key(1, FileType::Sst);
                 let file_name = "1".to_string();
                 let opts = engine_traits::GetObjectOptions { start_off, end_off };
@@ -1165,11 +1166,15 @@ mod tests {
                     .unwrap();
                 assert_eq!(read_data, expected);
 
-                let mut f = tempfile().unwrap();
-                let len = s3fs
-                    .get_object_to_writer(key, file_name, opts, &mut f)
+                let build_writer = || {
+                    let f = tempfile().unwrap();
+                    Ok(std::io::BufWriter::new(f))
+                };
+                let (writer, len) = s3fs
+                    .get_object_to_writer(key, file_name, opts, build_writer)
                     .await
                     .unwrap();
+                let mut f = writer.into_inner().unwrap();
                 assert_eq!(len as usize, expected.len());
                 {
                     let mut read_data = Vec::with_capacity(len as usize);

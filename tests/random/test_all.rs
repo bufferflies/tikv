@@ -136,6 +136,7 @@ fn test_random_all() {
     );
 
     // Start workloads & schedulers.
+    let running = Running::new_start();
     let mut handles = vec![
         spawn_merge(cluster.new_scheduler(), true),
         spawn_transfer(cluster.new_scheduler()),
@@ -160,6 +161,7 @@ fn test_random_all() {
         tolerate_err: 1,
         strict_tolerate: true,
         max_retry: 20,
+        lower_memory: switches.restore_lower_memory,
         ..Default::default()
     };
     for _ in 0..RESTORE_CONCURRENCY {
@@ -244,6 +246,7 @@ fn test_random_all() {
 
     // Finish.
     info!("test finished, stopping all workers");
+    running.stop();
     for handle in handles {
         handle.join().unwrap();
     }
@@ -535,16 +538,20 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
 pub(crate) struct Switches {
     pub ia_table_ratio: f64,
     pub txn_check_backup_ts: bool,
+    pub restore_lower_memory: bool,
 }
 
 impl Switches {
     pub fn from_env() -> Self {
-        let ia_table_ratio: f64 = env_param("IA_TABLE_RATIO", 0.2);
-        let txn_check_backup_ts = env_switch_opt("TXN_CHECK_BACKUP_TS", 0);
+        let mut rng = thread_rng();
+        let ia_table_ratio: f64 = env_param("IA_TABLE_RATIO", 0.5);
+        let txn_check_backup_ts = env_switch("TXN_CHECK_BACKUP_TS");
+        let lower_memory = rng.gen_bool(0.5);
 
         Self {
             ia_table_ratio,
             txn_check_backup_ts,
+            restore_lower_memory: lower_memory,
         }
     }
 }

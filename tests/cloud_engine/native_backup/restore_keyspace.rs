@@ -257,14 +257,8 @@ fn test_restore_keyspace_impl(
         skip_keyspace_meta: true,
         ..Default::default()
     };
-    let s3fs = Arc::new(S3Fs::new(
-        dfs_config.prefix.clone(),
-        dfs_config.s3_endpoint.clone(),
-        dfs_config.s3_key_id.clone(),
-        dfs_config.s3_secret_key.clone(),
-        dfs_config.s3_region.clone(),
-        dfs_config.s3_bucket.clone(),
-    ));
+    let restore_config = RestoreConfig::default_for_test();
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
     let reporter = Arc::new(DummyStepReporter::default());
 
     // Import data.
@@ -437,7 +431,7 @@ fn test_restore_keyspace_impl(
         &snapshot_backup_name,
         None,
         s3fs.clone(),
-        RestoreConfig::default(),
+        restore_config.clone(),
         cluster.get_pd_client(),
         None,
         runtime,
@@ -482,7 +476,7 @@ fn test_restore_keyspace_impl(
             &instant_backup_name,
             None,
             s3fs,
-            RestoreConfig::default(),
+            restore_config,
             cluster.get_pd_client(),
             None,
             runtime,
@@ -1072,6 +1066,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
         info!("backup_cluster result: {:?}", backup_meta);
     }
 
+    let restore_config = RestoreConfig::default_for_test();
     // Restore keyspace.
     let restore_result = restore_keyspace::restore_keyspace(
         keyspace_id,
@@ -1079,7 +1074,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
         &snapshot_backup_name,
         None,
         s3fs,
-        RestoreConfig::default(),
+        restore_config,
         cluster.get_pd_client(),
         None,
         &runtime,
@@ -1201,13 +1196,14 @@ fn test_restore_keyspace_with_no_chunk() {
     }
 
     // Restore keyspace.
+    let restore_config = RestoreConfig::default_for_test();
     restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
         &snapshot_backup_name,
         None,
         s3fs,
-        RestoreConfig::default(),
+        restore_config,
         cluster.get_pd_client(),
         None,
         &runtime,
@@ -1300,6 +1296,7 @@ fn test_restore_keyspace_with_slow_dfs() {
         info!("backup_cluster result: {:?}", backup_meta);
     }
 
+    let restore_config = RestoreConfig::default_for_test();
     NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR.reset();
     let mut ok = false;
     for _ in 0..30 {
@@ -1310,7 +1307,7 @@ fn test_restore_keyspace_with_slow_dfs() {
             &snapshot_backup_name,
             None,
             s3fs.clone(),
-            RestoreConfig::default(),
+            restore_config.clone(),
             cluster.get_pd_client(),
             None,
             &runtime,
@@ -1453,13 +1450,14 @@ fn test_restore_keyspace_with_schema() {
     }
 
     // Restore keyspace.
+    let restore_config = RestoreConfig::default_for_test();
     restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
         &snapshot_backup_name,
         None,
         s3fs.clone(),
-        RestoreConfig::default(),
+        restore_config,
         cluster.get_pd_client(),
         None,
         &runtime,
@@ -1642,6 +1640,7 @@ fn test_restore_keyspace_with_failed_store(
         timeout_fetch_wal: ReadableDuration::secs(1),
         timeout_restore_snapshot: ReadableDuration::secs(3),
         strict_tolerate: true,
+        lower_memory: RestoreConfig::use_lower_memory(),
         ..Default::default()
     };
 

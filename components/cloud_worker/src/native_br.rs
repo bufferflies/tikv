@@ -1003,6 +1003,9 @@ pub struct NativeBrConfig {
     /// Whether to tolerate unavailability of no more than one store when
     /// restore.
     pub restore_tolerate_err: bool,
+
+    /// See `RestoreConfig::lower_memory`.
+    pub lower_memory: bool,
 }
 
 impl Default for NativeBrConfig {
@@ -1024,6 +1027,7 @@ impl Default for NativeBrConfig {
             backup_skip_keyspace_meta: false,
             backup_tolerate_err: false,
             restore_tolerate_err: false,
+            lower_memory: false,
         }
     }
 }
