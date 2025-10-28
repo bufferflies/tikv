@@ -197,7 +197,6 @@ impl WorkerPod {
     }
 
     fn init(&mut self, task_id: &str, pod: &Pod) {
-        let pod_name = pod.name_any();
         self.name = pod.name_any();
         if let Some(status) = &pod.status {
             if let Some(conditions) = &status.conditions {
@@ -206,7 +205,7 @@ impl WorkerPod {
                         if let Some(t) = &ready_condition.last_transition_time {
                             self.started_at = t.0.timestamp();
                             self.updated_at = t.0.timestamp();
-                            self.svc_name = new_worker_svc_name_by_pod_name(task_id, &pod_name);
+                            self.svc_name = new_worker_svc_name(task_id);
                         }
                     }
                 }
@@ -607,14 +606,6 @@ impl WorkerScaler {
         let sts_name = new_worker_sts_name(task_id);
         if let Err(err) = self.sts_api.delete(&sts_name, &Default::default()).await {
             warn!("delete sts {} err {:?}", sts_name, err);
-            let old_sts_name = new_worker_sts_old_name(task_id);
-            if let Err(err) = self
-                .sts_api
-                .delete(&old_sts_name, &Default::default())
-                .await
-            {
-                warn!("delete sts {} err {:?}", old_sts_name, err);
-            }
         }
     }
 
@@ -622,14 +613,6 @@ impl WorkerScaler {
         let svc_name = new_worker_svc_name(task_id);
         if let Err(err) = self.svc_api.delete(&svc_name, &Default::default()).await {
             warn!("delete sts {} err {:?}", svc_name, err);
-            let old_svc_name = new_worker_svc_old_name(task_id);
-            if let Err(err) = self
-                .svc_api
-                .delete(&old_svc_name, &Default::default())
-                .await
-            {
-                warn!("delete sts {} err {:?}", old_svc_name, err);
-            }
         }
     }
 
@@ -721,16 +704,11 @@ impl WorkerScaler {
 
     async fn maybe_clean_up(&self, task_id: &str) {
         info!("try to clean up {}", task_id);
-        let mut pod_name = new_worker_pod_name(task_id);
-        let mut pod = self.pod_api.get(&pod_name).await;
+        let pod_name = new_worker_pod_name(task_id);
+        let pod = self.pod_api.get(&pod_name).await;
         if let Err(err) = pod {
             warn!("{} get pod {} err {:?}", task_id, pod_name, err);
-            pod_name = new_worker_pod_old_name(task_id);
-            pod = self.pod_api.get(&pod_name).await;
-            if let Err(err) = pod {
-                warn!("{} get pod {} err {:?}", task_id, pod_name, err);
-                return;
-            }
+            return;
         }
         let pod = pod.unwrap();
         if pod.status.is_none() || pod.status.clone().unwrap().phase.unwrap() != "Running" {
@@ -866,50 +844,31 @@ impl WorkerScaler {
 }
 
 fn parse_task_id_by_pod_name(pod_name: &str) -> String {
-    // old pod name format: load-data-worker-{task-id}-0
+    // pod name format: ldw-{task-id}-0
     // task-id:         {keyspace-id}-{lightning-task-id}-{table-id}-{engine-id}
     //
-    // new pod name format: ldw-{task-id}-0
     let fields: Vec<&str> = pod_name.split('-').collect();
-    if fields.len() == 8 {
-        // load-data-worker-1-1701753296955293956-139-0-0
-        return format!("{}-{}-{}-{}", fields[3], fields[4], fields[5], fields[6]);
-    } else if fields.len() == 9 {
-        // load-data-worker-1-11701753296955293956-139--1-0
-        return format!("{}-{}-{}--{}", fields[3], fields[4], fields[5], fields[7]);
-    } else if fields.len() == 6 {
+    if fields.len() == 6 {
+        // ldw-1-1701753296955293956-139-0-0
         return format!("{}-{}-{}-{}", fields[1], fields[2], fields[3], fields[4]);
     } else if fields.len() == 7 {
+        // ldw-1-11701753296955293956-139--1-0
         return format!("{}-{}-{}--{}", fields[1], fields[2], fields[3], fields[5]);
     }
     "".to_string()
 }
 
 fn parse_task_id_by_pvc_name(pvc_name: &str) -> String {
-    // old pvc name format: {pvc-template-name}-load-data-worker-{task-id}-0
+    // pvc name format: {pvc-template-name}-ldw-{task-id}-0
     // task-id:         {keyspace-id}-{lightning-task-id}-{table-id}-{engine-id}
     //
-    // new pvc name format: {pvc-template-name}-ldw-0
     let fields: Vec<&str> = pvc_name.split('-').collect();
-    if fields.len() == 9 {
-        return format!("{}-{}-{}-{}", fields[4], fields[5], fields[6], fields[7]);
-    } else if fields.len() == 10 {
-        return format!("{}-{}-{}--{}", fields[4], fields[5], fields[6], fields[8]);
-    } else if fields.len() == 7 {
+    if fields.len() == 7 {
         return format!("{}-{}-{}-{}", fields[2], fields[3], fields[4], fields[5]);
     } else if fields.len() == 8 {
         return format!("{}-{}-{}--{}", fields[2], fields[3], fields[4], fields[6]);
     }
     "".to_string()
-}
-
-fn new_worker_svc_name_by_pod_name(task_id: &str, pod_name: &str) -> String {
-    let fields: Vec<&str> = pod_name.split('-').collect();
-    if fields.len() == 8 || fields.len() == 9 {
-        new_worker_svc_old_name(task_id)
-    } else {
-        new_worker_svc_name(task_id)
-    }
 }
 
 fn new_worker_sts_name(task_id: &str) -> String {
@@ -922,18 +881,6 @@ fn new_worker_svc_name(task_id: &str) -> String {
 
 fn new_worker_pod_name(task_id: &str) -> String {
     format!("ldw-{}-0", task_id)
-}
-
-fn new_worker_sts_old_name(task_id: &str) -> String {
-    format!("load-data-worker-{}", task_id)
-}
-
-fn new_worker_svc_old_name(task_id: &str) -> String {
-    format!("load-data-worker-{}-service", task_id)
-}
-
-fn new_worker_pod_old_name(task_id: &str) -> String {
-    format!("load-data-worker-{}-0", task_id)
 }
 
 async fn get_proc_output(mut attached: AttachedProcess) -> String {
@@ -1043,7 +990,7 @@ mod tests {
     };
 
     fn new_worker_pvc_name(pvc_template_name: &str, task_id: &str) -> String {
-        format!("{}-load-data-worker-{}-0", pvc_template_name, task_id)
+        format!("{}-ldw-{}-0", pvc_template_name, task_id)
     }
 
     #[test]
