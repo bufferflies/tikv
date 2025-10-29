@@ -25,6 +25,7 @@ with_prefix!(prefix_apply "apply-");
 with_prefix!(prefix_store "store-");
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, OnlineConfig)]
 #[serde(default)]
+#[serde(rename_all = "kebab-case")]
 pub struct Config {
     // =====================================================================
     // Deprecated configs (for compatibility with Raftstore)
@@ -32,8 +33,6 @@ pub struct Config {
     // These fields are retained for legacy compatibility and migration.
     // They may be ignored or have no effect in next-gen implementations.
     // =====================================================================
-    #[online_config(skip)]
-    pub raftdb_path: String,
     // Interval to compact unnecessary raft log.
     pub raft_log_compact_sync_interval: ReadableDuration,
     // A threshold to gc stale raft log, must >= 1.
@@ -236,6 +235,9 @@ pub struct Config {
     #[online_config(skip)]
     pub prevote: bool,
 
+    #[online_config(skip)]
+    pub raftdb_path: String,
+
     // store capacity. 0 means no limit.
     #[online_config(skip)]
     pub capacity: ReadableSize,
@@ -406,7 +408,6 @@ impl Default for Config {
         let num_cpus = tikv_util::sys::SysQuota::cpu_cores_quota() as usize;
         Config {
             // Deprecated configs [for compatibility to Raftstore]
-            raftdb_path: String::new(),
             raft_log_compact_sync_interval: ReadableDuration::secs(2),
             raft_log_gc_threshold: 50,
             raft_log_gc_count_limit: None,
@@ -478,6 +479,7 @@ impl Default for Config {
             max_entry_cache_warmup_duration: ReadableDuration::secs(1),
             // Valid configs
             prevote: true,
+            raftdb_path: String::new(),
             capacity: ReadableSize(0),
             raft_base_tick_interval: ReadableDuration::secs(1),
             raft_heartbeat_ticks: 2,
@@ -863,6 +865,71 @@ impl Config {
 
     // TODO
     pub fn write_into_metrics(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_serde_with_custom_config() {
+        let content = r#"
+        ### deprecated
+        report-region-flow-interval = "55s"
+        raft-log-gc-threshold = 128
+
+        ### derived from RaftStore
+        raftdb-path = "tmp1_path"
+        store-pool-size = 4
+        apply-pool-size = 3
+        store-max-batch-size = 128
+        apply-max-batch-size = 64
+
+        ### extra config
+        raft-log-gc-no-kv-count = 55
+
+        "#;
+        let cfg: Config = toml::from_str(content).unwrap();
+        assert_eq!(cfg.report_region_flow_interval, ReadableDuration::secs(55));
+        assert_eq!(cfg.raft_log_gc_threshold, 128);
+        assert_eq!(cfg.raftdb_path, "tmp1_path");
+        assert_eq!(cfg.store_batch_system.pool_size, 4);
+        assert_eq!(cfg.store_batch_system.max_batch_size.unwrap(), 128);
+        assert_eq!(cfg.apply_batch_system.pool_size, 3);
+        assert_eq!(cfg.apply_batch_system.max_batch_size.unwrap(), 64);
+        assert_eq!(cfg.raft_log_gc_no_kv_count, 55);
+    }
+
+    #[test]
+    fn test_serde_with_invalid_custom_config() {
+        let content = r#"
+        ### deprecated
+        report_region_flow_interval = "55s"
+
+        ### derived from RaftStore
+        raftdb_path = "tmp1_path"
+        store_pool_size = 4
+
+        ### extra config
+        raft-log-gc-no-count = 55
+
+        "#;
+        let default_cfg = Config::new();
+        let cfg: Config = toml::from_str(content).unwrap();
+        assert_eq!(
+            cfg.report_region_flow_interval,
+            default_cfg.report_region_flow_interval
+        );
+        assert_eq!(cfg.raftdb_path, default_cfg.raftdb_path);
+        assert_eq!(
+            cfg.store_batch_system.pool_size,
+            default_cfg.store_batch_system.pool_size
+        );
+        assert_eq!(
+            cfg.raft_log_gc_no_kv_count,
+            default_cfg.raft_log_gc_no_kv_count
+        );
+    }
 }
 
 // TODO: online configurations for RfStoreConfig

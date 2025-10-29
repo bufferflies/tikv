@@ -5324,17 +5324,38 @@ mod tests {
     }
 
     #[test]
-    fn test_raft_engine_dir() {
-        let content = r#"
-            [raft-engine]
-            enable = true
-        "#;
-        let mut cfg: TikvConfig = toml::from_str(content).unwrap();
-        cfg.validate().unwrap();
-        assert_eq!(
-            cfg.raft_engine.config.dir,
-            config::canonicalize_sub_path(&cfg.storage.data_dir, "raft-engine").unwrap()
-        );
+    fn test_raft_dir() {
+        // raft-engine
+        {
+            let content = r#"
+                [raft-engine]
+                enable = true
+            "#;
+            let mut cfg: TikvConfig = toml::from_str(content).unwrap();
+            cfg.validate().unwrap();
+            assert_eq!(
+                cfg.raft_engine.config.dir,
+                config::canonicalize_sub_path(&cfg.storage.data_dir, "raft-engine").unwrap()
+            );
+        }
+        // raftdb-path
+        {
+            let content = r#"
+                [raftstore]
+                raftdb-path = "tmp1_path"
+                raft-log-gc-no-kv-count = 55
+            "#;
+            let mut cfg: TikvConfig = toml::from_str(content).unwrap();
+            assert_eq!(cfg.raft_store.raft_log_gc_no_kv_count, 55);
+            assert_eq!(cfg.raft_store.raftdb_path, "tmp1_path");
+            cfg.compatible_adjust();
+            cfg.validate().unwrap();
+            check_critical_config(&cfg).unwrap();
+            assert_eq!(
+                cfg.raft_store.raftdb_path,
+                config::canonicalize_sub_path(&cfg.storage.data_dir, "tmp1_path").unwrap()
+            );
+        }
     }
 
     #[test]
