@@ -84,6 +84,7 @@ fn test_merged_engine_once() {
             force_ia: false,
             mem_table_size: cluster.get_mem_table_size(),
             raft_write_batch_size: ReadableSize::kb(256),
+            ..Default::default()
         },
         security_config: Arc::new(cluster.get_node_config(node_ids[0]).security.clone()),
         force_stop: Default::default(),

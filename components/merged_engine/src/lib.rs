@@ -12,6 +12,7 @@ use std::{
     fmt, fs, io, mem, ops,
     path::{Path, PathBuf},
     sync::Arc,
+    thread,
     time::Duration,
 };
 
@@ -35,9 +36,12 @@ use kvproto::{
     raft_serverpb::{PeerState, RegionLocalState, StoreIdent},
 };
 use log_wrappers::Value as LogValue;
-use native_br::common::{
-    collect_snapshot_meta_rlog_files, get_latest_backup_meta, replay_wal_logs_from_backup,
-    ReplayWalLogsContext,
+use native_br::{
+    common::{
+        collect_snapshot_meta_rlog_files, get_latest_backup_meta, replay_wal_logs_from_backup,
+        ReplayWalLogsContext,
+    },
+    error::Error as BrError,
 };
 use pd_client::PdClient;
 use protobuf::Message;
@@ -60,7 +64,9 @@ use tikv::config::TikvConfig;
 use tikv_util::{
     box_err, box_try,
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
-    debug, error, info, mpsc, trace, warn,
+    debug, error, info, mpsc,
+    time::Instant,
+    trace, warn,
 };
 
 use crate::{
@@ -111,6 +117,7 @@ pub struct MergedEngineConfig {
     pub mem_table_size: ReadableSize,
     pub raft_write_batch_size: ReadableSize,
     pub force_ia: bool,
+    pub get_latest_backup_timeout: ReadableDuration,
 }
 
 impl Default for MergedEngineConfig {
@@ -122,6 +129,7 @@ impl Default for MergedEngineConfig {
             mem_table_size: ReadableSize::mb(128),
             raft_write_batch_size: ReadableSize::mb(4),
             force_ia: true,
+            get_latest_backup_timeout: ReadableDuration::minutes(30),
         }
     }
 }
@@ -482,6 +490,24 @@ impl MergedEngine {
         self.kv.close();
     }
 
+    fn get_latest_backup(ctx: &MergedEngineContext) -> Result<ClusterBackupMeta> {
+        let cluster_id = box_try!(ctx.pd.get_cluster_id());
+        let runtime = ctx.fs.get_runtime();
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < ctx.config.get_latest_backup_timeout.0 {
+            match runtime.block_on(get_latest_backup_meta(&ctx.fs, cluster_id)) {
+                Ok(x) => return Ok(x),
+                Err(BrError::MetaNotFound(_)) => {
+                    warn!("get_latest_backup: not ready");
+                    thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
+                Err(err) => return Err(box_err!(err)),
+            }
+        }
+        Err(box_err!("get_latest_backup: timeout"))
+    }
+
     fn recover_from_backup(
         ctx: &MergedEngineContext,
         backup_meta: Option<ClusterBackupMeta>,
@@ -489,11 +515,7 @@ impl MergedEngine {
     ) -> Result<(HashMap<u64, RegionProgress>, HashMap<u64, StoreProgress>)> {
         let backup_meta = match backup_meta {
             Some(backup_meta) => backup_meta,
-            None => {
-                let cluster_id = box_try!(ctx.pd.get_cluster_id());
-                let runtime = ctx.fs.get_runtime();
-                runtime.block_on(get_latest_backup_meta(&ctx.fs, cluster_id))?
-            }
+            None => box_try!(Self::get_latest_backup(ctx)),
         };
 
         let merged_store_id = ctx.config.merged_store_id;
