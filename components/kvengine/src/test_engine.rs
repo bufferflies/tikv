@@ -440,5 +440,8 @@ fn new_test_options(
     opts.max_del_range_delay = Duration::from_secs(1);
     opts.enable_inner_key_offset = enable_inner_key_off;
     opts.read_columnar = true;
+    // Set unlimited memory for DFS file loading in tests
+    // to avoid blocking when memory limiter has 0 capacity
+    opts.dfs_load_memory_limit = u64::MAX;
     opts
 }

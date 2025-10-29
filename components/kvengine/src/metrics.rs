@@ -126,6 +126,17 @@ lazy_static! {
         "Capacity of IA small queue",
     )
     .unwrap();
+    pub static ref ENGINE_DFS_LOAD_MEMORY_USAGE: IntGauge = register_int_gauge!(
+        "kv_engine_dfs_load_memory_usage_bytes",
+        "kv engine dfs load memory usage in bytes",
+    )
+    .unwrap();
+    pub static ref ENGINE_DFS_LOAD_MEMORY_WAIT_DURATION: Histogram = register_histogram!(
+        "kv_engine_dfs_load_memory_wait_duration_seconds",
+        "Histogram of wait duration when acquiring DFS load memory",
+        exponential_buckets(0.001, 2.0, 20).unwrap() // 1ms ~ 524s
+    )
+    .unwrap();
     pub static ref ENGINE_IA_READ_SEGMENT_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "kv_engine_ia_read_segment_duration_seconds",
         "Histogram of read IA segment duration",

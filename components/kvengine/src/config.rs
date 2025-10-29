@@ -92,6 +92,10 @@ pub struct Config {
     /// concurrency per core for loading dfs files.
     pub dfs_load_concurrency_per_core: usize,
 
+    /// Memory ratio for dfs file loading (0.0-1.0), used to calculate
+    /// memory limit for file loading based on system memory.
+    pub dfs_load_memory_ratio: f64,
+
     /// Open-file cache TTL (seconds).
     /// Controls how long an idle opened file (FD) is kept in the
     /// kvengine file cache to avoid reopen overhead; once a file is idle
@@ -135,6 +139,8 @@ impl Default for Config {
             txn_file_worker_pool_size: None,
             // 8GB memory per core, 64 * 16MB files consumes 1GB at max.
             dfs_load_concurrency_per_core: 64,
+            // Default memory ratio: 25% of system memory
+            dfs_load_memory_ratio: 0.25,
             checksum_type: ChecksumType::Crc32,
             block_cache_type: BlockCacheType::Moka,
             blob_table_build_options: Default::default(),

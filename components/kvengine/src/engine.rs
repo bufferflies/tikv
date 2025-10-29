@@ -33,6 +33,8 @@ use tikv_util::{
 use txn_chunk_manager::with_pool_size;
 use txn_types::ClusterGcStates;
 
+#[cfg(test)]
+use crate::table::ChecksumType;
 use crate::{
     apply::ChangeSet,
     config::PerKeyspaceConfig,
@@ -133,7 +135,7 @@ impl Engine {
         let ia_ctx = create_ia_ctx(opts.clone(), fs.clone());
         let (metas, files_in_blacklist) =
             tikv_util::init_task_local_sync(|| EngineCore::read_meta(meta_iter))?;
-        let dfs_load_limiter = DfsLoadLimiter::new(&config);
+        let dfs_load_limiter = DfsLoadLimiter::new(&config, &opts);
         let encryption_key_manager = Arc::new(EncryptionKeyManager::new());
         let core = EngineCore {
             engine_id: AtomicU64::new(meta_iter.engine_id()),
@@ -360,6 +362,115 @@ impl Drop for EngineCore {
 }
 
 impl EngineCore {
+    #[cfg(test)]
+    #[allow(unused)]
+    pub(crate) fn new_for_test(
+        fs: Arc<dyn dfs::Dfs>,
+        dfs_load_limiter: DfsLoadLimiter,
+        opts: Arc<Options>,
+    ) -> Self {
+        // Simplest possible IdAllocator for testing
+        struct TestIdAllocator;
+
+        #[async_trait::async_trait]
+        impl IdAllocator for TestIdAllocator {
+            fn alloc_id(&self, count: usize) -> Result<Vec<u64>> {
+                Ok(vec![0; count]) // Just return zeros
+            }
+
+            async fn alloc_id_async(&self, count: usize) -> Result<Vec<u64>> {
+                Ok(vec![0; count]) // Just return zeros
+            }
+        }
+
+        // For testing, we'll create a minimal EngineCore with only the fields needed
+        // for load_tables_by_ids Most fields will be initialized with dummy
+        // values or defaults
+        let (flush_tx, _) = mpsc::unbounded();
+        let (compact_tx, _) = mpsc::unbounded();
+        let (free_tx, _) = mpsc::unbounded();
+
+        // Create minimal components with default/dummy values for testing
+        let cache = BlockCache::new(
+            crate::table::sstable::BlockCacheType::Moka,
+            opts.max_block_cache_size as u64,
+            opts.table_builder_options.block_size,
+        );
+
+        let file_locks = (0..FILE_LOCK_SLOTS).map(|_| Mutex::new(())).collect();
+
+        // Create a dummy CompactionClient for testing
+        let test_id_allocator = Arc::new(TestIdAllocator);
+        let test_master_key = MasterKey::new(&[1u8; 32]);
+        let encryption_key_manager = Arc::new(EncryptionKeyManager::new());
+
+        // Use the provided encryption key manager
+        let test_security_mgr = Arc::new(SecurityManager::default());
+
+        // Clone values before moving them into the struct
+        let local_dir = opts.local_dir.clone();
+        let local_dir_clone = local_dir.clone();
+        let fs_clone_1 = fs.clone();
+        let fs_clone_2 = fs.clone();
+        let cache_clone = cache.clone();
+        let txn_file_worker_pool_size = opts.txn_file_worker_pool_size;
+
+        let comp_client = CompactionClient::new(
+            fs_clone_1,
+            "".to_string(),
+            1,
+            ChecksumType::Crc32,
+            true, // allow_fallback_local
+            test_id_allocator.clone(),
+            test_master_key.clone(),
+            encryption_key_manager.clone(),
+            test_security_mgr,
+            local_dir,
+            false, // for_restore
+        );
+
+        Self {
+            engine_id: AtomicU64::new(1),
+            shards: DashMap::new(),
+            keyspace_shards: DashMap::new(),
+            opts,
+            per_keyspace_configs: Arc::new(HashMap::new()),
+            flush_tx,
+            compact_tx,
+            fs,
+            cache,
+            comp_client,
+            id_allocator: test_id_allocator,
+            rate_limiter: Arc::new(IoRateLimiter::new_for_test()),
+            store_limiter: Arc::new(StoreLimiter::dummy()),
+            free_tx,
+            loaded: AtomicBool::new(false),
+            file_locks,
+            shutting_down: AtomicBool::new(false),
+            cluster_gc_states: RollingRetriever::new_with(|| {
+                Arc::new(ClusterGcStates::new(
+                    HashMap::default(),
+                    tikv_util::time::Instant::now(),
+                ))
+            }),
+            master_key: test_master_key,
+            encryption_key_manager,
+            txn_chunk_mgr: TxnChunkManager::new(
+                Some(local_dir_clone.join("txn")),
+                fs_clone_2,
+                cache_clone,
+                with_pool_size(txn_file_worker_pool_size),
+                TxnChunkManagerConfig::default(),
+            ),
+            ia_ctx: IaCtx::Disabled,
+            files_in_blacklist: Arc::new(HashSet::default()),
+            schema_files: Arc::new(DashMap::new()),
+            dfs_load_limiter,
+            available_space_bytes: AtomicU64::new(1024 * 1024 * 1024), // 1GB
+            worker_handles: Mutex::new(Vec::new()),
+        }
+    }
+
     pub fn set_engine_id(&self, engine_id: u64) {
         self.engine_id.store(engine_id, Ordering::Release);
     }

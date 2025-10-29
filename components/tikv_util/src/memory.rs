@@ -237,6 +237,10 @@ impl MemoryLimiter {
     pub fn used(&self) -> u64 {
         self.used.load(Ordering::Relaxed)
     }
+
+    pub fn capacity(&self) -> u64 {
+        self.cap
+    }
 }
 
 pub struct MemoryLimiterGuard {

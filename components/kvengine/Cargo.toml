@@ -12,6 +12,7 @@ protobuf-codec = ["protobuf/bytes"]
 testexport = []
 is_sync = ["maybe-async/is_sync"]
 is_async = ["maybe-async/is_async"]
+failpoints = ["fail/failpoints"]
 
 debug-trace-ia-segments = []
 debug-trace-mem-table = []

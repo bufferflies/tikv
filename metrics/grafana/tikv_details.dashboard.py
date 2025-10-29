@@ -5044,6 +5044,14 @@ def KvEngine() -> RowPanel:
                     ),
                     target(
                         expr=expr_max(
+                            "kv_engine_dfs_load_memory_usage_bytes",
+                            by_labels=[],  # instance-level
+                        ),
+                        legend_format="dfs_load",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_max(
                             "kv_engine_ia_manager_segments_memory_size",
                             by_labels=[],  # override default by instance.
                         ),
@@ -5367,6 +5375,17 @@ def KvEngine() -> RowPanel:
                 description="The duration of DFS operations including retry times in ms",
                 yaxes=yaxes(left_format=UNITS.SECONDS, log_base=2),
                 metric="kv_engine_dfs_latency_with_retry_seconds",
+                hide_count=True,
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel_histogram_quantiles(
+                title="DFS Load Memory Wait Duration",
+                description="Wait duration when acquiring DFS load memory (only recorded when memory is not immediately available)",
+                yaxes=yaxes(left_format=UNITS.SECONDS, log_base=2),
+                metric="kv_engine_dfs_load_memory_wait_duration_seconds",
                 hide_count=True,
             ),
         ]

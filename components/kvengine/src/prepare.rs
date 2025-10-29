@@ -22,7 +22,7 @@ use file_system::IoType;
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use protobuf::Message;
 use schema::schema::StorageClass;
-use tikv_util::{mpsc::Receiver, time::Instant};
+use tikv_util::{memory::MemoryLimiterGuard, mpsc::Receiver, time::Instant};
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::{
@@ -382,6 +382,25 @@ impl EngineCore {
             let dfs_load_limiter = self.dfs_load_limiter.clone();
             runtime.spawn(async move {
                 let permit = dfs_load_limiter.acquire_permit().await;
+
+                // 1) First match: create memory guard only for IaCtx::Disabled
+                let memory_guard = match &ia_ctx {
+                    IaCtx::Disabled => {
+                        match fs.size(id, opts.with_type(fm.file_type)).await {
+                            Ok(total) => {
+                                let guard = dfs_load_limiter.acquire_memory_blocking(total).await;
+                                Some(guard)
+                            }
+                            Err(err) => {
+                                warn!("failed to head file size, fallback to post-read accounting"; "file_id" => id, "err" => ?err);
+                                None
+                            }
+                        }
+                    }
+                    IaCtx::Enabled(_, _) => None,
+                };
+
+                // 2) Second match: actually read the file (keeps original read branches)
                 let res = match ia_ctx {
                     IaCtx::Disabled => fs
                         .read_file(id, opts.with_type(fm.file_type))
@@ -399,8 +418,12 @@ impl EngineCore {
                             .map(|data| (data, Some((ia_mgr, data_dir))))
                     }
                 };
+
                 metrics::ENGINE_PREPARE_LOAD_REMOTE_FILE.inc();
-                let _ = tx.send(res.map(|(data, ia_mgr)| (id, fm, data, ia_mgr, permit)));
+                let result = res.map(|(data, ia_mgr)| (id, fm, data, ia_mgr, permit, memory_guard));
+                let _ = tx.send(result);
+                // memory_guard will be passed to recv_file_data and released
+                // after file processing
             });
             if msg_count < LOAD_FILE_CONCURRENCY {
                 msg_count += 1;
@@ -425,11 +448,14 @@ impl EngineCore {
                 Bytes,
                 Option<(IaManager, Arc<PathBuf>)>,
                 OwnedSemaphorePermit,
+                Option<MemoryLimiterGuard>,
             )>,
         >,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<()> {
-        let (id, meta, data, ia_ctx, _permit) = result_tx.recv().unwrap()?;
+        let (id, meta, data, ia_ctx, _permit, _memory_guard) = result_tx.recv().unwrap()?;
+        fail_point!("doing_recv_file_data");
+        fail_point!("return_recv_file_data", |_| { Ok(()) });
         let data_len = data.len();
         let file = if let Some((ia_mgr, data_dir)) = ia_ctx {
             let meta_file_path = table_meta_file_local_path(id, meta.file_type, data_dir.deref());
@@ -446,6 +472,9 @@ impl EngineCore {
         ENGINE_LEVEL_WRITE_VEC
             .with_label_values(&[&meta.get_level().to_string()])
             .inc_by(data_len as u64);
+
+        // _memory_guard will be dropped here, releasing the memory after file
+        // processing is complete
         Ok(())
     }
 
@@ -786,5 +815,184 @@ fn validate_table_meta_off(tag: ShardTag, id: u64, fm: &FileMeta, data: Bytes) -
             Ok(data)
         }
         _ => Ok(data),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "failpoints")]
+    use std::{sync::Arc, time::Duration};
+
+    use bytes::Bytes;
+    #[cfg(feature = "failpoints")]
+    use tempfile::TempDir;
+
+    use super::*;
+    #[cfg(feature = "failpoints")]
+    use crate::limiter::DfsLoadLimiter;
+
+    /// Test load_tables_by_ids with memory limiter using 2 concurrent threads
+    /// This test verifies that memory limiter works correctly when multiple
+    /// threads concurrently call load_tables_by_ids
+    /// - 2KB memory cap
+    /// - 2KB files with 1s sleep per file
+    /// - 2 threads concurrently executing load_tables_by_ids, 2 files per
+    ///   thread
+    /// - Should take at least 2s due to memory limitation
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn test_load_tables_by_ids_memory_limiter() {
+        fail::cfg("doing_recv_file_data", "sleep(500)").unwrap();
+        fail::cfg("return_recv_file_data", "return").unwrap();
+
+        // Create a temporary directory for the test
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create mock components with very small memory limit
+        let config = KvEngineConfig {
+            dfs_load_memory_ratio: 0.25, // Very small ratio to get ~2KB limit
+            ..Default::default()
+        };
+
+        let mut opts = Options::default();
+        opts.local_dir = temp_dir.path().to_path_buf();
+        opts.dfs_load_memory_limit = (config.dfs_load_memory_ratio * 10f64 * 1024f64) as u64; // 2KB memory cap
+
+        let mock_fs = Arc::new(MockDfs::new(2048)); // 2KB files with 1s sleep
+        let dfs_load_limiter = DfsLoadLimiter::new(&config, &opts);
+
+        // Create Arc<Options> that will be held until test ends
+        let opts_arc = Arc::new(opts);
+        // Create EngineCore for testing
+        let engine_core = Arc::new(EngineCore::new_for_test(
+            mock_fs.clone(),
+            dfs_load_limiter,
+            opts_arc,
+        ));
+
+        // Create file metadata for testing - 4 files total, 2 per thread
+        let create_file_meta = |start_id: u64, count: usize| {
+            let mut file_ids = HashMap::new();
+            for i in 0..count {
+                let id = start_id + i as u64;
+                file_ids.insert(
+                    id,
+                    FileMeta {
+                        file_type: FileType::Sst,
+                        table_meta_off: 0,
+                        ..Default::default()
+                    },
+                );
+            }
+            file_ids
+        };
+
+        let file_ids_1 = create_file_meta(1, 2); // Files 1, 2
+        let file_ids_2 = create_file_meta(3, 2); // Files 3, 4
+
+        let start_time = std::time::Instant::now();
+
+        // Helper function to spawn a thread that calls load_tables_by_ids
+        let spawn_loading_thread =
+            |engine_core: Arc<EngineCore>, shard_id: u64, file_ids: HashMap<u64, FileMeta>| {
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(async {
+                        let mut cs = ChangeSet::new(kvenginepb::ChangeSet::default());
+                        let tag =
+                            ShardTag::new(engine_core.get_engine_id(), IdVer::new(shard_id, 1));
+                        engine_core.load_tables_by_ids(
+                            tag, shard_id, 1, // shard_ver
+                            &file_ids, &mut cs, false, // use_direct_io
+                            false, // shard_use_ia
+                            None,  // encryption_key
+                        )
+                    })
+                })
+            };
+
+        // Spawn two concurrent threads
+        let handle1 = spawn_loading_thread(engine_core.clone(), 1, file_ids_1);
+        let handle2 = spawn_loading_thread(engine_core.clone(), 2, file_ids_2);
+
+        // Wait for both threads to complete
+        let result1 = handle1.join().unwrap();
+        let result2 = handle2.join().unwrap();
+        assert!(result1.is_ok(), "result1 is not ok. result1: {:?}", result1);
+        assert!(result2.is_ok(), "result2 is not ok. result2: {:?}", result2);
+
+        let elapsed = start_time.elapsed();
+
+        // Verify memory limiting worked by checking timing
+        // With 2KB memory cap and 2KB files, only 1 file can be loaded at a time
+        // With 4 files total (2 per thread) and 1s sleep per file, it should take at
+        // least 2s because the memory limiter will serialize the file loading
+        // across both threads
+        assert!(
+            elapsed >= Duration::from_secs(2),
+            "Should take at least 2s due to memory limiting and concurrent execution, elapsed: {:?}",
+            elapsed
+        );
+    }
+
+    // Mock DFS implementation for testing
+    struct MockDfs {
+        file_size: usize,
+    }
+
+    impl MockDfs {
+        #[allow(unused)]
+        fn new(file_size: usize) -> Self {
+            Self { file_size }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl dfs::Dfs for MockDfs {
+        async fn size(&self, _file_id: u64, _opts: dfs::Options) -> dfs::Result<u64> {
+            Ok(self.file_size as u64)
+        }
+
+        async fn read_file(&self, _file_id: u64, _opts: dfs::Options) -> dfs::Result<Bytes> {
+            let data = vec![0u8; self.file_size];
+            Ok(Bytes::from(data))
+        }
+
+        async fn exists(&self, _file_id: u64, _opts: dfs::Options) -> dfs::Result<bool> {
+            Ok(true)
+        }
+
+        async fn create(
+            &self,
+            _file_id: u64,
+            _data: Bytes,
+            _opts: dfs::Options,
+        ) -> dfs::Result<()> {
+            Ok(())
+        }
+
+        async fn remove(&self, _file_id: u64, _file_len: Option<u64>, _opts: dfs::Options) {
+            // Mock implementation - just return
+        }
+
+        async fn permanently_remove(&self, _file_id: u64, _opts: dfs::Options) -> dfs::Result<()> {
+            Ok(())
+        }
+
+        fn get_runtime(&self) -> &tokio::runtime::Runtime {
+            // Return a reference to the current runtime
+            // This is a simplified implementation for testing
+            std::thread_local! {
+                static RUNTIME: std::cell::RefCell<Option<tokio::runtime::Runtime>> = std::cell::RefCell::new(None);
+            }
+
+            RUNTIME.with(|rt| {
+                let mut runtime = rt.borrow_mut();
+                if runtime.is_none() {
+                    *runtime = Some(tokio::runtime::Runtime::new().unwrap());
+                }
+                unsafe { &*(runtime.as_ref().unwrap() as *const tokio::runtime::Runtime) }
+            })
+        }
     }
 }

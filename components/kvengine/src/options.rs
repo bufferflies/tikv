@@ -39,6 +39,9 @@ pub struct Options {
 
     pub max_block_cache_size: i64,
 
+    /// Memory limit in bytes for DFS file loading operations.
+    pub dfs_load_memory_limit: u64,
+
     // Number of compaction workers to run concurrently.
     pub num_compactors: usize,
 
@@ -114,6 +117,7 @@ impl Default for Options {
             local_dir: PathBuf::from("/tmp"),
             base_size: 16 << 20,
             max_block_cache_size: 0,
+            dfs_load_memory_limit: 0, // Will be set at runtime based on system memory
             num_compactors: 3,
             table_builder_options: Default::default(),
             blob_table_build_options: Default::default(),

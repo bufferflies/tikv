@@ -1232,6 +1232,11 @@ impl TikvServer {
             None => ((total_mem as f64) * tikv::config::BLOCK_CACHE_RATE) as usize,
             Some(c) => c.0 as usize,
         };
+        let dfs_load_memory_limit = {
+            let ratio = conf.kvengine.dfs_load_memory_ratio;
+            ((total_mem as f64) * ratio) as u64
+        };
+
         kv_opts.local_dir = kv_engine_path;
         kv_opts.num_compactors = conf.rocksdb.max_background_jobs as usize;
         kv_opts.max_mem_table_size = conf.rocksdb.writecf.write_buffer_size.0;
@@ -1246,6 +1251,7 @@ impl TikvServer {
         // size when we increase the region_split_size.
         kv_opts.base_size = (conf.coprocessor.region_split_size.0 / 16).min(32 * 1024 * 1024);
         kv_opts.max_block_cache_size = capacity as i64;
+        kv_opts.dfs_load_memory_limit = dfs_load_memory_limit;
         kv_opts.remote_compactor_addr = conf.dfs.remote_compactor_addr.clone();
         kv_opts.enable_safe_point_v2 = conf.gc.enable_safe_point_v2;
         kv_opts.disable_safe_point_fallback_v1 = conf.gc.disable_safe_point_fallback_v1;
