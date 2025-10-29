@@ -1736,7 +1736,12 @@ impl<'a> PeerMsgHandler<'a> {
         let mut resp = RaftCmdResponse::default();
         // If the peer is not leader or not applied to current term, return not_leader
         // error. The client should sleep and retry.
-        if !self.peer.is_leader() || !self.peer.has_applied_to_current_term() {
+        let is_leader = fail::eval("check_leader_peer_is_leader", |t| {
+            t.and_then(|s: String| s.parse::<bool>().ok())
+        })
+        .flatten()
+        .unwrap_or(self.peer.is_leader());
+        if !is_leader || !self.peer.has_applied_to_current_term() {
             let header = resp.mut_header();
             let error = header.mut_error();
             let not_leader = error.mut_not_leader();
@@ -1747,7 +1752,7 @@ impl<'a> PeerMsgHandler<'a> {
                     not_leader.set_leader(p.clone());
                 }
             }
-        } else if self.region().get_region_epoch().version != shard_ver {
+        } else if shard_ver != 0 && self.region().get_region_epoch().version != shard_ver {
             let header = resp.mut_header();
             let error = header.mut_error();
             let epoch_not_match = error.mut_epoch_not_match();

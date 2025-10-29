@@ -85,6 +85,7 @@ where
         quota_limiter,
         feature_gate,
         causal_ts_provider,
+        None,
     )?;
     Ok(store)
 }

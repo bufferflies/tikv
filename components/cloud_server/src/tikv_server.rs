@@ -696,6 +696,7 @@ impl TikvServer {
             resource_tag_factory.clone(),
             Arc::clone(&self.quota_limiter),
             self.pd_client.feature_gate().clone(),
+            Some(self.router.clone()),
         )
         .unwrap_or_else(|e| fatal!("failed to create raft storage: {}", e));
 

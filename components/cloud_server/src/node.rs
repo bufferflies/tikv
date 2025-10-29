@@ -13,8 +13,12 @@ use raftstore::{
 };
 use resource_control::ResourceController;
 use resource_metering::ResourceTagFactory;
-use rfstore::store::{
-    self, store_fsm::StoreMeta, Config as StoreConfig, Engines, PdTask, RaftBatchSystem, Transport,
+use rfstore::{
+    store::{
+        self, store_fsm::StoreMeta, Config as StoreConfig, Engines, PdTask, RaftBatchSystem,
+        Transport,
+    },
+    RaftRouter,
 };
 use tikv::{
     import::SstImporter,
@@ -50,6 +54,7 @@ pub fn create_raft_storage<R: FlowStatsReporter, F: KvFormat>(
     resource_tag_factory: ResourceTagFactory,
     quota_limiter: Arc<QuotaLimiter>,
     feature_gate: FeatureGate,
+    router: Option<RaftRouter>,
 ) -> Result<Storage<RaftKv, LockManager, F>> {
     let store = Storage::from_engine(
         engine,
@@ -64,6 +69,7 @@ pub fn create_raft_storage<R: FlowStatsReporter, F: KvFormat>(
         quota_limiter,
         feature_gate,
         None,
+        router,
     )?;
     Ok(store)
 }

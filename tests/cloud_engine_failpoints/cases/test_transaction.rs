@@ -83,3 +83,39 @@ fn test_raftkv_early_error_report() {
     );
     fail::remove("raftkv_early_error_report");
 }
+
+#[test]
+fn test_scheduler_shard_is_active() {
+    test_util::init_log_for_test();
+    let nodes = alloc_node_id_vec(3);
+    let cluster = ServerCluster::new(nodes.clone(), |_, _| {});
+    cluster.wait_region_replicated(&[], 3);
+    let mut client = cluster.new_client();
+
+    fail::cfg("check_leader_peer_is_leader", "return(false)").unwrap();
+    fail::cfg("scheduler_shard_is_active", "return(false)").unwrap();
+
+    let mut mutation = Mutation::default();
+    let k1 = i_to_key(1);
+    mutation.set_op(Op::Put);
+    mutation.set_key(k1.clone());
+    mutation.set_value(b"v".to_vec());
+    let primary_key = k1;
+    let start_ts = client.get_ts();
+    let mutations = vec![mutation];
+
+    let prewrite_resp = client
+        .kv_prewrite_single_region_without_retry(
+            primary_key.to_vec().into(),
+            None,
+            TxnMutations::from_normal(mutations.clone()),
+            start_ts,
+        )
+        .unwrap();
+    let err = prewrite_resp.get_region_error();
+    assert!(err.has_not_leader(), "{:?}", err);
+    assert!(err.get_not_leader().has_leader(), "{:?}", err);
+    assert!(err.get_not_leader().get_leader().get_id() > 0);
+    fail::remove("scheduler_shard_is_active");
+    fail::remove("check_leader_peer_is_leader");
+}

@@ -43,16 +43,22 @@ use engine_traits::{CF_DEFAULT, CF_LOCK, CF_WRITE};
 use futures::{compat::Future01CompatExt, StreamExt};
 use kvproto::{
     kvrpcpb::{self, CommandPri, Context, DiskFullOpt, ExtraOp},
+    metapb,
     pdpb::QueryKind,
 };
 use parking_lot::{Mutex, MutexGuard, RwLockWriteGuard};
 use pd_client::{Feature, FeatureGate};
 use raftstore::store::{FlowStatsReporter, TxnExt};
 use resource_metering::{FutureExt, ResourceTagFactory};
+use rfstore::{
+    store::{Callback, CasualMessage},
+    RaftRouter, RaftStoreRouter,
+};
 use smallvec::{smallvec, SmallVec};
 use tikv_kv::{Modify, Snapshot, SnapshotExt, WriteData, WriteEvent};
 use tikv_util::{
     deadline::Deadline,
+    future::paired_future_callback,
     quota_limiter::QuotaLimiter,
     sys::thread::ThreadBuildWrapper,
     time::{duration_to_sec, Instant},
@@ -295,6 +301,8 @@ struct SchedulerInner<L: LockManager> {
 
     quota_limiter: Arc<QuotaLimiter>,
     feature_gate: FeatureGate,
+
+    router: Option<RaftRouter>,
 }
 
 #[inline]
@@ -457,6 +465,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         quota_limiter: Arc<QuotaLimiter>,
         feature_gate: FeatureGate,
         read_pool_handle: ReadPoolHandle,
+        router: Option<RaftRouter>,
     ) -> Self {
         let t = Instant::now_coarse();
         let mut task_slots = Vec::with_capacity(TASKS_SLOTS_NUM);
@@ -506,6 +515,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             lock_wait_queues,
             quota_limiter,
             feature_gate,
+            router,
         });
 
         slow_log!(
@@ -523,20 +533,79 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     }
 
     pub(in crate::storage) fn run_cmd(&self, cmd: Command, callback: StorageCallback) {
+        let region_id = cmd.ctx().get_region_id();
         // write flow control
-        if cmd.need_flow_control() && self.inner.too_busy(cmd.ctx().region_id) {
+        if cmd.need_flow_control() && self.inner.too_busy(region_id) {
             SCHED_TOO_BUSY_COUNTER_VEC.get(cmd.tag()).inc();
             callback.execute(ProcessResult::Failed {
                 err: StorageError::from(StorageErrorInner::SchedTooBusy),
             });
             return;
         }
+
+        // Workaround for the issue that the pending command is keep increasing, when
+        // there is no leader in raft group.
+        if let Some(kvengine) = self.inner.engine.as_ref() {
+            let shard_is_active = kvengine
+                .get_shard(region_id)
+                .map(|shard| shard.is_active())
+                .unwrap_or(false);
+            let is_active = fail::eval("scheduler_shard_is_active", |t| {
+                t.and_then(|s: String| s.parse::<bool>().ok())
+            })
+            .flatten()
+            .unwrap_or(shard_is_active);
+            if !is_active {
+                SCHED_STAGE_COUNTER_VEC.get(cmd.tag()).error.inc();
+                let scheduler = self.clone();
+                self.inner.spawn_background(async move {
+                    let leader = scheduler.check_leader(region_id).await;
+                    let mut not_leader_err = kvproto::errorpb::Error::default();
+                    not_leader_err.mut_not_leader().set_region_id(region_id);
+                    if let Some(leader) = leader {
+                        not_leader_err.mut_not_leader().set_leader(leader);
+                    }
+                    callback.execute(ProcessResult::Failed {
+                        err: StorageError::from(StorageErrorInner::Kv(kv::Error::from(
+                            kv::ErrorInner::Request(not_leader_err),
+                        ))),
+                    });
+                });
+                return;
+            }
+        }
+
         self.schedule_command(
             None,
             cmd,
             SchedulerTaskCallback::NormalRequestCallback(callback),
             None,
         );
+    }
+
+    async fn check_leader(self, region_id: u64) -> Option<metapb::Peer> {
+        if let Some(router) = self.inner.router.as_ref() {
+            let (cb, fut) = paired_future_callback();
+            let callback = Callback::Read(Box::new(move |res| {
+                cb(res);
+            }));
+            router.send_casual_msg(
+                region_id,
+                CasualMessage::CheckLeader {
+                    shard_ver: 0,
+                    callback,
+                },
+            );
+
+            if let Ok(res) = fut.await {
+                let mut res = res;
+                let mut err = res.response.take_header().take_error();
+                if err.has_not_leader() && err.get_not_leader().has_leader() {
+                    return Some(err.take_not_leader().take_leader());
+                }
+            }
+        }
+        None
     }
 
     /// Releases all the latches held by a command.
@@ -2076,6 +2145,7 @@ mod tests {
                 Arc::new(QuotaLimiter::default()),
                 latest_feature_gate(),
                 new_read_pool_handle(engine.clone()),
+                None,
             ),
             engine,
         )
@@ -2247,6 +2317,7 @@ mod tests {
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
             read_pool,
+            None,
         );
 
         let mut lock = Lock::new(0, &[Key::from_raw(b"b")], None);
@@ -2355,6 +2426,7 @@ mod tests {
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
             read_pool,
+            None,
         );
 
         // Spawn a task that sleeps for 500ms to occupy the pool. The next request
@@ -2421,6 +2493,7 @@ mod tests {
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
             read_pool,
+            None,
         );
 
         let mut req = CheckTxnStatusRequest::default();
@@ -2491,6 +2564,7 @@ mod tests {
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
             read_pool,
+            None,
         );
 
         let mut lock = Lock::new(0, &[Key::from_raw(b"b")], None);
@@ -2556,6 +2630,7 @@ mod tests {
             Arc::new(QuotaLimiter::default()),
             feature_gate.clone(),
             read_pool,
+            None,
         );
         // Use sync mode if pipelined_pessimistic_lock is false.
         assert_eq!(scheduler.pessimistic_lock_mode(), PessimisticLockMode::Sync);
