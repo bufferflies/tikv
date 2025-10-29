@@ -455,11 +455,14 @@ fn test_columnar_major_compaction() {
 
     let ok = try_wait(|| shard.compaction_priority.read().unwrap().is_none(), 5);
     assert!(ok, "wait other compaction failed");
+    assert!(shard.get_data().schema_file.is_some());
 
     // Remove columnar compaction.
     let data = shard.get_data();
-    shard.set_data(ShardDataBuilder::new(data).build());
-    *shard.compaction_priority.write().unwrap() = Some(CompactionPriority::ColumnarClear);
+    let mut builder = ShardDataBuilder::new(data);
+    // Remove schema file to avoid columnar major compaction to be re-triggered.
+    builder.set_schema(0, 0, None);
+    shard.set_data(builder.build());
     engine.trigger_compact(id_ver);
     info!("trigger remove columnar compaction {}", shard.tag());
     let ok = try_wait(
@@ -477,7 +480,6 @@ fn test_columnar_major_compaction() {
     );
     assert!(ok);
     assert_eq!(shard.get_columnar_snap_version(), SnapVersion::zero());
-    assert!(shard.get_data().schema_file.is_some());
 }
 
 #[test]
