@@ -980,7 +980,9 @@ fn test_region_merge_with_unconverted_l0() {
         }
     });
 
-    client.try_merge(&gen_row_key(keyspace_id, table_id, 0), &split_key);
+    let merged = client.try_merge_and_wait(&gen_row_key(keyspace_id, table_id, 0), &split_key, 10);
+    assert!(merged, "failed to merge region");
+
     client.put_kv(
         300..400,
         |i: usize| gen_row_key(keyspace_id, table_id, i),
