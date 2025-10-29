@@ -82,7 +82,7 @@ use tikv_util::{
     http::{HeaderExt, CONTENT_TYPE_PROTOBUF},
     logger::set_log_level,
     metrics::{dump, dump_to},
-    spawn_anonymous_thread_with,
+    shutdown_runtimes, spawn_anonymous_thread_with,
     sys::thread::{StdThreadBuildWrapper, ThreadBuildWrapper},
     timer::GLOBAL_TIMER_HANDLE,
     GLOBAL_SERVER_READINESS,
@@ -2018,21 +2018,11 @@ impl StatusServer {
     }
 
     pub fn stop(self) {
-        let timeout = Duration::from_secs(3);
         let _ = self.tx.send(());
-        self.thread_pool.shutdown_timeout(timeout);
+        self.thread_pool.shutdown_timeout(Duration::from_secs(3));
         // SAFETY: won't access s3fs pool after stopped.
         let s3fs_pool = self.s3fs_pool.unwrap();
-        let ts = Instant::now();
-        while ts.elapsed() <= timeout {
-            let s3fs_pool = s3fs_pool.clone();
-            if let Some(runtime) = Arc::into_inner(s3fs_pool) {
-                // The final referee could shutdown all background tasks.
-                runtime.shutdown_background();
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
+        shutdown_runtimes!(self.hyper_pool, s3fs_pool);
     }
 
     // Return listening address, this may only be used for outer test
@@ -2435,10 +2425,7 @@ impl StatusServer {
                 let _ = rx.await;
             })
             .map_err(|e| error!("Status server error: {:?}", e));
-        let hyper_pool = self.hyper_pool.clone();
-        spawn_anonymous_thread_with!(move || {
-            let _ = hyper_pool.block_on(graceful);
-        });
+        self.thread_pool.spawn(graceful);
     }
 
     pub fn start(&mut self, status_addr: String) -> Result<()> {

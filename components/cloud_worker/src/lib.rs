@@ -58,6 +58,7 @@ use tikv_util::{
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     memory::MemoryLimiter,
     quota_limiter::QuotaLimiter,
+    shutdown_runtimes,
     sys::{
         record_global_memory_usage,
         thread::{StdThreadBuildWrapper, ThreadBuildWrapper},
@@ -157,10 +158,8 @@ pub fn run_cloud_worker(config: Config, config_file_path: Option<PathBuf>, pd: A
             _ = close_rx => {}
         }
     });
-    if let Some(thd_pool_rt) = Arc::into_inner(thread_pool) {
-        // The final referee could shutdown all background tasks.
-        thd_pool_rt.shutdown_background();
-    }
+    // Final shutdown sequence for all background tasks (centralized macro)
+    shutdown_runtimes!(hyper_runtime, thread_pool);
 }
 
 // `config_file_path`: optional path to the config file which cloud_worker will
@@ -614,6 +613,8 @@ impl CloudWorker {
             self.notify.notify_waiters();
             handle.join().unwrap();
         }
+        // Final shutdown sequence for all background tasks (centralized macro)
+        shutdown_runtimes!(self.hyper_runtime, self.thread_pool);
     }
 }
 

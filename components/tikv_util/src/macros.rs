@@ -192,6 +192,20 @@ macro_rules! txn_debug {
     };
 }
 
+/// Macro to consume Arc runtimes and call shutdown_background() if the Arc
+/// is uniquely owned. Usage:
+/// shutdown_runtimes!(arc_rt1, arc_rt2, ...);
+#[macro_export]
+macro_rules! shutdown_runtimes {
+    ($($rt:expr),+ $(,)?) => {
+        $(
+            if let Some(rt) = std::sync::Arc::into_inner($rt) {
+                rt.shutdown_background();
+            }
+        )+
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
