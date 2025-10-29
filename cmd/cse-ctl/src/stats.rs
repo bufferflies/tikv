@@ -13,7 +13,8 @@ use bytes::Buf;
 use chrono::DateTime;
 use clap::Args;
 use kvengine::dfs::{
-    DFSConfig, Dfs, FileType, S3Fs, STORAGE_CLASS_GLACIER_IR, STORAGE_CLASS_INTELLIGENT_TIERING,
+    DFSConfig, Dfs, FileType, S3Fs, OSS_STORAGE_CLASS_ARCHIVE, OSS_STORAGE_CLASS_IA,
+    OSS_STORAGE_CLASS_STANDARD, STORAGE_CLASS_GLACIER_IR, STORAGE_CLASS_INTELLIGENT_TIERING,
     STORAGE_CLASS_STANDARD, STORAGE_CLASS_STANDARD_IA,
 };
 use kvproto::metapb::Store;
@@ -465,6 +466,9 @@ impl StatsWorker {
                     STORAGE_CLASS_STANDARD => stats.standard_stat.add(duration, size),
                     STORAGE_CLASS_STANDARD_IA => stats.standard_ia_stat.add(duration, size),
                     STORAGE_CLASS_GLACIER_IR => stats.glacier_ir_stat.add(duration, size),
+                    OSS_STORAGE_CLASS_STANDARD => stats.standard_stat.add(duration, size),
+                    OSS_STORAGE_CLASS_IA => stats.standard_ia_stat.add(duration, size),
+                    OSS_STORAGE_CLASS_ARCHIVE => stats.glacier_ir_stat.add(duration, size),
                     _ => {}
                 };
                 if obj.key.ends_with(".wal") || obj.key.ends_with(".wal.last") {

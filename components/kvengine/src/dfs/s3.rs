@@ -42,12 +42,44 @@ pub const STORAGE_CLASS_DEFAULT: &str = STORAGE_CLASS_INTELLIGENT_TIERING;
 pub const STORAGE_CLASS_INTELLIGENT_TIERING: &str = "INTELLIGENT_TIERING";
 pub const STORAGE_CLASS_STANDARD: &str = "STANDARD";
 pub const STORAGE_CLASS_STANDARD_IA: &str = "STANDARD_IA";
-pub const STORAGE_CLASS_GLACIER: &str = "GLACIER";
 pub const STORAGE_CLASS_GLACIER_IR: &str = "GLACIER_IR";
 
-const AWS_DOMAIN_STRING: &str = "amazonaws";
+// In Amazon S3, the Standard storage class is referred to as STANDARD, the
+// Infrequent Access (IA) storage class is referred to as STANDARD_IA, and the
+// Archive storage class is referred to as GLACIER. You can convert the storage
+// class of OSS objects based on your requirements.
+// ref: https://www.alibabacloud.com/help/en/oss/developer-reference/compatibility-with-amazon-s3
+// and https://www.alibabacloud.com/help/en/oss/user-guide/overview-53/
+pub const OSS_STORAGE_CLASS_DEFAULT: &str = OSS_STORAGE_CLASS_STANDARD;
+pub const OSS_STORAGE_CLASS_STANDARD: &str = "Standard";
+pub const OSS_STORAGE_CLASS_IA: &str = "IA";
+pub const OSS_STORAGE_CLASS_ARCHIVE: &str = "Archive";
+
+const AWS_DOMAIN_STRING: &str = "amazonaws.com";
 
 const SMALL_FILE_THRESHOLD_BYTES: u64 = 1024 * 1024; // 1MB
+
+/// Supported S3-compatible or cloud object storage providers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudProvider {
+    Aws,
+    Aliyun,
+    Unknown,
+}
+
+impl CloudProvider {
+    /// Try to infer the cloud provider based on the endpoint.
+    pub fn from_endpoint(endpoint: &str) -> Self {
+        let lower = endpoint.to_ascii_lowercase();
+        if lower.contains(AWS_DOMAIN_STRING) {
+            CloudProvider::Aws
+        } else if lower.contains(aliyun::DOMAIN_STRING) {
+            CloudProvider::Aliyun
+        } else {
+            CloudProvider::Unknown
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct S3Fs {
@@ -115,6 +147,7 @@ pub struct S3FsCore {
     bucket: String,
     prefix: String,
     runtime: Option<tokio::runtime::Runtime>,
+    provider: CloudProvider,
     virtual_host: bool,
     opts: ConnOptions,
     read_only: bool, // For safety when used for recovery.
@@ -197,6 +230,7 @@ impl S3FsCore {
             .find("://")
             .map(|p| &endpoint[p + 3..])
             .unwrap_or(&endpoint);
+        let provider = CloudProvider::from_endpoint(&endpoint);
         // local deployed s3 service like minio does not support virtual host
         // addressing, it always has a port defined at the end.
         let virtual_host = !no_schema_endpoint.contains(':');
@@ -216,6 +250,7 @@ impl S3FsCore {
             bucket,
             prefix,
             runtime: Some(runtime),
+            provider,
             virtual_host,
             opts: options,
             read_only,
@@ -251,11 +286,54 @@ impl S3FsCore {
     }
 
     pub fn is_on_aws(&self) -> bool {
-        self.hostname.contains(AWS_DOMAIN_STRING)
+        self.provider == CloudProvider::Aws
     }
 
     pub fn is_on_aliyun(&self) -> bool {
-        self.hostname.contains(aliyun::DOMAIN_STRING)
+        self.provider == CloudProvider::Aliyun
+    }
+
+    // alibaba cloud only support "Standard", "IA" and "Archive"
+    // unknown storage class will be treated as "Standard"
+    // ref: https://www.alibabacloud.com/help/en/oss/developer-reference/compatibility-with-amazon-s3
+    pub fn storage_class_default(&self) -> &'static str {
+        if self.is_on_aliyun() {
+            OSS_STORAGE_CLASS_DEFAULT
+        } else {
+            STORAGE_CLASS_DEFAULT
+        }
+    }
+
+    pub fn storage_class_intelligent_tiering(&self) -> &'static str {
+        if self.is_on_aliyun() {
+            OSS_STORAGE_CLASS_DEFAULT
+        } else {
+            STORAGE_CLASS_INTELLIGENT_TIERING
+        }
+    }
+
+    pub fn storage_class_standard(&self) -> &'static str {
+        if self.is_on_aliyun() {
+            OSS_STORAGE_CLASS_STANDARD
+        } else {
+            STORAGE_CLASS_STANDARD
+        }
+    }
+
+    pub fn storage_class_standard_ia(&self) -> &'static str {
+        if self.is_on_aliyun() {
+            OSS_STORAGE_CLASS_IA
+        } else {
+            STORAGE_CLASS_STANDARD_IA
+        }
+    }
+
+    pub fn storage_class_glacier_ir(&self) -> &'static str {
+        if self.is_on_aliyun() {
+            OSS_STORAGE_CLASS_ARCHIVE
+        } else {
+            STORAGE_CLASS_GLACIER_IR
+        }
     }
 
     // parse the sst file's suffix with format {idx}/{file_id}.sst
@@ -956,7 +1034,7 @@ impl S3FsCore {
                 file_key,
                 file_key,
                 Some(&empty_tagging),
-                Some(STORAGE_CLASS_DEFAULT),
+                Some(self.storage_class_default()),
             )
             .await?;
         }
@@ -968,9 +1046,9 @@ impl S3FsCore {
         // STORAGE_CLASS_STANDARD_IA is more cost efficient than STORAGE_CLASS_STANDARD
         // for NOT small files.
         if file_len.is_some() && file_len.unwrap() > SMALL_FILE_THRESHOLD_BYTES {
-            STORAGE_CLASS_STANDARD_IA
+            self.storage_class_standard_ia()
         } else {
-            STORAGE_CLASS_DEFAULT
+            self.storage_class_default()
         }
     }
 }
@@ -993,13 +1071,14 @@ impl ObjectStorage for S3Fs {
             } else {
                 None
             };
+            let storage_class_default = self.storage_class_default();
             async move {
                 fs.put_object_with_options(
                     full_key,
                     data,
                     key.clone(),
                     None,
-                    Some(STORAGE_CLASS_INTELLIGENT_TIERING),
+                    Some(storage_class_default),
                     checksum,
                 )
                 .await
@@ -1122,7 +1201,7 @@ impl Dfs for S3Fs {
             data,
             format!("{}.{}", file_id, opts.file_type.suffix()),
             None,
-            Some(STORAGE_CLASS_INTELLIGENT_TIERING),
+            Some(self.storage_class_default()),
             checksum,
         )
         .await
@@ -1135,7 +1214,7 @@ impl Dfs for S3Fs {
         // Only AWS supports storage class.
         let target_storage_class = if self.is_on_aws() || self.is_on_aliyun() {
             let new_storage_class = self.choose_storage_class_for_removed_files(file_len);
-            (new_storage_class != STORAGE_CLASS_DEFAULT).then_some(new_storage_class)
+            (new_storage_class != self.storage_class_default()).then_some(new_storage_class)
         } else {
             None
         };

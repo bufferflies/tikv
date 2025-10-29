@@ -491,6 +491,7 @@ impl GcWorker {
 
     fn is_storage_class_for_remove(storage_class: &str) -> bool {
         storage_class == dfs::STORAGE_CLASS_STANDARD_IA
+            || storage_class == dfs::OSS_STORAGE_CLASS_IA
     }
 
     async fn is_file_removed(&self, s3_obj: &S3Object) -> Result<bool> {
