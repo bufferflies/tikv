@@ -411,6 +411,7 @@ pub struct PdRunner {
     kv: kvengine::Engine,
     raft_cpu_collector: CpuUtilCollector,
     transfer_leader_limiter: TransferLeaderLimiter,
+    skip_storage_size_metrics_threshold: u64,
 }
 
 const HOTSPOT_KEY_RATE_THRESHOLD: u64 = 128;
@@ -455,6 +456,7 @@ impl PdRunner {
         kv: kvengine::Engine,
         raft_cpu_collector: CpuUtilCollector,
         transfer_leader_limiter: TransferLeaderLimiter,
+        skip_storage_size_metrics_threshold: u64,
     ) -> PdRunner {
         // TODO(x): support stats monitor.
         let cluster_id = pd_client.get_cluster_id().unwrap();
@@ -476,6 +478,7 @@ impl PdRunner {
             kv,
             raft_cpu_collector,
             transfer_leader_limiter,
+            skip_storage_size_metrics_threshold,
         }
     }
 
@@ -606,6 +609,7 @@ impl PdRunner {
         peer: metapb::Peer,
         region_stat: RegionStat,
         replication_status: Option<RegionReplicationStatus>,
+        skip_storage_size_metric: bool,
     ) {
         self.store_stat
             .region_bytes_written
@@ -673,12 +677,16 @@ impl PdRunner {
             None
         };
         let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(region.get_start_key());
-        PdRunner::set_storage_size_metric(
-            region.id,
-            keyspace_id,
-            Some(region_stat.approximate_kv_size),
-            columnar_kv_size,
-        );
+        if !skip_storage_size_metric {
+            PdRunner::set_storage_size_metric(
+                region.id,
+                keyspace_id,
+                Some(region_stat.approximate_kv_size),
+                columnar_kv_size,
+            );
+        } else {
+            PdRunner::set_storage_size_metric(region.id, keyspace_id, None, None);
+        }
 
         let changed = self
             .region_map
@@ -1564,6 +1572,16 @@ impl Runnable for PdRunner {
                         query_stats.0,
                     )
                 };
+                let skip_storage_size_metric =
+                    if hb_task.approximate_kv_size < self.skip_storage_size_metrics_threshold {
+                        let raw_start = decode_bytes(&mut hb_task.region.get_start_key(), false)
+                            .unwrap_or_default();
+                        let raw_end = decode_bytes(&mut hb_task.region.get_end_key(), false)
+                            .unwrap_or_default();
+                        is_whole_keyspace_range(&raw_start, &raw_end)
+                    } else {
+                        false
+                    };
                 self.handle_heartbeat(
                     hb_task.term,
                     hb_task.region,
@@ -1585,6 +1603,7 @@ impl Runnable for PdRunner {
                         cpu_usage: 0,
                     },
                     hb_task.replication_status,
+                    skip_storage_size_metric,
                 );
                 if let Some(bucket_stat) = hb_task.bucket_stat {
                     self.handle_report_region_buckets(bucket_stat);

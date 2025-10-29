@@ -197,6 +197,7 @@ impl RaftBatchSystem {
             ctx.engines.kv.clone(),
             raft_cpu_util_collector,
             resource_controller.get_transfer_leader_limiter().unwrap(),
+            ctx.cfg.value().skip_storage_size_metrics_threshold.0,
         );
         assert!(workers.pd_worker.start(pd_runner));
         self.workers = Some(workers);

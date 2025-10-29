@@ -271,6 +271,7 @@ fn test_serde_custom_tikv_config() {
         kv_engine_meta_diff_rewrite_percent: 20,
         raft_worker_max_batch_size: ReadableSize::mb(1),
         io_worker_min_write_duration: ReadableDuration::millis(1),
+        skip_store_size_metrics_threshold: ReadableSize::mb(50),
     };
     value.pd = PdConfig::new(vec!["example.com:443".to_owned()]);
     let titan_cf_config = TitanCfConfig {

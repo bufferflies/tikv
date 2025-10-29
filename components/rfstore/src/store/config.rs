@@ -135,6 +135,9 @@ pub struct Config {
     // The minimum duration for IO worker to write data.
     // This is used to avoid too frequent writes to avoid write amplification.
     pub io_worker_min_write_duration: ReadableDuration,
+
+    // When the storage size of a whole keyspace is smaller than this value, skip reporting.
+    pub skip_storage_size_metrics_threshold: ReadableSize,
 }
 
 impl Default for Config {
@@ -195,6 +198,7 @@ impl Default for Config {
             kv_engine_meta_diff_rewrite_percent: 20,
             raft_worker_max_batch_size: ReadableSize::mb(1),
             io_worker_min_write_duration: ReadableDuration::millis(1),
+            skip_storage_size_metrics_threshold: ReadableSize::mb(50),
         }
     }
 }
@@ -275,6 +279,8 @@ impl Config {
         cfg.raft_worker_max_batch_size = old.raft_worker_max_batch_size;
 
         cfg.io_worker_min_write_duration = old.io_worker_min_write_duration;
+
+        cfg.skip_storage_size_metrics_threshold = old.skip_store_size_metrics_threshold;
 
         if cfg!(debug_assertions) && cfg.raft_base_tick_interval.as_millis() < 100 {
             // It is a test config, adjust the fields not included in the old.
