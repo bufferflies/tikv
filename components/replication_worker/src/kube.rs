@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use k8s_openapi::{
     api::{
         apps::v1::StatefulSet,
-        core::v1::{PersistentVolumeClaim, Service, ServicePort, ServiceSpec},
+        core::v1::{EnvVar, PersistentVolumeClaim, Service, ServicePort, ServiceSpec},
     },
     apimachinery::pkg::{apis::meta::v1::ObjectMeta, util::intstr::IntOrString},
     Metadata,
@@ -14,7 +14,7 @@ use k8s_openapi::{
 use kube::{api::PostParams, Api};
 use pd_client::PdClient;
 use security::SecurityConfig;
-use tikv_util::{info, warn};
+use tikv_util::{box_try, info, warn};
 
 use crate::{
     bootstrap, util::new_keyspace_pd_client, Error, KeyspaceService, KeyspaceStates,
@@ -23,6 +23,9 @@ use crate::{
 
 pub(crate) const K8S_LABEL_NAME: &str = "app.kubernetes.io/name";
 const K8S_ANNOTATION_KEYSPACE_ID: &str = "serverless.tidbcloud.com/keyspace-id";
+
+const ENV_REP_PD_STS_NAME: &str = "REP_PD_STS_NAME";
+const ENV_REP_CDC_STS_NAME: &str = "REP_CDC_STS_NAME";
 
 pub(crate) const PD_PORT: i32 = 2379;
 pub(crate) const CDC_PORT: i32 = 8300;
@@ -74,17 +77,22 @@ impl KeyspaceService for KeyspaceKubeService {
     }
     async fn start(&mut self) -> Result<()> {
         let api = &self.kube_api;
-        api.create_pd(&self.scheme, self.keyspace_id).await?;
-        let pd_url = self.task_states.pd_url.clone();
-        let pd_client = new_keyspace_pd_client(pd_url, &self.sec_conf).await;
-        bootstrap(
-            pd_client.clone(),
-            self.conf.merged_engine.merged_store_id,
-            self.conf.advertise_addr.clone(),
-        )
-        .await?;
-        self.pd_client = Some(pd_client);
-        api.create_cdc(&self.scheme, self.keyspace_id).await?;
+        let start_pd = async {
+            api.create_pd(&self.scheme, self.keyspace_id).await?;
+            let pd_url = self.task_states.pd_url.clone();
+            let pd_client = new_keyspace_pd_client(pd_url, &self.sec_conf).await;
+            bootstrap(
+                pd_client.clone(),
+                self.conf.merged_engine.merged_store_id,
+                self.conf.advertise_addr.clone(),
+            )
+            .await?;
+            Ok::<_, Error>(pd_client)
+        };
+        let start_cdc = async { api.create_cdc(&self.scheme, self.keyspace_id).await };
+        let (res_pd, res_cdc) = futures::join!(start_pd, start_cdc);
+        self.pd_client = Some(box_try!(res_pd));
+        let _ = box_try!(res_cdc);
         Ok(())
     }
 
@@ -155,11 +163,23 @@ impl KubeApi {
         Self::patch_annotations(metadata, keyspace_id);
         let pod_spec = spec.template.spec.as_mut().unwrap();
         let container = pod_spec.containers.first_mut().unwrap();
+
+        let envs = container.env.get_or_insert_default();
+        envs.push(EnvVar {
+            name: ENV_REP_PD_STS_NAME.into(),
+            value: Some(pd_sts_name.clone()),
+            ..Default::default()
+        });
+
+        // For backward compatibility. TODO: remove after deployment upgrade.
         let command = container.command.as_mut().unwrap();
-        let pd_client_url = self.compose_url(scheme, &pd_sts_name, PD_PORT);
-        let pd_peer_url = self.compose_url(scheme, &pd_sts_name, PD_PORT + 1);
-        command.push(format!("--advertise-client-urls={}", pd_client_url));
-        command.push(format!("--advertise-peer-urls={}", pd_peer_url));
+        if command.first().is_some_and(|x| !x.contains("/bin/sh")) {
+            let pd_client_url = self.compose_url(scheme, &pd_sts_name, PD_PORT);
+            let pd_peer_url = self.compose_url(scheme, &pd_sts_name, PD_PORT + 1);
+            command.push(format!("--advertise-client-urls={}", pd_client_url));
+            command.push(format!("--advertise-peer-urls={}", pd_peer_url));
+        }
+
         match self.sts_api.create(&Default::default(), &pd_sts).await {
             Ok(_) => Ok(()),
             Err(e) => {
@@ -189,17 +209,34 @@ impl KubeApi {
         Self::patch_annotations(metadata, keyspace_id);
         let pod_spec = spec.template.spec.as_mut().unwrap();
         let container = pod_spec.containers.first_mut().unwrap();
-        let command = container.command.as_mut().unwrap();
         let pd_sts_name = self.pd_sts_name(keyspace_id);
-        command.push(format!("--addr={}", self.compose_listen_addr(CDC_PORT)));
-        command.push(format!(
-            "--advertise-addr={}",
-            self.compose_svc_addr(&cdc_sts_name, CDC_PORT)
-        ));
-        command.push(format!(
-            "--pd={}",
-            self.compose_url(scheme, &pd_sts_name, PD_PORT)
-        ));
+
+        // For backward compatibility. TODO: remove after deployment upgrade.
+        let command = container.command.as_mut().unwrap();
+        if command.first().is_some_and(|x| !x.contains("/bin/sh")) {
+            command.push(format!("--addr={}", self.compose_listen_addr(CDC_PORT)));
+            command.push(format!(
+                "--advertise-addr={}",
+                self.compose_svc_addr(&cdc_sts_name, CDC_PORT)
+            ));
+            command.push(format!(
+                "--pd={}",
+                self.compose_url(scheme, &pd_sts_name, PD_PORT)
+            ));
+        }
+
+        let envs = container.env.get_or_insert_default();
+        envs.push(EnvVar {
+            name: ENV_REP_PD_STS_NAME.into(),
+            value: Some(pd_sts_name),
+            ..Default::default()
+        });
+        envs.push(EnvVar {
+            name: ENV_REP_CDC_STS_NAME.into(),
+            value: Some(cdc_sts_name),
+            ..Default::default()
+        });
+
         match self.sts_api.create(&Default::default(), &cdc_sts).await {
             Ok(_) => Ok(()),
             Err(e) => {
