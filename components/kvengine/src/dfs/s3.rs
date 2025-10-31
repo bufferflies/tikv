@@ -79,6 +79,20 @@ impl CloudProvider {
             CloudProvider::Unknown
         }
     }
+
+    /// Returns the provider-specific header prefix.
+    pub fn header_prefix(&self) -> &'static str {
+        match self {
+            CloudProvider::Aws => "x-amz-",
+            CloudProvider::Aliyun => "x-oss-",
+            _ => "x-amz-",
+        }
+    }
+
+    /// Builds a full header key name given a suffix.
+    pub fn build_header_key(&self, key: &str) -> String {
+        format!("{}{}", self.header_prefix(), key)
+    }
 }
 
 #[derive(Clone)]
@@ -845,7 +859,10 @@ impl S3FsCore {
             }
             if let Some(storage_class) = storage_class.as_ref() {
                 if self.is_on_aws() || self.is_on_aliyun() {
-                    req.add_header("x-amz-storage-class", storage_class);
+                    req.add_header(
+                        self.provider.build_header_key("storage-class"),
+                        storage_class,
+                    );
                 } else {
                     debug!(
                         "{} ignore storage_class {} which is not supported by {}",
@@ -985,9 +1002,10 @@ impl S3FsCore {
         }
 
         let mut retry_cnt = 0;
-        let full_source_key = format!("{}/{}", self.bucket, source_key);
+        let full_source_key = format!("/{}/{}", self.bucket, source_key);
         loop {
             let mut req = self.new_request("PUT", target_key);
+            // `x-oss-copy-source` not effective on Aliyun, but `x-amz-copy-source` works.
             req.add_header("x-amz-copy-source", &full_source_key);
             req.add_header("x-amz-metadata-directive", "REPLACE");
             if let Some(target_tagging) = target_tagging {
@@ -996,7 +1014,10 @@ impl S3FsCore {
             }
             if let Some(target_storage_class) = target_storage_class.as_ref() {
                 if self.is_on_aws() || self.is_on_aliyun() {
-                    req.add_header("x-amz-storage-class", target_storage_class);
+                    req.add_header(
+                        self.provider.build_header_key("storage-class"),
+                        target_storage_class,
+                    );
                 } else {
                     debug!(
                         "{} ignore target_storage_class {} which is not supported by {}",

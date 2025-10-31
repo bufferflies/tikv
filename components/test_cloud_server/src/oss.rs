@@ -447,7 +447,7 @@ impl ObjectStorageService {
             .ok_or(anyhow!("x-amz-copy-source is missing"))?
             .to_str()
             .unwrap();
-        let target = parts.uri.path().strip_prefix('/').unwrap();
+        let target = parts.uri.path();
         if copy_source != target {
             return Err(anyhow!(
                 "support copy from same source only, source {}, target {}",
