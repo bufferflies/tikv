@@ -102,6 +102,10 @@ pub enum Error {
     RfengineDfsWorkerUnhealthy(String),
     #[error("Fetch RfEngine WAL chunk error due to epoch {epoch_id} overwritten")]
     RfengineWalEpochOverwritten { epoch_id: u32 },
+    #[error("Stopped")]
+    Stopped,
+    #[error("Dropped")]
+    Dropped,
 }
 
 #[derive(Debug, thiserror::Error)]

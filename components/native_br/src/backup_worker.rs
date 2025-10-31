@@ -1,9 +1,8 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    fmt,
+    cmp, fmt, mem,
     sync::Arc,
-    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,8 +11,11 @@ use pd_client::PdClient;
 use rfenginepb::ClusterBackupMeta;
 use tikv_util::{
     config::ReadableDuration,
-    error, info,
-    retry::try_wait_result_async,
+    error,
+    future::paired_future_callback,
+    info,
+    mpsc::paired_callback,
+    retry::sleep_async,
     time::Instant,
     warn,
     worker::{LazyWorker, Runnable, RunnableWithTimer, Scheduler},
@@ -26,30 +28,25 @@ use crate::{
         SharedResult,
     },
     error::{Error, SharedError},
-    metrics::{NATIVE_BR_BACKUP_ERROR, NATIVE_BR_BACKUP_SUCCESS},
+    metrics::{NATIVE_BR_BACKUP_BATCH_SIZE, NATIVE_BR_BACKUP_ERROR, NATIVE_BR_BACKUP_SUCCESS},
 };
 
 pub const DEFAULT_TIMEOUT_INSTANT_BACKUP: ReadableDuration = ReadableDuration::secs(60);
 const MIN_BACKUP_INTERVAL: Duration = Duration::from_millis(1050);
+const MIN_BATCH_INTERVAL: Duration = Duration::from_secs(1);
 
 type InstantBackupCallback = Box<dyn FnOnce(SharedResult<Arc<IncrementalBackupFile>>) + Send>;
 
 enum BackupTask {
-    LightweightBackup {
-        cb: InstantBackupCallback,
-    },
-    BackupResult {
-        backup_ts: u64,
-        res: Result<(String, ClusterBackupMeta)>,
-        cb: Option<InstantBackupCallback>,
-    },
+    InstantBackup { cb: InstantBackupCallback },
+    Stop { cb: Box<dyn FnOnce(()) + Send> },
 }
 
 impl fmt::Display for BackupTask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BackupTask::LightweightBackup { .. } => write!(f, "lightweight backup"),
-            BackupTask::BackupResult { .. } => write!(f, "backup result"),
+            BackupTask::InstantBackup { .. } => write!(f, "instant backup"),
+            BackupTask::Stop { .. } => write!(f, "stop"),
         }
     }
 }
@@ -63,29 +60,41 @@ impl BackupWorker {
     pub fn new(
         config: BackupConfig,
         pd_client: Arc<dyn PdClient>,
-        backup_interval: Duration,
+        periodic_backup_interval: Duration,
+        mut batch_interval: Duration,
     ) -> Self {
+        if batch_interval < MIN_BATCH_INTERVAL {
+            warn!(
+                "batch interval too small ({:?}), adjust to {:?}",
+                batch_interval, MIN_BATCH_INTERVAL
+            );
+            batch_interval = MIN_BATCH_INTERVAL;
+        } else if !periodic_backup_interval.is_zero() && batch_interval > periodic_backup_interval {
+            warn!(
+                "batch interval too large ({:?}), adjust to {:?}",
+                batch_interval, periodic_backup_interval
+            );
+            batch_interval = periodic_backup_interval;
+        }
+
         let mut worker = LazyWorker::new("backup-worker");
         let scheduler = worker.scheduler();
-        let runner = BackupRunner::new(config, pd_client, backup_interval, scheduler.clone());
+        let runner = BackupRunner::new(config, pd_client, periodic_backup_interval, batch_interval);
         runner.init();
-        let ok = if runner.periodic_backup_enabled() {
-            worker.start_with_timer(runner)
-        } else {
-            worker.start(runner)
-        };
+        let ok = worker.start_with_timer(runner);
         assert!(ok);
         Self { worker, scheduler }
     }
 
     pub fn stop(&mut self) {
+        self.cancel_pending_requests();
         self.worker.stop();
     }
 
     pub async fn instant_backup(&self) -> Result<Arc<IncrementalBackupFile>> {
-        let (cb, fut) = tikv_util::future::paired_future_callback();
+        let (cb, fut) = paired_future_callback();
         self.scheduler
-            .schedule(BackupTask::LightweightBackup { cb })
+            .schedule(BackupTask::InstantBackup { cb })
             .unwrap();
         fut.await.unwrap().map_err(|e| {
             warn!("instant backup failed"; "error" => ?e);
@@ -93,50 +102,103 @@ impl BackupWorker {
         })
     }
 
+    fn is_err_retryable(e: &Error) -> bool {
+        match e {
+            Error::Stopped => false,
+            Error::SharedError(e) => Self::is_err_retryable(e.0.as_ref()),
+            _ => true,
+        }
+    }
+
     pub async fn instant_backup_with_retry(
         &self,
         timeout: Duration,
     ) -> Result<Arc<IncrementalBackupFile>> {
-        // TODO: retry only when the error is retryable
-        try_wait_result_async(
-            || Box::pin(self.instant_backup()),
-            timeout,
-            || Duration::from_millis(500),
-        )
-        .await
+        let mut last_err = None;
+        let start_time = Instant::now_coarse();
+        while start_time.saturating_elapsed() < timeout {
+            match self.instant_backup().await {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    if Self::is_err_retryable(&e) {
+                        last_err = Some(e);
+                        sleep_async(Duration::from_millis(500)).await;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap())
+    }
+
+    fn cancel_pending_requests(&self) {
+        let (cb, rx) = paired_callback();
+        self.scheduler.schedule(BackupTask::Stop { cb }).unwrap();
+        let _ = rx.recv();
+    }
+}
+
+#[cfg(feature = "testexport")]
+#[derive(Clone)]
+pub struct BackupWorkerHandle {
+    scheduler: Scheduler<BackupTask>,
+}
+
+#[cfg(feature = "testexport")]
+impl BackupWorkerHandle {
+    pub async fn instant_backup(&self) -> Result<Arc<IncrementalBackupFile>> {
+        let (cb, fut) = paired_future_callback();
+        self.scheduler
+            .schedule(BackupTask::InstantBackup { cb })
+            .map_err(|_| Error::Stopped)?;
+        fut.await.unwrap().map_err(Into::into)
+    }
+}
+
+#[cfg(feature = "testexport")]
+impl BackupWorker {
+    pub fn handle(&self) -> BackupWorkerHandle {
+        BackupWorkerHandle {
+            scheduler: self.scheduler.clone(),
+        }
     }
 }
 
 struct BackupRunner {
     config: BackupConfig,
     pd_client: Arc<dyn PdClient>,
-    backup_interval: Duration,
-    last_backup_time: Instant,
+    periodic_backup_interval: Duration,
+    batch_interval: Duration,
 
-    last_backup_ts: u64,
+    last_backup_time: Instant, // The `backup_time` of last batch.
+    last_backup_ts: u64,       // The `backup_ts` of last successful backup.
     last_backup_meta: Option<ClusterBackupMeta>,
-    // Backup ts of all backup tasks.
-    tasks_backup_ts: Vec<u64>,
 
-    scheduler: Scheduler<BackupTask>,
+    pending_reqs: Vec<BackupRequest>,
+    pending_batches: Vec<BackupBatch>,
+
+    stop: bool,
 }
 
 impl BackupRunner {
     fn new(
         config: BackupConfig,
         pd_client: Arc<dyn PdClient>,
-        backup_interval: Duration,
-        scheduler: Scheduler<BackupTask>,
+        periodic_backup_interval: Duration,
+        batch_interval: Duration,
     ) -> Self {
         Self {
             config,
             pd_client,
-            backup_interval,
+            periodic_backup_interval,
+            batch_interval,
             last_backup_time: Instant::now() - MIN_BACKUP_INTERVAL,
             last_backup_ts: 0,
             last_backup_meta: None,
-            tasks_backup_ts: vec![],
-            scheduler,
+            pending_reqs: vec![],
+            pending_batches: vec![],
+            stop: false,
         }
     }
 
@@ -169,122 +231,145 @@ impl BackupRunner {
         }
     }
 
-    fn handle_periodic_backup(&mut self) {
-        debug_assert!(self.periodic_backup_enabled());
-        if self.last_backup_time.saturating_elapsed() < MIN_BACKUP_INTERVAL {
-            return;
-        }
-
-        self.do_lightweight_backup_inner(None);
+    fn handle_instant_backup(&mut self, cb: InstantBackupCallback) {
+        self.pending_reqs.push(BackupRequest::new(cb));
     }
 
-    fn do_lightweight_backup(&mut self, cb: InstantBackupCallback) {
-        if self.last_backup_time.saturating_elapsed() < MIN_BACKUP_INTERVAL {
-            // The backup is named according to the seconds of TSO physical time.
-            // So sleep for more than 1 second to avoid the name conflict.
-            thread::sleep(MIN_BACKUP_INTERVAL);
+    fn handle_stop(&mut self) {
+        let err = SharedError::from(Error::Stopped);
+        for req in self.pending_reqs.drain(..) {
+            req.cb(Err(err.clone()));
+        }
+        for req in self.pending_batches.drain(..).flat_map(|x| x.reqs) {
+            req.cb(Err(err.clone()));
+        }
+    }
+
+    fn handle_pending_backups(&mut self) {
+        self.gather_batch();
+        if let Some(batch) = self.extract_batch() {
+            self.do_lightweight_backup(batch);
+        }
+    }
+
+    fn gather_batch(&mut self) {
+        if self.pending_reqs.is_empty() {
+            return;
+        }
+        let reqs = mem::take(&mut self.pending_reqs);
+
+        let backup_ts = match self.prepare_backup() {
+            Ok(backup_ts) => backup_ts,
+            Err(err) => {
+                error!("backup worker: prepare backup failed"; "err" => ?err);
+                NATIVE_BR_BACKUP_ERROR.inc();
+                let err = SharedError::from(err);
+                for req in reqs {
+                    req.cb(Err(err.clone()));
+                }
+                return;
+            }
+        };
+
+        let batch = BackupBatch {
+            reqs,
+            backup_ts,
+            backup_time: Instant::now_coarse(),
+        };
+        self.last_backup_time = batch.backup_time;
+        self.pending_batches.push(batch);
+    }
+
+    fn extract_batch(&mut self) -> Option<BackupBatch> {
+        if self.pending_batches.is_empty() {
+            return None;
         }
 
-        self.do_lightweight_backup_inner(Some(cb));
+        let now = Instant::now_coarse();
+        let mut batches = self
+            .pending_batches
+            .extract_if(|x| x.backup_time + self.config.backup_delay.0 <= now)
+            .collect::<Vec<_>>();
+        let mut last_batch = batches.pop()?;
+        // Merge batch.
+        for batch in batches {
+            // Get maximum for safe.
+            last_batch.backup_ts = cmp::max(batch.backup_ts, last_batch.backup_ts);
+            last_batch.reqs.extend(batch.reqs);
+        }
+        Some(last_batch)
     }
 
     fn prepare_backup(&self) -> Result<u64 /* backup_ts */> {
         backup::get_backup_ts(self.pd_client.as_ref()).map_err(Into::into)
     }
 
-    fn do_lightweight_backup_inner(&mut self, cb: Option<InstantBackupCallback>) {
-        let backup_ts = match self.prepare_backup() {
-            Ok(backup_ts) => backup_ts,
-            Err(err) => {
-                error!("backup worker: prepare backup failed"; "err" => ?err);
-                NATIVE_BR_BACKUP_ERROR.inc();
-                if let Some(cb) = cb {
-                    cb(Err(SharedError::from(err)));
-                }
-                return;
-            }
-        };
-
-        self.last_backup_time = Instant::now();
-        if self.periodic_backup_enabled() {
-            self.tasks_backup_ts.push(backup_ts);
+    fn do_lightweight_backup(&mut self, batch: BackupBatch) {
+        let backup_ts = batch.backup_ts;
+        if self.last_backup_ts > 0
+            && IncrementalBackupFile::from_backup_ts(self.last_backup_ts).name()
+                == IncrementalBackupFile::from_backup_ts(backup_ts).name()
+        {
+            warn!("backup worker: backup_ts conflict, retry";
+                "backup_ts" => backup_ts, "last_backup_ts" => self.last_backup_ts);
+            self.pending_reqs.extend(batch.reqs);
+            return;
         }
 
-        let config = self.config.clone();
-        let pd_client = self.pd_client.clone();
-        let last_backup_meta = self.last_backup_meta.clone();
-        let scheduler = self.scheduler.clone();
-        thread::spawn(move || {
-            info!("backup worker: start backup"; "backup_ts" => backup_ts, "delay" => ?config.backup_delay);
-            thread::sleep(config.backup_delay.0);
-            let res = backup::backup_cluster_with_ts(
-                config,
-                BackupType::Lightweight,
-                "".to_string(),
-                pd_client.as_ref(),
-                backup_ts,
-                last_backup_meta,
-            );
-            scheduler.schedule(BackupTask::BackupResult { backup_ts, res, cb })
-        });
+        info!("backup worker: start backup"; "backup_ts" => backup_ts);
+        let res = backup::backup_cluster_with_ts(
+            self.config.clone(),
+            BackupType::Lightweight,
+            "".to_string(),
+            self.pd_client.as_ref(),
+            backup_ts,
+            self.last_backup_meta.clone(),
+        );
+        self.handle_backup_result(backup_ts, res, batch);
     }
 
     fn handle_backup_result(
         &mut self,
         backup_ts: u64,
         res: Result<(String, ClusterBackupMeta)>,
-        cb: Option<InstantBackupCallback>,
+        batch: BackupBatch,
     ) {
         match res {
             Ok((backup_path, backup_meta)) => {
                 info!("backup succeeded"; "path" => ?backup_path, "meta" => %backup_meta);
+                self.last_backup_ts = backup_ts;
                 if self.periodic_backup_enabled() {
-                    if self.last_backup_ts < backup_ts {
-                        self.last_backup_ts = backup_ts;
-                        self.last_backup_meta = Some(backup_meta);
-                    }
-
+                    self.last_backup_meta = Some(backup_meta);
                     self.try_update_service_safe_point(backup_ts);
                 }
 
                 NATIVE_BR_BACKUP_SUCCESS.inc();
-                if let Some(cb) = cb {
-                    cb(Ok(Arc::new(
-                        IncrementalBackupFile::try_from_full_path(&backup_path).unwrap(),
-                    )))
+                NATIVE_BR_BACKUP_BATCH_SIZE.observe(batch.reqs.len() as f64);
+                let backup_file =
+                    Arc::new(IncrementalBackupFile::try_from_full_path(&backup_path).unwrap());
+                for req in batch.reqs {
+                    req.cb(Ok(backup_file.clone()));
                 }
             }
             Err(err) => {
                 NATIVE_BR_BACKUP_ERROR.inc();
-                if let Some(cb) = cb {
-                    cb(Err(SharedError::from(err)));
+                let err = SharedError::from(err);
+                for req in batch.reqs {
+                    req.cb(Err(err.clone()));
                 }
             }
-        }
-
-        if self.periodic_backup_enabled() {
-            self.tasks_backup_ts.retain(|&ts| ts != backup_ts);
         }
     }
 
     fn try_update_service_safe_point(&mut self, backup_ts: u64) {
-        if self
-            .tasks_backup_ts
-            .first()
-            .is_some_and(|&ts| ts == backup_ts)
-        {
-            // Update the service safe point only for the earliest backup task.
-            // Otherwise, the backup ts of earlier tasks will be behind the service safe
-            // point.
-            if let Err(err) = update_service_safe_point(self.pd_client.as_ref(), backup_ts) {
-                error!("backup worker: update safepoint failed"; "err" => ?err);
-                NATIVE_BR_BACKUP_ERROR.inc();
-            }
+        if let Err(err) = update_service_safe_point(self.pd_client.as_ref(), backup_ts) {
+            error!("backup worker: update safepoint failed"; "err" => ?err);
+            NATIVE_BR_BACKUP_ERROR.inc();
         }
     }
 
     fn periodic_backup_enabled(&self) -> bool {
-        !self.backup_interval.is_zero()
+        !self.periodic_backup_interval.is_zero()
     }
 }
 
@@ -293,11 +378,17 @@ impl Runnable for BackupRunner {
 
     fn run(&mut self, task: BackupTask) {
         match task {
-            BackupTask::LightweightBackup { cb } => {
-                self.do_lightweight_backup(cb);
+            BackupTask::InstantBackup { cb } => {
+                if self.stop {
+                    cb(Err(Error::Stopped.into()));
+                    return;
+                }
+                self.handle_instant_backup(cb);
             }
-            BackupTask::BackupResult { backup_ts, res, cb } => {
-                self.handle_backup_result(backup_ts, res, cb);
+            BackupTask::Stop { cb } => {
+                self.stop = true;
+                self.handle_stop();
+                cb(());
             }
         }
     }
@@ -305,17 +396,69 @@ impl Runnable for BackupRunner {
 
 impl RunnableWithTimer for BackupRunner {
     fn on_timeout(&mut self) {
-        self.handle_periodic_backup();
+        if self.stop {
+            return;
+        }
+
+        if self.last_backup_time.saturating_elapsed() < MIN_BACKUP_INTERVAL {
+            // The backup is named according to the seconds of TSO physical time.
+            // So skip this round to avoid the name conflict.
+            return;
+        }
+
+        if self.periodic_backup_enabled()
+            && self.last_backup_time.saturating_elapsed() >= self.periodic_backup_interval
+        {
+            self.pending_reqs.push(BackupRequest::new_periodic_backup());
+        }
+
+        self.handle_pending_backups();
     }
 
     fn get_interval(&self) -> Duration {
-        let mut interval = self.backup_interval.as_secs();
+        let mut interval = self.batch_interval.as_secs();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
         interval -= now.as_secs() % interval;
         Duration::from_secs(interval)
     }
+}
+
+struct BackupRequest {
+    cb: Option<InstantBackupCallback>,
+}
+
+impl BackupRequest {
+    fn new(cb: InstantBackupCallback) -> Self {
+        Self { cb: Some(cb) }
+    }
+
+    fn new_periodic_backup() -> Self {
+        Self { cb: None }
+    }
+
+    fn cb(mut self, res: SharedResult<Arc<IncrementalBackupFile>>) {
+        if let Some(cb) = self.cb.take() {
+            cb(res);
+        }
+    }
+}
+
+impl Drop for BackupRequest {
+    fn drop(&mut self) {
+        // For safety
+        if let Some(cb) = self.cb.take() {
+            debug_assert!(false, "backup request dropped without callback");
+            cb(Err(Error::Dropped.into()));
+        }
+    }
+}
+
+struct BackupBatch {
+    reqs: Vec<BackupRequest>,
+    backup_ts: u64,
+    backup_time: Instant,
 }
 
 #[cfg(test)]

@@ -1072,6 +1072,8 @@ pub struct NativeBrConfig {
     pub instant_backup_timeout: ReadableDuration,
     /// Interval for periodic backup. `0s` to disable periodic backup.
     pub backup_interval: ReadableDuration,
+    /// Interval for gathering backup requests as a batch.
+    pub backup_batch_interval: ReadableDuration,
     /// Delay before perform backup. Also used as the switch for passing
     /// `backup_ts` to rfengine during backup.
     pub backup_delay: ReadableDuration,
@@ -1109,6 +1111,7 @@ impl Default for NativeBrConfig {
             restore_coarse_split_regions_factor: 64,
             instant_backup_timeout: backup_worker::DEFAULT_TIMEOUT_INSTANT_BACKUP,
             backup_interval: ReadableDuration::ZERO,
+            backup_batch_interval: ReadableDuration::secs(5),
             backup_delay: ReadableDuration::ZERO,
             backup_ts_wait_timeout: backup::BACKUP_TS_WAIT_TIMEOUT_DEFAULT,
             backup_ts_ttl: backup::BACKUP_TS_TTL_DEFAULT,
@@ -1154,6 +1157,7 @@ impl NativeBrManager {
             backup_config,
             pd_client.clone(),
             config.native_br.backup_interval.0,
+            config.native_br.backup_batch_interval.0,
         );
         let restore_concurrency = cmp::max(
             (SysQuota::cpu_cores_quota() * config.native_br.restore_concurrency_per_core) as usize,

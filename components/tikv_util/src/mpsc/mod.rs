@@ -291,6 +291,20 @@ pub fn loose_bounded<T>(cap: usize) -> (LooseBoundedSender<T>, Receiver<T>) {
     )
 }
 
+pub fn paired_callback<T>() -> (Box<dyn FnOnce(T) + Send>, Receiver<T>)
+where
+    T: Send + 'static,
+{
+    let (tx, rx) = bounded::<T>(1);
+    let callback = Box::new(move |result| {
+        let r = tx.send(result);
+        if r.is_err() {
+            warn!("paired_callback: Failed to send result to the future rx, discarded.");
+        }
+    });
+    (callback, rx)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{thread, time::Duration};

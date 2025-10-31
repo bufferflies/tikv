@@ -62,7 +62,8 @@ const TIKV_WORKERS_COUNT: usize = 2;
 
 const RESTORE_CONCURRENCY: usize = 2;
 const LOAD_DATA_CONCURRENCY: usize = 2;
-const PERIODIC_BACKUP_INTERVAL: Duration = Duration::from_secs(3);
+const PERIODIC_BACKUP_INTERVAL: Duration = Duration::from_secs(4);
+const BACKUP_BATCH_INTERVAL: Duration = Duration::from_secs(2);
 
 const KV_TARGET_FILE_SIZE: ReadableSize = ReadableSize::kb(16);
 const REGION_BUCKET_SIZE: ReadableSize = ReadableSize::kb(64);
@@ -110,6 +111,7 @@ fn test_random_all() {
             backup_config.clone(),
             pd_client.clone(),
             PERIODIC_BACKUP_INTERVAL,
+            BACKUP_BATCH_INTERVAL,
         ))
     };
     let load_data_config = {

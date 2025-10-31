@@ -1,9 +1,11 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    assert_matches::assert_matches,
     iter::FromIterator,
     path::{Path, PathBuf},
     sync::Arc,
+    thread,
     time::Duration,
 };
 
@@ -11,8 +13,8 @@ use api_version::ApiV2;
 use chrono::Utc;
 use kvengine::dfs::{DFSConfig, S3Fs};
 use native_br::{
-    backup, backup_worker, common::get_all_incremental_backups, restore, restore::RestoreConfig,
-    restore_keyspace,
+    backup, backup_worker, common::get_all_incremental_backups, error::Error as BrError, restore,
+    restore::RestoreConfig, restore_keyspace,
 };
 use rand::prelude::*;
 use security::SecurityConfig;
@@ -265,8 +267,12 @@ fn test_periodic_backup() {
         backup_delay: ReadableDuration::secs(1),
         ..Default::default()
     };
-    let mut backup_worker =
-        backup_worker::BackupWorker::new(backup_config, pd_client.clone(), Duration::from_secs(2));
+    let mut backup_worker = backup_worker::BackupWorker::new(
+        backup_config,
+        pd_client.clone(),
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    );
 
     let now = Utc::now().date_naive();
     let files = try_wait_result(
@@ -320,6 +326,172 @@ fn test_periodic_backup() {
     assert_eq!(deleted, 0);
 
     backup_worker.stop();
+    cluster.stop();
+    oss.shutdown();
+}
+
+#[test]
+fn test_batch_backup() {
+    test_util::init_log_for_test();
+    const KEYSPACE_ID: u32 = 1;
+    const DATA_LEN: usize = 10;
+    const VALUE_SIZE: usize = 64;
+
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("t_");
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
+    let reporter = Arc::new(DummyStepReporter::default());
+    let runtime = Runtime::new().unwrap();
+
+    let nodes = alloc_node_id_vec(3);
+    let mut cluster = ServerCluster::new(nodes.clone(), |_, conf: &mut TikvConfig| {
+        conf.dfs = dfs_config.clone();
+        conf.rfengine.lightweight_backup = true;
+    });
+    cluster.wait_region_replicated(&[], 3);
+    let pd_client = cluster.get_pd_client();
+    let mut client = cluster.new_client();
+    client.split_keyspace(KEYSPACE_ID);
+
+    let gen_key = i_to_keyspace_key(KEYSPACE_ID);
+    client.put_kv(0..DATA_LEN, &gen_key, random_value::<VALUE_SIZE>);
+    client.verify_data_with_ref_store();
+    let origin_ref_store = client.dump_ref_store();
+
+    let backup_config = backup::BackupConfig {
+        dfs: dfs_config.clone(),
+        skip_keyspace_meta: true,
+        backup_delay: ReadableDuration::secs(1),
+        ..Default::default()
+    };
+    let backup_worker = Arc::new(backup_worker::BackupWorker::new(
+        backup_config,
+        pd_client.clone(),
+        Duration::from_secs(4),
+        Duration::from_secs(2),
+    ));
+
+    let mut js = tokio::task::JoinSet::new();
+    for _ in 0..50 {
+        let backup_worker = backup_worker.clone();
+        let task = async move {
+            let sleep_secs = thread_rng().gen_range(0..6);
+            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+            backup_worker.instant_backup().await.unwrap()
+        };
+        js.spawn_on(task, runtime.handle());
+    }
+
+    let backup_files = runtime.block_on(async {
+        let mut backup_files = vec![];
+        while let Some(r) = js.join_next().await {
+            let backup_file = r.unwrap();
+            backup_files.push(backup_file.name().to_string());
+        }
+        backup_files.sort_unstable();
+        backup_files.dedup();
+        backup_files
+    });
+
+    info!("backup files: {:?}", &backup_files);
+    assert!(backup_files.len() <= 5);
+
+    // Put another data.
+    client.put_kv(
+        DATA_LEN / 4..DATA_LEN / 2,
+        &gen_key,
+        random_value::<VALUE_SIZE>,
+    );
+    client.verify_data_with_ref_store();
+
+    let backup_file = backup_files.choose(&mut thread_rng()).unwrap();
+
+    let pd_client = cluster.get_pd_client();
+    let object_cache = cluster.create_object_cache_randomly();
+    let res = restore_keyspace::restore_keyspace(
+        KEYSPACE_ID,
+        KEYSPACE_ID,
+        backup_file,
+        None,
+        s3fs.clone(),
+        RestoreConfig::default(),
+        pd_client,
+        &runtime,
+        None,
+        reporter,
+        object_cache,
+    )
+    .unwrap();
+
+    info!("restore keyspace result: {:?}", res);
+    let (existed, deleted) = client
+        .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
+        .unwrap();
+    assert_eq!(existed, DATA_LEN);
+    assert_eq!(deleted, 0);
+
+    cluster.stop();
+    oss.shutdown();
+}
+
+#[test]
+fn test_backup_worker_stop() {
+    test_util::init_log_for_test();
+    const KEYSPACE_ID: u32 = 1;
+
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("t_");
+    let runtime = Runtime::new().unwrap();
+
+    let nodes = alloc_node_id_vec(3);
+    let mut cluster = ServerCluster::new(nodes.clone(), |_, conf: &mut TikvConfig| {
+        conf.dfs = dfs_config.clone();
+        conf.rfengine.lightweight_backup = true;
+    });
+    cluster.wait_region_replicated(&[], 3);
+    let pd_client = cluster.get_pd_client();
+    let mut client = cluster.new_client();
+    client.split_keyspace(KEYSPACE_ID);
+
+    let backup_config = backup::BackupConfig {
+        dfs: dfs_config.clone(),
+        skip_keyspace_meta: true,
+        backup_delay: ReadableDuration::secs(1),
+        ..Default::default()
+    };
+    let mut backup_worker = backup_worker::BackupWorker::new(
+        backup_config,
+        pd_client,
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+    );
+
+    let mut js = tokio::task::JoinSet::new();
+    for _ in 0..10 {
+        let backup_worker_h = backup_worker.handle();
+        let task = async move { backup_worker_h.instant_backup().await };
+        js.spawn_on(task, runtime.handle());
+    }
+
+    thread::sleep(Duration::from_secs(1)); // Wait for instant backup request sent.
+    backup_worker.stop();
+
+    let mut shared_stopped = false;
+    runtime.block_on(async {
+        while let Some(r) = js.join_next().await {
+            match r.unwrap().unwrap_err() {
+                BrError::SharedError(e) => {
+                    assert_matches!(e.inner(), BrError::Stopped);
+                    shared_stopped = true;
+                }
+                BrError::Stopped => {
+                    // Happens when stop before instant backup request is sent.
+                    info!("meet not-shared stopped")
+                }
+                e => panic!("Unexpected br error: {:?}", e),
+            }
+        }
+    });
+    assert!(shared_stopped);
+
     cluster.stop();
     oss.shutdown();
 }

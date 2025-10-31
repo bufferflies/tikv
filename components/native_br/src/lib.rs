@@ -1,4 +1,5 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
+#![feature(extract_if)]
 
 #[macro_use]
 extern crate serde_derive;

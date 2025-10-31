@@ -25,4 +25,10 @@ lazy_static! {
             "Number of errors that epoch of rfengine WAL is overwritten"
         )
         .unwrap();
+    pub static ref NATIVE_BR_BACKUP_BATCH_SIZE: Histogram = register_histogram!(
+        "native_br_backup_batch_size",
+        "Histogram of backup batch size",
+        exponential_buckets(1.0, 2.0, 16).unwrap()
+    )
+    .unwrap();
 }
