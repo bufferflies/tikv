@@ -383,6 +383,7 @@ fn prepare_cluster(
     let dfs = dfs_config.clone();
     let enable_ia = switches.ia_table_ratio > 0.0;
     let update_conf_fn = move |_, conf: &mut TikvConfig| {
+        let mut rng = rand::thread_rng();
         conf.dfs = dfs.clone();
         conf.dfs.allow_fallback_local = false;
         conf.server.grpc_concurrency = (cpu_cores / nodes_count).max(2);
@@ -401,8 +402,9 @@ fn prepare_cluster(
         conf.rocksdb.writecf.target_file_size_base = KV_TARGET_FILE_SIZE;
 
         conf.rfengine.target_file_size = rfengine_target_file_size;
-        conf.rfengine.batch_compression_threshold =
-            ReadableSize::kb(rand::thread_rng().gen_range(0..2));
+        conf.rfengine.rlog_file_size =
+            rfengine_target_file_size / *[2, 8, 32].choose(&mut rng).unwrap();
+        conf.rfengine.batch_compression_threshold = ReadableSize::kb(rng.gen_range(0..2));
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.wal_chunk_target_file_size = rfengine_target_file_size / 8;
         conf.rfengine.dfs_worker_memory_limit = dfs_worker_memory_limit.into();

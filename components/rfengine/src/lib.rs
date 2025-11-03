@@ -1,5 +1,5 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
-
+#![feature(let_chains)]
 #![cfg_attr(test, feature(test))]
 // Bytes as map key
 #![allow(clippy::mutable_key_type)]

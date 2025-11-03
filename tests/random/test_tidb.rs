@@ -386,6 +386,8 @@ pub(crate) fn generate_update_conf_fn<'a>(
         conf.rocksdb.writecf.target_file_size_base = KV_TARGET_FILE_SIZE;
 
         conf.rfengine.target_file_size = rfengine_target_file_size;
+        conf.rfengine.rlog_file_size =
+            rfengine_target_file_size / *[2, 8, 32].choose(&mut rng).unwrap();
         conf.rfengine.batch_compression_threshold = ReadableSize::kb(rng.gen_range(0..2));
         conf.rfengine.lightweight_backup = true;
         conf.rfengine.wal_chunk_target_file_size = rfengine_target_file_size / 16;

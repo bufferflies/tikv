@@ -5,7 +5,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-testexport = []
+testexport = ["rfengine/testexport"]
 debug-trace-txn-tasks = ["tikv/debug-trace-txn-tasks"]
 
 [dependencies]
@@ -76,3 +76,4 @@ zipf = "7.0"
 
 [dev-dependencies]
 collections = { path = "../collections" }
+rfengine = { path = "../rfengine", features = ["testexport"] }

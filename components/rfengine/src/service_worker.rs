@@ -119,6 +119,7 @@ impl ServiceWorker {
         healthy: Healthy,
         compact_wal_sync_concurrency: usize,
         compact_rate_limiter: Option<Arc<IoRateLimiter>>,
+        rlog_file_size: u32,
     ) -> Self {
         let engine_id = manifest.engine_id.clone();
         let (compact_worker_tx, compact_rx) = tikv_util::mpsc::unbounded();
@@ -131,6 +132,7 @@ impl ServiceWorker {
             healthy.clone(),
             compact_wal_sync_concurrency,
             compact_rate_limiter,
+            rlog_file_size,
         );
         let handle = std::thread::Builder::new()
             .name("compact-wal-worker".to_string())

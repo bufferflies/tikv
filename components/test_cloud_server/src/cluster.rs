@@ -40,7 +40,7 @@ use kvproto::{
 use log_wrappers::Value;
 use pd_client::{check_regions_boundary, pd_control, PdClient};
 use raftstore::RegionInfoAccessor;
-use rand::Rng;
+use rand::prelude::*;
 use rfstore::{
     store::{cmd_resp::message_error, Callback, CustomBuilder},
     RaftStoreRouter,
@@ -1360,6 +1360,7 @@ pub fn new_test_config(
     nodes_count: usize,
     memory_capacity_ratio: f64,
 ) -> TikvConfig {
+    let mut rng = thread_rng();
     let mut config = TikvConfig::default();
     config.security.master_key.vendor = "test".to_string();
     config.storage.data_dir = format!("{}/{}", base_dir.to_str().unwrap(), node_id);
@@ -1394,9 +1395,11 @@ pub fn new_test_config(
     config.rocksdb.max_background_jobs = 2;
     config.rocksdb.max_sub_compactions = 1;
     config.rfengine.target_file_size = ReadableSize::kb(128);
+    config.rfengine.rlog_file_size =
+        config.rfengine.target_file_size / *[2, 8, 32].choose(&mut rng).unwrap();
     config.rfengine.wal_chunk_target_file_size = ReadableSize::kb(16);
     config.rfengine.wal_sync_dir = format!("{}/{}/wal", base_dir.to_str().unwrap(), node_id);
-    config.rfengine.enable_compact_rate_limiter = rand::thread_rng().gen_bool(0.5);
+    config.rfengine.enable_compact_rate_limiter = rng.gen_bool(0.5);
     // config.rfengine.wal_secondary_dir = format!("{}/{}/wal2",
     // base_dir.to_str().unwrap(), node_id);
     config.kvengine.block_cache_type = BlockCacheType::Quick;
