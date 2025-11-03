@@ -1,19 +1,16 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::{
-        BTreeMap,
-        Bound::{Excluded, Unbounded},
-    },
+    collections::Bound::{Excluded, Unbounded},
     fmt::{Display, Formatter, Result as FmtResult},
-    sync::{mpsc, Arc, Mutex, RwLock},
+    sync::{mpsc, Arc, Mutex},
     time::Duration,
 };
 
-use collections::{HashMap, HashSet};
 use engine_traits::KvEngine;
 use itertools::Itertools;
 use kvproto::metapb::Region;
+use papaya::HashMap;
 use pd_client::BucketMeta;
 use raft::StateRole;
 use tikv_util::{
@@ -62,6 +59,10 @@ pub enum RaftStoreEvent {
         region: Region,
         role: StateRole,
     },
+    LeaderChange {
+        region: Region,
+        leader_id: u64,
+    },
     UpdateRegionBuckets {
         region: Region,
         buckets: Arc<BucketMeta>,
@@ -76,6 +77,7 @@ impl RaftStoreEvent {
             | RaftStoreEvent::DestroyRegion { region, .. }
             | RaftStoreEvent::UpdateRegionBuckets { region, .. }
             | RaftStoreEvent::RoleChange { region, .. } => region,
+            RaftStoreEvent::LeaderChange { region, .. } => region,
         }
     }
 }
@@ -84,21 +86,34 @@ impl RaftStoreEvent {
 pub struct RegionInfo {
     pub region: Region,
     pub role: StateRole,
+    pub leader_id: u64,
     pub buckets: Arc<BucketMeta>,
 }
 
 impl RegionInfo {
-    pub fn new(region: Region, role: StateRole) -> Self {
+    pub fn new(region: Region, role: StateRole, leader_id: u64) -> Self {
         Self {
             region,
             role,
+            leader_id,
             buckets: Arc::new(BucketMeta::default()),
         }
     }
+
+    pub fn leader_peer(&self) -> Option<&kvproto::metapb::Peer> {
+        self.region
+            .get_peers()
+            .iter()
+            .find(|p| p.get_id() == self.leader_id)
+    }
+
+    pub fn is_leader(&self) -> bool {
+        self.role == StateRole::Leader
+    }
 }
 
-type RegionsMap = HashMap<u64, RegionInfo>;
-type RegionRangesMap = BTreeMap<RangeKey, u64>;
+type RegionsMap = Arc<HashMap<u64, RegionInfo>>;
+type RegionRangesMap = Arc<crossbeam_skiplist::SkipMap<RangeKey, u64>>;
 
 // RangeKey is a wrapper used to unify the comparison between region start key
 // and region end key. Region end key is special as empty stands for the
@@ -131,21 +146,6 @@ pub type SeekRegionCallback = Box<dyn FnOnce(&mut dyn Iterator<Item = &RegionInf
 /// sending commands to the thread.
 pub enum RegionInfoQuery {
     RaftStoreEvent(RaftStoreEvent),
-    SeekRegion {
-        from: Vec<u8>,
-        callback: SeekRegionCallback,
-    },
-    FindRegionById {
-        region_id: u64,
-        callback: Callback<Option<RegionInfo>>,
-    },
-    GetRegionsInRange {
-        start_key: Vec<u8>,
-        end_key: Vec<u8>,
-        reverse: bool,
-        limit: usize,
-        callback: Callback<Vec<RegionInfo>>,
-    },
     /// Gets all contents from the collection. Only used for testing.
     DebugDump(mpsc::Sender<(RegionsMap, RegionRangesMap)>),
 }
@@ -154,26 +154,6 @@ impl Display for RegionInfoQuery {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             RegionInfoQuery::RaftStoreEvent(e) => write!(f, "RaftStoreEvent({:?})", e),
-            RegionInfoQuery::SeekRegion { from, .. } => {
-                write!(f, "SeekRegion(from: {})", log_wrappers::Value::key(from))
-            }
-            RegionInfoQuery::FindRegionById { region_id, .. } => {
-                write!(f, "FindRegionById(region_id: {})", region_id)
-            }
-            RegionInfoQuery::GetRegionsInRange {
-                start_key,
-                end_key,
-                reverse,
-                limit,
-                ..
-            } => write!(
-                f,
-                "GetRegionsInRange(start_key: {}, end_key: {}, reverse: {}, limit: {})",
-                &log_wrappers::Value::key(start_key),
-                &log_wrappers::Value::key(end_key),
-                reverse,
-                limit
-            ),
             RegionInfoQuery::DebugDump(_) => write!(f, "DebugDump"),
         }
     }
@@ -202,6 +182,9 @@ impl RegionChangeObserver for RegionEventListener {
             RegionChangeEvent::Destroy => RaftStoreEvent::DestroyRegion { region },
             RegionChangeEvent::UpdateBuckets(buckets) => {
                 RaftStoreEvent::UpdateRegionBuckets { region, buckets }
+            }
+            RegionChangeEvent::UpdateLeader(leader_id) => {
+                RaftStoreEvent::LeaderChange { region, leader_id }
             }
         };
         self.scheduler
@@ -238,35 +221,36 @@ fn register_region_event_listener(
 /// collected, and the underlying runner of `RegionInfoAccessor`. It listens on
 /// events sent by the `RegionEventListener` and keeps information of all
 /// regions. Role of each region are also tracked.
+#[derive(Clone)]
 pub struct RegionCollector {
     // HashMap: region_id -> (Region, State)
     regions: RegionsMap,
-    // BTreeMap: data_end_key -> region_id
-    region_ranges: RegionRangesMap,
 
-    region_leaders: Arc<RwLock<HashSet<u64>>>,
+    region_ranges_skl: RegionRangesMap,
+}
+
+impl Default for RegionCollector {
+    fn default() -> Self {
+        Self {
+            regions: Arc::new(HashMap::new()),
+            region_ranges_skl: Arc::new(crossbeam_skiplist::SkipMap::default()),
+        }
+    }
 }
 
 impl RegionCollector {
-    pub fn new(region_leaders: Arc<RwLock<HashSet<u64>>>) -> Self {
-        Self {
-            region_leaders,
-            regions: HashMap::default(),
-            region_ranges: BTreeMap::default(),
-        }
-    }
-
     pub fn create_region(&mut self, region: Region, role: StateRole) {
         let end_key = RangeKey::from_end_key(region.get_end_key().to_vec());
         let region_id = region.get_id();
 
         // Create new region
-        self.region_ranges.insert(end_key, region_id);
+        self.region_ranges_skl.insert(end_key, region_id);
 
         // TODO: Should we set it follower?
+        let guard = self.regions.guard();
         assert!(
             self.regions
-                .insert(region_id, RegionInfo::new(region, role))
+                .insert(region_id, RegionInfo::new(region, role, 0), &guard)
                 .is_none(),
             "trying to create new region {} but it already exists.",
             region_id
@@ -274,38 +258,75 @@ impl RegionCollector {
     }
 
     fn update_region(&mut self, region: Region) {
-        let existing_region_info = self.regions.get_mut(&region.get_id()).unwrap();
+        let region_id = region.get_id();
+        let new_end_key = region.get_end_key().to_vec();
+        let guard = self.regions.guard();
 
-        let old_region = &mut existing_region_info.region;
-        assert_eq!(old_region.get_id(), region.get_id());
+        // Get the current region info to check if end_key changed
+        let old_end_key = if let Some(existing_info) = self.regions.get(&region_id, &guard) {
+            let old_key = existing_info.region.get_end_key().to_vec();
+            assert_eq!(existing_info.region.get_id(), region.get_id());
+            old_key
+        } else {
+            panic!("trying to update region {} but it doesn't exist", region_id);
+        };
 
-        // If the end_key changed, the old entry in `region_ranges` should be removed.
-        if old_region.get_end_key() != region.get_end_key() {
-            // The region's end_key has changed.
+        // If the end_key changed, update the region_ranges
+        if old_end_key != new_end_key {
             // Remove the old entry in `self.region_ranges`.
-            let old_end_key = RangeKey::from_end_key(old_region.get_end_key().to_vec());
-
-            let old_id = self.region_ranges.remove(&old_end_key).unwrap();
+            let old_range_key = RangeKey::from_end_key(old_end_key);
+            let old_id = *self
+                .region_ranges_skl
+                .remove(&old_range_key)
+                .unwrap()
+                .value();
             assert_eq!(old_id, region.get_id());
 
             // Insert new entry to `region_ranges`.
-            let end_key = RangeKey::from_end_key(region.get_end_key().to_vec());
-            assert!(
-                self.region_ranges
-                    .insert(end_key, region.get_id())
-                    .is_none()
-            );
+            let end_key = RangeKey::from_end_key(new_end_key);
+            self.region_ranges_skl.insert(end_key, region.get_id());
         }
 
-        // If the region already exists, update it and keep the original role.
-        *old_region = region;
+        // Update the region while preserving the original role
+        self.regions.update(
+            region_id,
+            |existing_info| {
+                let mut updated_info = existing_info.clone();
+                updated_info.region = region.clone();
+                updated_info
+            },
+            &guard,
+        );
     }
 
     fn update_region_buckets(&mut self, region: Region, buckets: Arc<BucketMeta>) {
-        let existing_region_info = self.regions.get_mut(&region.get_id()).unwrap();
-        let old_region = &mut existing_region_info.region;
-        assert_eq!(old_region.get_id(), region.get_id());
-        existing_region_info.buckets = buckets;
+        let region_id = region.get_id();
+        let guard = self.regions.guard();
+        self.regions.update(
+            region_id,
+            |existing_info| {
+                let mut updated_info = existing_info.clone();
+                assert_eq!(updated_info.region.get_id(), region.get_id());
+                updated_info.buckets = buckets.clone();
+                updated_info
+            },
+            &guard,
+        );
+    }
+
+    fn update_region_leader(&mut self, region: Region, leader_id: u64) {
+        let region_id = region.get_id();
+        let guard = self.regions.guard();
+        self.regions.update(
+            region_id,
+            |existing_info| {
+                let mut updated_info = existing_info.clone();
+                assert_eq!(updated_info.region.get_id(), region.get_id());
+                updated_info.leader_id = leader_id;
+                updated_info
+            },
+            &guard,
+        );
     }
 
     fn handle_create_region(&mut self, region: Region, role: StateRole) {
@@ -313,48 +334,76 @@ impl RegionCollector {
         // when we receive an `Update` message, the region may have been deleted for
         // some reason. So we handle it according to whether the region exists in the
         // collection.
-        if self.regions.contains_key(&region.get_id()) {
-            info!(
-                "trying to create region but it already exists, try to update it";
-                "region_id" => region.get_id(),
-            );
-            self.update_region(region);
-        } else {
-            self.create_region(region, role);
+        {
+            let guard = self.regions.guard();
+            if self.regions.get(&region.get_id(), &guard).is_some() {
+                info!(
+                    "trying to create region but it already exists, try to update it";
+                    "region_id" => region.get_id(),
+                );
+                drop(guard);
+                self.update_region(region);
+                return;
+            }
         }
+        self.create_region(region, role);
     }
 
     fn handle_update_region(&mut self, region: Region, role: StateRole) {
-        if self.regions.contains_key(&region.get_id()) {
-            self.update_region(region);
-        } else {
-            info!(
-                "trying to update region but it doesn't exist, try to create it";
-                "region_id" => region.get_id(),
-            );
-            self.create_region(region, role);
+        {
+            let guard = self.regions.guard();
+            if self.regions.get(&region.get_id(), &guard).is_some() {
+                drop(guard);
+                self.update_region(region);
+                return;
+            }
         }
+        info!(
+            "trying to update region but it doesn't exist, try to create it";
+            "region_id" => region.get_id(),
+        );
+        self.create_region(region, role);
     }
 
     fn handle_update_region_buckets(&mut self, region: Region, buckets: Arc<BucketMeta>) {
-        if self.regions.contains_key(&region.get_id()) {
-            self.update_region_buckets(region, buckets);
-        } else {
-            warn!(
-                "trying to update region buckets but the region doesn't exist, ignore";
-                "region_id" => region.get_id(),
-            );
+        {
+            let guard = self.regions.guard();
+            if self.regions.get(&region.get_id(), &guard).is_some() {
+                drop(guard);
+                self.update_region_buckets(region, buckets);
+                return;
+            }
         }
+        warn!(
+            "trying to update region buckets but the region doesn't exist, ignore";
+            "region_id" => region.get_id(),
+        );
+    }
+
+    fn handle_update_region_leader(&mut self, region: Region, leader_id: u64) {
+        {
+            let guard = self.regions.guard();
+            if self.regions.get(&region.get_id(), &guard).is_some() {
+                drop(guard);
+                self.update_region_leader(region, leader_id);
+                return;
+            }
+        }
+        warn!(
+            "trying to update region leader but the region doesn't exist, ignore";
+            "region_id" => region.get_id(),
+        );
     }
 
     fn handle_destroy_region(&mut self, region: Region) {
-        if let Some(removed_region_info) = self.regions.remove(&region.get_id()) {
-            let removed_region = removed_region_info.region;
+        let guard = self.regions.guard();
+        if let Some(removed_region_info) = self.regions.remove(&region.get_id(), &guard) {
+            let removed_region = &removed_region_info.region;
             assert_eq!(removed_region.get_id(), region.get_id());
 
             let end_key = RangeKey::from_end_key(removed_region.get_end_key().to_vec());
 
-            let removed_id = self.region_ranges.remove(&end_key).unwrap();
+            let removed_id = *self.region_ranges_skl.remove(&end_key).unwrap().value();
             assert_eq!(removed_id, region.get_id());
         } else {
             // It's possible that the region is already removed because it's end_key is used
@@ -364,24 +413,24 @@ impl RegionCollector {
                 "region_id" => region.get_id(),
             )
         }
-        self.region_leaders
-            .write()
-            .unwrap()
-            .remove(&region.get_id());
     }
 
     fn handle_role_change(&mut self, region: Region, new_role: StateRole) {
         let region_id = region.get_id();
-
-        if new_role == StateRole::Leader {
-            self.region_leaders.write().unwrap().insert(region_id);
-        } else {
-            self.region_leaders.write().unwrap().remove(&region_id);
-        }
-
-        if let Some(r) = self.regions.get_mut(&region_id) {
-            r.role = new_role;
-            return;
+        {
+            let guard = self.regions.guard();
+            if self.regions.get(&region_id, &guard).is_some() {
+                self.regions.update(
+                    region_id,
+                    |existing_info| {
+                        let mut updated_info = existing_info.clone();
+                        updated_info.role = new_role;
+                        updated_info
+                    },
+                    &guard,
+                );
+                return;
+            }
         }
 
         warn!(
@@ -419,7 +468,8 @@ impl RegionCollector {
     /// this case, and if `clear_regions_in_range` is true, those out-of-date
     /// regions will be removed from the collection.
     fn check_region_range(&mut self, region: &Region, clear_regions_in_range: bool) -> bool {
-        if let Some(region_with_same_id) = self.regions.get(&region.get_id()) {
+        let guard = self.regions.guard();
+        if let Some(region_with_same_id) = self.regions.get(&region.get_id(), &guard) {
             if self.is_region_epoch_stale(region, &region_with_same_id.region) {
                 return false;
             }
@@ -427,15 +477,16 @@ impl RegionCollector {
 
         let mut stale_regions_in_range = vec![];
 
-        for (key, id) in self.region_ranges.range((
+        for e in self.region_ranges_skl.range((
             Excluded(RangeKey::from_start_key(region.get_start_key().to_vec())),
             Unbounded,
         )) {
+            let id = e.value();
             if *id == region.get_id() {
                 continue;
             }
 
-            let current_region = &self.regions[id].region;
+            let current_region = &self.regions.get(id, &guard).unwrap().region;
             if !region.get_end_key().is_empty()
                 && current_region.get_start_key() >= region.get_end_key()
             {
@@ -456,59 +507,103 @@ impl RegionCollector {
             );
             // Remove it since it's a out-of-date region info.
             if clear_regions_in_range {
-                stale_regions_in_range.push((key.clone(), *id));
+                stale_regions_in_range.push((e.key().clone(), *id));
             }
         }
 
         // Remove all pending-remove regions
         for (key, id) in stale_regions_in_range {
-            self.regions.remove(&id).unwrap();
-            self.region_ranges.remove(&key).unwrap();
+            self.regions.remove(&id, &guard).unwrap();
+            self.region_ranges_skl.remove(&key).unwrap();
         }
 
         true
     }
 
     pub fn handle_seek_region(&self, from_key: Vec<u8>, callback: SeekRegionCallback) {
+        let guard = self.regions.guard();
         let mut iter = self
-            .region_ranges
+            .region_ranges_skl
             .range((Excluded(RangeKey::from_start_key(from_key)), Unbounded))
-            .map(|(_, region_id)| &self.regions[region_id]);
+            .filter_map(|e| self.regions.get(e.value(), &guard));
         callback(&mut iter)
     }
 
-    pub fn handle_find_region_by_id(&self, region_id: u64, callback: Callback<Option<RegionInfo>>) {
-        callback(self.regions.get(&region_id).cloned());
+    pub fn handle_find_region_by_key(&self, from_key: Vec<u8>) -> Option<RegionInfo> {
+        let guard = self.regions.guard();
+        let mut iter = self
+            .region_ranges_skl
+            .range((Excluded(RangeKey::from_start_key(from_key)), Unbounded))
+            .filter_map(|e| self.regions.get(e.value(), &guard));
+        let region = iter.next()?;
+        Some(region.clone())
     }
 
-    // It returns the regions covered by [start_key, end_key]
+    pub fn handle_find_region_by_id(&self, region_id: u64) -> Option<RegionInfo> {
+        let guard = self.regions.guard();
+        self.regions.get(&region_id, &guard).cloned()
+    }
+
     pub fn handle_get_regions_in_range(
         &self,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
+        end_key_exclusive: bool,
         reverse: bool,
         limit: usize,
-        callback: Callback<Vec<RegionInfo>>,
-    ) {
+    ) -> Vec<RegionInfo> {
         let end_key = RangeKey::from_end_key(end_key);
         let mut regions = vec![];
-        for (_, region_id) in self
-            .region_ranges
+        let guard = self.regions.guard();
+        for e in self
+            .region_ranges_skl
             .range((Excluded(RangeKey::from_start_key(start_key)), Unbounded))
         {
-            let region_info = &self.regions[region_id];
-            if RangeKey::from_start_key(region_info.region.get_start_key().to_vec()) > end_key {
-                break;
-            }
-            regions.push(region_info.clone());
-            if limit > 0 && regions.len() >= limit {
-                break;
+            if let Some(region_info) = self.regions.get(e.value(), &guard) {
+                let region_start_key =
+                    RangeKey::from_start_key(region_info.region.get_start_key().to_vec());
+                let should_break = if end_key_exclusive {
+                    region_start_key >= end_key
+                } else {
+                    region_start_key > end_key
+                };
+                if should_break {
+                    break;
+                }
+                regions.push(region_info.clone());
+                if limit > 0 && regions.len() >= limit {
+                    break;
+                }
             }
         }
         if reverse {
             regions.reverse();
         }
-        callback(regions);
+        regions
+    }
+
+    pub fn handle_get_region_ids_in_range(
+        &self,
+        start_key: Vec<u8>,
+        end_key_exclusive: Vec<u8>,
+    ) -> Vec<u64> {
+        let end_key_exclusive = RangeKey::from_end_key(end_key_exclusive);
+        let mut region_ids = vec![];
+        let guard = self.regions.guard();
+        for e in self
+            .region_ranges_skl
+            .range((Excluded(RangeKey::from_start_key(start_key)), Unbounded))
+        {
+            if let Some(region_info) = self.regions.get(e.value(), &guard) {
+                if RangeKey::from_start_key(region_info.region.get_start_key().to_vec())
+                    >= end_key_exclusive
+                {
+                    break;
+                }
+                region_ids.push(region_info.region.get_id());
+            }
+        }
+        region_ids
     }
 
     fn handle_raftstore_event(&mut self, event: RaftStoreEvent) {
@@ -551,6 +646,9 @@ impl RegionCollector {
             RaftStoreEvent::UpdateRegionBuckets { region, buckets } => {
                 self.handle_update_region_buckets(region, buckets);
             }
+            RaftStoreEvent::LeaderChange { region, leader_id } => {
+                self.handle_update_region_leader(region, leader_id);
+            }
         }
     }
 }
@@ -563,26 +661,8 @@ impl Runnable for RegionCollector {
             RegionInfoQuery::RaftStoreEvent(event) => {
                 self.handle_raftstore_event(event);
             }
-            RegionInfoQuery::SeekRegion { from, callback } => {
-                self.handle_seek_region(from, callback);
-            }
-            RegionInfoQuery::FindRegionById {
-                region_id,
-                callback,
-            } => {
-                self.handle_find_region_by_id(region_id, callback);
-            }
-            RegionInfoQuery::GetRegionsInRange {
-                start_key,
-                end_key,
-                reverse,
-                limit,
-                callback,
-            } => {
-                self.handle_get_regions_in_range(start_key, end_key, reverse, limit, callback);
-            }
             RegionInfoQuery::DebugDump(tx) => {
-                tx.send((self.regions.clone(), self.region_ranges.clone()))
+                tx.send((self.regions.clone(), self.region_ranges_skl.clone()))
                     .unwrap();
             }
         }
@@ -596,9 +676,10 @@ impl RunnableWithTimer for RegionCollector {
         let mut count = 0;
         let mut leader = 0;
         let mut buckets_count = 0;
-        for r in self.regions.values() {
+        let guard = self.regions.guard();
+        for (_k, r) in self.regions.iter(&guard) {
             count += 1;
-            if r.role == StateRole::Leader {
+            if r.is_leader() {
                 leader += 1;
             }
             buckets_count += r.buckets.keys.len().saturating_sub(1);
@@ -630,10 +711,7 @@ pub struct RegionInfoAccessor {
     worker: Worker,
     scheduler: Scheduler<RegionInfoQuery>,
 
-    /// Region leader ids set on the store.
-    ///
-    /// Others can access this info directly, such as RaftKV.
-    region_leaders: Arc<RwLock<HashSet<u64>>>,
+    collector: RegionCollector,
 }
 
 impl RegionInfoAccessor {
@@ -642,24 +720,16 @@ impl RegionInfoAccessor {
     /// once. If it's needed in different places, just clone it, and their
     /// contents are shared.
     pub fn new(host: &mut CoprocessorHost<impl KvEngine>) -> Self {
-        let region_leaders = Arc::new(RwLock::new(HashSet::default()));
         let worker = WorkerBuilder::new("region-collector-worker").create();
-        let scheduler = worker.start_with_timer(
-            "region-collector-worker",
-            RegionCollector::new(region_leaders.clone()),
-        );
+        let collector = RegionCollector::default();
+        let scheduler = worker.start_with_timer("region-collector-worker", collector.clone());
         register_region_event_listener(host, scheduler.clone());
 
         Self {
             worker,
             scheduler,
-            region_leaders,
+            collector,
         }
-    }
-
-    /// Get a set of region leader ids.
-    pub fn region_leaders(&self) -> Arc<RwLock<HashSet<u64>>> {
-        self.region_leaders.clone()
     }
 
     /// Stops the `RegionInfoAccessor`. It should be stopped after raftstore.
@@ -677,24 +747,42 @@ impl RegionInfoAccessor {
         rx.recv().unwrap()
     }
 
+    /// If end_key_exclusive is true, it returns the regions covered by
+    /// [start_key, end_key)
+    /// If end_key_exclusive is false, it returns the regions covered by
+    /// [start_key, end_key]
     pub fn get_regions_in_range_opt(
         &self,
         start_key: &[u8],
         end_key: &[u8],
+        end_key_exclusive: bool,
         reverse: bool,
         limit: usize,
-        callback: Callback<Vec<RegionInfo>>,
-    ) -> Result<()> {
-        let msg = RegionInfoQuery::GetRegionsInRange {
-            start_key: start_key.to_vec(),
-            end_key: end_key.to_vec(),
+    ) -> Vec<RegionInfo> {
+        self.collector.handle_get_regions_in_range(
+            start_key.to_vec(),
+            end_key.to_vec(),
+            end_key_exclusive,
             reverse,
             limit,
-            callback,
-        };
-        self.scheduler
-            .schedule(msg)
-            .map_err(|e| box_err!("failed to send request to region collector: {:?}", e))
+        )
+    }
+
+    pub fn get_region_ids_in_range(
+        &self,
+        start_key: Vec<u8>,
+        end_key_exclusive: Vec<u8>,
+    ) -> Vec<u64> {
+        self.collector
+            .handle_get_region_ids_in_range(start_key, end_key_exclusive)
+    }
+
+    pub fn map_len(&self) -> usize {
+        self.collector.regions.len()
+    }
+
+    pub fn skl_len(&self) -> usize {
+        self.collector.region_ranges_skl.len()
     }
 }
 
@@ -705,11 +793,7 @@ pub trait RegionInfoProvider: Send + Sync {
         unimplemented!()
     }
 
-    fn find_region_by_id(
-        &self,
-        _reigon_id: u64,
-        _callback: Callback<Option<RegionInfo>>,
-    ) -> Result<()> {
+    fn find_region_by_id(&self, _reigon_id: u64) -> Option<RegionInfo> {
         unimplemented!()
     }
 
@@ -717,6 +801,7 @@ pub trait RegionInfoProvider: Send + Sync {
         unimplemented!()
     }
 
+    // start_key and end_key are both inclusive
     fn get_regions_in_range(&self, _start_key: &[u8], _end_key: &[u8]) -> Result<Vec<Region>> {
         unimplemented!()
     }
@@ -724,76 +809,24 @@ pub trait RegionInfoProvider: Send + Sync {
 
 impl RegionInfoProvider for RegionInfoAccessor {
     fn seek_region(&self, from: &[u8], callback: SeekRegionCallback) -> Result<()> {
-        let msg = RegionInfoQuery::SeekRegion {
-            from: from.to_vec(),
-            callback,
-        };
-        self.scheduler
-            .schedule(msg)
-            .map_err(|e| box_err!("failed to send request to region collector: {:?}", e))
+        self.collector.handle_seek_region(from.to_vec(), callback);
+        Ok(())
     }
 
-    fn find_region_by_id(
-        &self,
-        region_id: u64,
-        callback: Callback<Option<RegionInfo>>,
-    ) -> Result<()> {
-        let msg = RegionInfoQuery::FindRegionById {
-            region_id,
-            callback,
-        };
-        self.scheduler
-            .schedule(msg)
-            .map_err(|e| box_err!("failed to send request to region collector: {:?}", e))
+    fn find_region_by_id(&self, region_id: u64) -> Option<RegionInfo> {
+        self.collector.handle_find_region_by_id(region_id)
     }
 
     fn find_region_by_key(&self, key: &[u8]) -> Result<Region> {
-        let key_in_vec = key.to_vec();
-        let (tx, rx) = mpsc::channel();
-        self.seek_region(
-            key,
-            Box::new(move |iter| {
-                if let Some(info) = iter.next()
-                    && info.region.get_start_key() <= key_in_vec.as_slice()
-                {
-                    if let Err(e) = tx.send(info.region.clone()) {
-                        warn!("failed to send find_region_by_key result: {:?}", e);
-                    }
-                }
-            }),
-        )?;
-        rx.recv().map_err(|e| {
-            box_err!(
-                "failed to receive find_region_by_key result from region collector: {:?}",
-                e
-            )
-        })
+        let Some(region) = self.collector.handle_find_region_by_key(key.to_vec()) else {
+            return Err(box_err!("Not found region containing {:?}", key));
+        };
+        Ok(region.region)
     }
 
     fn get_regions_in_range(&self, start_key: &[u8], end_key: &[u8]) -> Result<Vec<Region>> {
-        let (tx, rx) = mpsc::channel();
-        self.get_regions_in_range_opt(
-            start_key,
-            end_key,
-            false,
-            0,
-            Box::new(move |region_infos| {
-                if let Err(e) = tx.send(
-                    region_infos
-                        .into_iter()
-                        .map(|region_info| region_info.region)
-                        .collect(),
-                ) {
-                    warn!("failed to send get_regions_in_range result: {:?}", e);
-                }
-            }),
-        )?;
-        rx.recv().map_err(|e| {
-            box_err!(
-                "failed to receive get_regions_in_range result from region collector: {:?}",
-                e
-            )
-        })
+        let region_infos = self.get_regions_in_range_opt(start_key, end_key, false, false, 0);
+        Ok(region_infos.into_iter().map(|info| info.region).collect())
     }
 }
 
@@ -806,7 +839,7 @@ impl MockRegionInfoProvider {
         MockRegionInfoProvider(Mutex::new(
             regions
                 .into_iter()
-                .map(|region| RegionInfo::new(region, StateRole::Leader))
+                .map(|region| RegionInfo::new(region, StateRole::Leader, 0))
                 .collect_vec(),
         ))
     }
@@ -881,16 +914,17 @@ mod tests {
 
     use super::*;
 
-    fn new_region_collector() -> RegionCollector {
-        RegionCollector::new(Arc::new(RwLock::new(HashSet::default())))
-    }
-
     fn new_region(id: u64, start_key: &[u8], end_key: &[u8], version: u64) -> Region {
         let mut region = Region::default();
         region.set_id(id);
         region.set_start_key(start_key.to_vec());
         region.set_end_key(end_key.to_vec());
         region.mut_region_epoch().set_version(version);
+        // Add a dummy peer to avoid early return in handle_raftstore_event
+        let mut peer = kvproto::metapb::Peer::default();
+        peer.set_id(id);
+        peer.set_store_id(1);
+        region.mut_peers().push(peer);
         region
     }
 
@@ -912,12 +946,13 @@ mod tests {
             .map(|(r, _)| (RangeKey::from_end_key(r.get_end_key().to_vec()), r.get_id()))
             .collect();
 
+        let guard = c.regions.guard();
         let mut is_regions_equal = c.regions.len() == regions.len();
 
         if is_regions_equal {
             for (expect_region, expect_role) in regions {
                 is_regions_equal = is_regions_equal
-                    && c.regions.get(&expect_region.get_id()).map_or(
+                    && c.regions.get(&expect_region.get_id(), &guard).map_or(
                         false,
                         |RegionInfo { region, role, .. }| {
                             expect_region == region && expect_role == role
@@ -930,20 +965,27 @@ mod tests {
             }
         }
         if !is_regions_equal {
-            panic!("regions: expect {:?}, but got {:?}", regions, c.regions);
+            // Create a debug representation of the actual regions
+            let actual_regions: Vec<_> = c
+                .regions
+                .iter(&guard)
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+            panic!(
+                "regions: expect {:?}, but got {:?}",
+                regions, actual_regions
+            );
         }
 
-        let mut is_ranges_equal = c.region_ranges.len() == region_ranges.len();
+        let mut is_ranges_equal = c.region_ranges_skl.len() == region_ranges.len();
         is_ranges_equal = is_ranges_equal
-            && c.region_ranges.iter().zip(region_ranges.iter()).all(
-                |((actual_key, actual_id), (expect_key, expect_id))| {
-                    actual_key == expect_key && actual_id == expect_id
-                },
+            && c.region_ranges_skl.iter().zip(region_ranges.iter()).all(
+                |(e, (expect_key, expect_id))| e.key() == expect_key && e.value() == expect_id,
             );
         if !is_ranges_equal {
             panic!(
                 "region_ranges: expect {:?}, but got {:?}",
-                region_ranges, c.region_ranges
+                region_ranges, c.region_ranges_skl
             );
         }
     }
@@ -952,7 +994,7 @@ mod tests {
     /// successfully loaded.
     fn must_load_regions(c: &mut RegionCollector, regions: &[Region]) {
         assert!(c.regions.is_empty());
-        assert!(c.region_ranges.is_empty());
+        assert!(c.region_ranges_skl.is_empty());
 
         for region in regions {
             must_create_region(c, region, StateRole::Follower);
@@ -966,41 +1008,65 @@ mod tests {
     }
 
     fn must_create_region(c: &mut RegionCollector, region: &Region, role: StateRole) {
-        assert!(c.regions.get(&region.get_id()).is_none());
+        let guard = c.regions.guard();
+        assert!(c.regions.get(&region.get_id(), &guard).is_none());
+        drop(guard);
 
         c.handle_raftstore_event(RaftStoreEvent::CreateRegion {
             region: region.clone(),
             role,
         });
 
-        assert_eq!(&c.regions[&region.get_id()].region, region);
+        let guard = c.regions.guard();
+        let region_info = c.regions.get(&region.get_id(), &guard).unwrap_or_else(|| {
+            panic!(
+                "Region {} should exist after creation but was not found",
+                region.get_id()
+            )
+        });
+        assert_eq!(&region_info.region, region);
         assert_eq!(
-            c.region_ranges[&RangeKey::from_end_key(region.get_end_key().to_vec())],
-            region.get_id()
+            c.region_ranges_skl
+                .get(&RangeKey::from_end_key(region.get_end_key().to_vec()))
+                .unwrap()
+                .value(),
+            &region.get_id()
         );
     }
 
     fn must_update_region(c: &mut RegionCollector, region: &Region, role: StateRole) {
-        let old_end_key = c
-            .regions
-            .get(&region.get_id())
-            .map(|r| r.region.get_end_key().to_vec());
+        let old_end_key = {
+            let guard = c.regions.guard();
+            c.regions
+                .get(&region.get_id(), &guard)
+                .map(|r| r.region.get_end_key().to_vec())
+        };
 
         c.handle_raftstore_event(RaftStoreEvent::UpdateRegion {
             region: region.clone(),
             role,
         });
 
-        if let Some(r) = c.regions.get(&region.get_id()) {
+        let guard = c.regions.guard();
+        if let Some(r) = c.regions.get(&region.get_id(), &guard) {
             assert_eq!(r.region, *region);
             assert_eq!(
-                c.region_ranges[&RangeKey::from_end_key(region.get_end_key().to_vec())],
-                region.get_id()
+                c.region_ranges_skl
+                    .get(&RangeKey::from_end_key(region.get_end_key().to_vec()))
+                    .unwrap()
+                    .value(),
+                &region.get_id()
             );
         } else {
-            let another_region_id =
-                c.region_ranges[&RangeKey::from_end_key(region.get_end_key().to_vec())];
-            let version = c.regions[&another_region_id]
+            let another_region_id = *c
+                .region_ranges_skl
+                .get(&RangeKey::from_end_key(region.get_end_key().to_vec()))
+                .unwrap()
+                .value();
+            let version = c
+                .regions
+                .get(&another_region_id, &guard)
+                .unwrap()
                 .region
                 .get_region_epoch()
                 .get_version();
@@ -1012,9 +1078,9 @@ mod tests {
         if let Some(old_end_key) = old_end_key {
             if old_end_key.as_slice() != region.get_end_key() {
                 assert!(
-                    c.region_ranges
+                    c.region_ranges_skl
                         .get(&RangeKey::from_end_key(old_end_key))
-                        .map_or(true, |id| *id != region.get_id())
+                        .map_or(true, |e| *e.value() != region.get_id())
                 );
             }
         }
@@ -1027,25 +1093,32 @@ mod tests {
             region: region.clone(),
             buckets: Arc::new(bucket_meta),
         });
-        let r = c.regions.get(&region.get_id()).unwrap();
+        let guard = c.regions.guard();
+        let r = c.regions.get(&region.get_id(), &guard).unwrap();
         assert_eq!(r.region, *region);
         assert_eq!(r.buckets.keys.len() - 1, buckets);
     }
 
     fn must_destroy_region(c: &mut RegionCollector, region: Region) {
         let id = region.get_id();
-        let end_key = c.regions.get(&id).map(|r| r.region.get_end_key().to_vec());
+        let end_key = {
+            let guard = c.regions.guard();
+            c.regions
+                .get(&id, &guard)
+                .map(|r| r.region.get_end_key().to_vec())
+        };
 
         c.handle_raftstore_event(RaftStoreEvent::DestroyRegion { region });
 
-        assert!(c.regions.get(&id).is_none());
+        let guard = c.regions.guard();
+        assert!(c.regions.get(&id, &guard).is_none());
         // If the region_id corresponding to the end_key doesn't equals to `id`, it
         // shouldn't be removed since it was used by another region.
         if let Some(end_key) = end_key {
             assert!(
-                c.region_ranges
+                c.region_ranges_skl
                     .get(&RangeKey::from_end_key(end_key))
-                    .map_or(true, |r| *r != id)
+                    .map_or(true, |e| *e.value() != id)
             );
         }
     }
@@ -1056,7 +1129,8 @@ mod tests {
             role,
         });
 
-        if let Some(r) = c.regions.get(&region.get_id()) {
+        let guard = c.regions.guard();
+        if let Some(r) = c.regions.get(&region.get_id(), &guard) {
             assert_eq!(r.role, role);
         }
     }
@@ -1086,7 +1160,7 @@ mod tests {
 
     #[test]
     fn test_ignore_invalid_version() {
-        let mut c = new_region_collector();
+        let mut c = RegionCollector::default();
 
         c.handle_raftstore_event(RaftStoreEvent::CreateRegion {
             region: new_region(1, b"k1", b"k3", 0),
@@ -1115,7 +1189,7 @@ mod tests {
             region_with_conf(6, b"k7", b"", 20, 10),
         ];
 
-        let mut c = new_region_collector();
+        let mut c = RegionCollector::default();
         must_load_regions(&mut c, regions);
 
         assert!(c.check_region_range(&region_with_conf(1, b"", b"k1", 10, 10), false));
@@ -1178,7 +1252,7 @@ mod tests {
             new_region(6, b"k7", b"", 1),
         ];
 
-        let mut c = new_region_collector();
+        let mut c = RegionCollector::default();
         must_load_regions(&mut c, &init_regions);
         let mut regions: Vec<_> = init_regions
             .iter()
@@ -1209,7 +1283,7 @@ mod tests {
         check_collection(&c, &[]);
 
         // Test that the region with the same id will be kept in the collection
-        c = new_region_collector();
+        c = RegionCollector::default();
         must_load_regions(&mut c, &init_regions);
 
         c.check_region_range(&new_region(3, b"k1", b"k7", 2), true);
@@ -1228,7 +1302,7 @@ mod tests {
 
     #[test]
     fn test_basic_updating() {
-        let mut c = new_region_collector();
+        let mut c = RegionCollector::default();
         let init_regions = &[
             new_region(1, b"", b"k1", 1),
             new_region(2, b"k1", b"k9", 1),
@@ -1296,7 +1370,7 @@ mod tests {
     /// correct, no matter what the events' order to happen is.
     /// Values in `seq` and of `derive_index` start from 1.
     fn test_split_impl(derive_index: usize, seq: &[usize]) {
-        let mut c = new_region_collector();
+        let mut c = RegionCollector::default();
         let init_regions = &[
             new_region(1, b"", b"k1", 1),
             new_region(2, b"k1", b"k9", 1),
@@ -1349,7 +1423,7 @@ mod tests {
     }
 
     fn test_merge_impl(to_left: bool, update_first: bool) {
-        let mut c = new_region_collector();
+        let mut c = RegionCollector::default();
         let init_regions = &[
             region_with_conf(1, b"", b"k1", 1, 1),
             region_with_conf(2, b"k1", b"k2", 1, 100),
@@ -1393,13 +1467,27 @@ mod tests {
 
     #[test]
     fn test_extreme_cases() {
-        let mut c = new_region_collector();
+        let mut c = RegionCollector::default();
         let init_regions = &[
             new_region(1, b"", b"k1", 1),
             new_region(2, b"k1", b"k9", 1),
             new_region(3, b"k9", b"", 1),
         ];
         must_load_regions(&mut c, init_regions);
+        assert_eq!(
+            c.handle_get_regions_in_range(b"k1".to_vec(), b"k9".to_vec(), true, false, 0)
+                .len(),
+            1
+        );
+        assert_eq!(
+            c.handle_get_regions_in_range(b"k1".to_vec(), b"k9".to_vec(), false, false, 0)
+                .len(),
+            2
+        );
+        assert_eq!(
+            c.handle_get_region_ids_in_range(b"k1".to_vec(), b"k9".to_vec()),
+            vec![2]
+        );
 
         // While splitting, region 4 created but region 2 still has an `update` event
         // which haven't been handled.

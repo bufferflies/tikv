@@ -603,7 +603,7 @@ where
                 ),
             ),
             engines.kv.clone(),
-            self.region_info_accessor.region_leaders(),
+            self.region_info_accessor.clone(),
         );
 
         self.engines = Some(TikvEngines {

@@ -486,6 +486,8 @@ pub(crate) struct Peer {
 
     pub(crate) need_campaign: bool,
 
+    /// The id of the leader since last report region leader change event.
+    reported_leader_id: u64,
     leader_missing_time: Option<Instant>,
     leader_lease: Lease,
 
@@ -591,6 +593,7 @@ impl Peer {
             pending_remove: false,
             delay_destroy: false,
             delay_destroy_merged_target: None,
+            reported_leader_id: 0,
             leader_missing_time: Some(Instant::now()),
             last_applying_idx: applied_index,
             last_urgent_proposal_idx: u64::MAX,
@@ -1643,6 +1646,14 @@ impl Peer {
                     .send_store(StoreMsg::SnapshotReady(self.region_id));
                 return;
             }
+        }
+        if self.reported_leader_id != self.raft_group.raft.leader_id {
+            self.reported_leader_id = self.raft_group.raft.leader_id;
+            ctx.global.coprocessor_host.on_region_changed(
+                self.region(),
+                RegionChangeEvent::UpdateLeader(self.reported_leader_id),
+                self.get_role(),
+            );
         }
         let mut ready = self.raft_group.ready();
         let ready_stats = ReadyStats::new(&ready);
@@ -2888,11 +2899,8 @@ impl Peer {
             "peer_id" => self.peer_id(),
             "region" => ?region,
         );
-
         // TODO(x) update commit group
-        meta.region_map.put(region);
-        let readers = meta.readers.pin();
-        readers.insert(self.region_id, ReadDelegate::from_peer(self));
+        meta.set_region(region, self, RegionChangeReason::RestoreSnapshot);
         true
     }
 

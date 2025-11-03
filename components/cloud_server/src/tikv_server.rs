@@ -696,7 +696,7 @@ impl TikvServer {
             resource_tag_factory.clone(),
             Arc::clone(&self.quota_limiter),
             self.pd_client.feature_gate().clone(),
-            Some(self.router.clone()),
+            Some(self.region_info_accessor.clone()),
         )
         .unwrap_or_else(|e| fatal!("failed to create raft storage: {}", e));
 
@@ -1019,6 +1019,10 @@ impl TikvServer {
 
     pub fn get_raft_engine(&self) -> rfengine::RfEngine {
         self.raw_engines.raft.clone()
+    }
+
+    pub fn get_region_info_accessor(&self) -> RegionInfoAccessor {
+        self.region_info_accessor.clone()
     }
 
     pub fn get_store_id(&self) -> u64 {

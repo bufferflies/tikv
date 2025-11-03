@@ -14,13 +14,13 @@ use std::{
     result,
     sync::{
         atomic::{AtomicU8, Ordering},
-        Arc, RwLock,
+        Arc,
     },
     task::Poll,
     time::Duration,
 };
 
-use collections::{HashMap, HashSet};
+use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::{CfName, KvEngine, MvccProperties, Snapshot};
 use futures::{future::BoxFuture, task::AtomicWaker, Future, Stream, StreamExt};
@@ -40,6 +40,7 @@ pub use raft_extension::RaftRouterWrap;
 use raftstore::{
     coprocessor::{
         dispatcher::BoxReadIndexObserver, Coprocessor, CoprocessorHost, ReadIndexObserver,
+        RegionInfoProvider,
     },
     errors::Error as RaftServerError,
     router::{LocalReadRouter, RaftStoreRouter},
@@ -47,6 +48,7 @@ use raftstore::{
         self, Callback as StoreCallback, RaftCmdExtraOpts, ReadIndexContext, ReadResponse,
         RegionSnapshot, StoreMsg, WriteResponse,
     },
+    RegionInfoAccessor,
 };
 use thiserror::Error;
 use tikv_kv::{write_modifies, OnAppliedCb, WriteEvent};
@@ -301,7 +303,7 @@ where
     router: RaftRouterWrap<S, E>,
     engine: E,
     txn_extra_scheduler: Option<Arc<dyn TxnExtraScheduler>>,
-    region_leaders: Arc<RwLock<HashSet<u64>>>,
+    region_info_accessor: RegionInfoAccessor,
 }
 
 impl<E, S> RaftKv<E, S>
@@ -310,12 +312,12 @@ where
     S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
 {
     /// Create a RaftKv using specified configuration.
-    pub fn new(router: S, engine: E, region_leaders: Arc<RwLock<HashSet<u64>>>) -> RaftKv<E, S> {
+    pub fn new(router: S, engine: E, region_info_accessor: RegionInfoAccessor) -> RaftKv<E, S> {
         RaftKv {
             router: RaftRouterWrap::new(router),
             engine,
             txn_extra_scheduler: None,
-            region_leaders,
+            region_info_accessor,
         }
     }
 
@@ -406,10 +408,14 @@ where
 
     fn precheck_write_with_ctx(&self, ctx: &Context) -> kv::Result<()> {
         let region_id = ctx.get_region_id();
-        match self.region_leaders.read().unwrap().get(&region_id) {
-            Some(_) => Ok(()),
-            None => Err(RaftServerError::NotLeader(region_id, None).into()),
+        let Some(region) = self.region_info_accessor.find_region_by_id(region_id) else {
+            return Err(RaftServerError::RegionNotFound(region_id).into());
+        };
+        if region.role != StateRole::Leader {
+            let leader = region.leader_peer().cloned();
+            return Err(RaftServerError::NotLeader(region_id, leader).into());
         }
+        Ok(())
     }
 
     type WriteRes = impl Stream<Item = WriteEvent> + Send + Unpin;

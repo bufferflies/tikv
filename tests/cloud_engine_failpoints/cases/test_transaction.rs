@@ -93,7 +93,6 @@ fn test_scheduler_shard_is_active() {
     let mut client = cluster.new_client();
 
     fail::cfg("check_leader_peer_is_leader", "return(false)").unwrap();
-    fail::cfg("scheduler_shard_is_active", "return(false)").unwrap();
 
     let mut mutation = Mutation::default();
     let k1 = i_to_key(1);
@@ -116,6 +115,5 @@ fn test_scheduler_shard_is_active() {
     assert!(err.has_not_leader(), "{:?}", err);
     assert!(err.get_not_leader().has_leader(), "{:?}", err);
     assert!(err.get_not_leader().get_leader().get_id() > 0);
-    fail::remove("scheduler_shard_is_active");
     fail::remove("check_leader_peer_is_leader");
 }

@@ -39,6 +39,7 @@ use kvproto::{
 };
 use log_wrappers::Value;
 use pd_client::{check_regions_boundary, pd_control, PdClient};
+use raftstore::RegionInfoAccessor;
 use rand::Rng;
 use rfstore::{
     store::{cmd_resp::message_error, Callback, CustomBuilder},
@@ -367,6 +368,11 @@ impl ServerCluster {
     pub fn get_rfengine(&self, node_id: u16) -> rfengine::RfEngine {
         let server = self.servers.get(&node_id).unwrap();
         server.get_raft_engine()
+    }
+
+    pub fn get_region_info_accessor(&self, node_id: u16) -> RegionInfoAccessor {
+        let server = self.servers.get(&node_id).unwrap();
+        server.get_region_info_accessor()
     }
 
     pub fn get_snap(&self, node_id: u16, key: &[u8]) -> kvengine::SnapAccess {

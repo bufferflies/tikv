@@ -590,6 +590,7 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
     // Check after verify data, to ensure that PD heartbeat have updated region
     // stats.
     verify_cluster_stats(cluster, REGION_BUCKET_SIZE.0, Duration::from_secs(30));
+    verify_region_info_accessor(cluster);
 
     check_br();
     check_load_data();

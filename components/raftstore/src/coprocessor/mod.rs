@@ -299,6 +299,7 @@ pub enum RegionChangeReason {
     CommitMerge,
     RollbackMerge,
     RestoreShard,
+    RestoreSnapshot,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -307,6 +308,7 @@ pub enum RegionChangeEvent {
     Update(RegionChangeReason),
     Destroy,
     UpdateBuckets(Arc<BucketMeta>),
+    UpdateLeader(u64),
 }
 
 pub trait RegionChangeObserver: Coprocessor {

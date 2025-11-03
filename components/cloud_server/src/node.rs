@@ -10,15 +10,12 @@ use protobuf::Message;
 use raftstore::{
     coprocessor::dispatcher::CoprocessorHost,
     store::{initial_region, FlowStatsReporter},
+    RegionInfoAccessor,
 };
 use resource_control::ResourceController;
 use resource_metering::ResourceTagFactory;
-use rfstore::{
-    store::{
-        self, store_fsm::StoreMeta, Config as StoreConfig, Engines, PdTask, RaftBatchSystem,
-        Transport,
-    },
-    RaftRouter,
+use rfstore::store::{
+    self, store_fsm::StoreMeta, Config as StoreConfig, Engines, PdTask, RaftBatchSystem, Transport,
 };
 use tikv::{
     import::SstImporter,
@@ -54,7 +51,7 @@ pub fn create_raft_storage<R: FlowStatsReporter, F: KvFormat>(
     resource_tag_factory: ResourceTagFactory,
     quota_limiter: Arc<QuotaLimiter>,
     feature_gate: FeatureGate,
-    router: Option<RaftRouter>,
+    region_info_accessor: Option<RegionInfoAccessor>,
 ) -> Result<Storage<RaftKv, LockManager, F>> {
     let store = Storage::from_engine(
         engine,
@@ -69,7 +66,7 @@ pub fn create_raft_storage<R: FlowStatsReporter, F: KvFormat>(
         quota_limiter,
         feature_gate,
         None,
-        router,
+        region_info_accessor,
     )?;
     Ok(store)
 }

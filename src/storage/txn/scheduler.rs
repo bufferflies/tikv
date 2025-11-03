@@ -43,22 +43,20 @@ use engine_traits::{CF_DEFAULT, CF_LOCK, CF_WRITE};
 use futures::{compat::Future01CompatExt, StreamExt};
 use kvproto::{
     kvrpcpb::{self, CommandPri, Context, DiskFullOpt, ExtraOp},
-    metapb,
     pdpb::QueryKind,
 };
 use parking_lot::{Mutex, MutexGuard, RwLockWriteGuard};
 use pd_client::{Feature, FeatureGate};
-use raftstore::store::{FlowStatsReporter, TxnExt};
-use resource_metering::{FutureExt, ResourceTagFactory};
-use rfstore::{
-    store::{Callback, CasualMessage},
-    RaftRouter, RaftStoreRouter,
+use raftstore::{
+    coprocessor::RegionInfoProvider,
+    store::{FlowStatsReporter, TxnExt},
+    RegionInfoAccessor,
 };
+use resource_metering::{FutureExt, ResourceTagFactory};
 use smallvec::{smallvec, SmallVec};
 use tikv_kv::{Modify, Snapshot, SnapshotExt, WriteData, WriteEvent};
 use tikv_util::{
     deadline::Deadline,
-    future::paired_future_callback,
     quota_limiter::QuotaLimiter,
     sys::thread::ThreadBuildWrapper,
     time::{duration_to_sec, Instant},
@@ -302,7 +300,7 @@ struct SchedulerInner<L: LockManager> {
     quota_limiter: Arc<QuotaLimiter>,
     feature_gate: FeatureGate,
 
-    router: Option<RaftRouter>,
+    region_info_accessor: Option<RegionInfoAccessor>,
 }
 
 #[inline]
@@ -465,7 +463,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         quota_limiter: Arc<QuotaLimiter>,
         feature_gate: FeatureGate,
         read_pool_handle: ReadPoolHandle,
-        router: Option<RaftRouter>,
+        region_info_accessor: Option<RegionInfoAccessor>,
     ) -> Self {
         let t = Instant::now_coarse();
         let mut task_slots = Vec::with_capacity(TASKS_SLOTS_NUM);
@@ -515,7 +513,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             lock_wait_queues,
             quota_limiter,
             feature_gate,
-            router,
+            region_info_accessor,
         });
 
         slow_log!(
@@ -545,34 +543,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
         // Workaround for the issue that the pending command is keep increasing, when
         // there is no leader in raft group.
-        if let Some(kvengine) = self.inner.engine.as_ref() {
-            let shard_is_active = kvengine
-                .get_shard(region_id)
-                .map(|shard| shard.is_active())
-                .unwrap_or(false);
-            let is_active = fail::eval("scheduler_shard_is_active", |t| {
-                t.and_then(|s: String| s.parse::<bool>().ok())
-            })
-            .flatten()
-            .unwrap_or(shard_is_active);
-            if !is_active {
-                SCHED_STAGE_COUNTER_VEC.get(cmd.tag()).error.inc();
-                let scheduler = self.clone();
-                self.inner.spawn_background(async move {
-                    let leader = scheduler.check_leader(region_id).await;
-                    let mut not_leader_err = kvproto::errorpb::Error::default();
-                    not_leader_err.mut_not_leader().set_region_id(region_id);
-                    if let Some(leader) = leader {
-                        not_leader_err.mut_not_leader().set_leader(leader);
-                    }
-                    callback.execute(ProcessResult::Failed {
-                        err: StorageError::from(StorageErrorInner::Kv(kv::Error::from(
-                            kv::ErrorInner::Request(not_leader_err),
-                        ))),
-                    });
-                });
-                return;
-            }
+        if let Err(err) = self.check_leader(region_id) {
+            callback.execute(ProcessResult::Failed {
+                err: StorageError::from(StorageErrorInner::Kv(err)),
+            });
+            return;
         }
 
         self.schedule_command(
@@ -583,29 +558,32 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         );
     }
 
-    async fn check_leader(self, region_id: u64) -> Option<metapb::Peer> {
-        if let Some(router) = self.inner.router.as_ref() {
-            let (cb, fut) = paired_future_callback();
-            let callback = Callback::Read(Box::new(move |res| {
-                cb(res);
-            }));
-            router.send_casual_msg(
-                region_id,
-                CasualMessage::CheckLeader {
-                    shard_ver: 0,
-                    callback,
-                },
-            );
-
-            if let Ok(res) = fut.await {
-                let mut res = res;
-                let mut err = res.response.take_header().take_error();
-                if err.has_not_leader() && err.get_not_leader().has_leader() {
-                    return Some(err.take_not_leader().take_leader());
+    fn check_leader(&self, region_id: u64) -> kv::Result<()> {
+        if let Some(region_info_accessor) = self.inner.region_info_accessor.as_ref() {
+            let region = region_info_accessor.find_region_by_id(region_id);
+            if let Some(region) = region {
+                let is_leader = fail::eval("check_leader_peer_is_leader", |t| {
+                    t.and_then(|s: String| s.parse::<bool>().ok())
+                })
+                .flatten()
+                .unwrap_or(region.is_leader());
+                if is_leader {
+                    return Ok(());
                 }
+                let mut not_leader_err = kvproto::errorpb::Error::default();
+                not_leader_err.mut_not_leader().set_region_id(region_id);
+                if let Some(leader) = region.leader_peer() {
+                    not_leader_err.mut_not_leader().set_leader(leader.clone());
+                }
+                return Err(kv::ErrorInner::Request(not_leader_err).into());
             }
+            let mut not_found_err = kvproto::errorpb::Error::default();
+            not_found_err
+                .mut_region_not_found()
+                .set_region_id(region_id);
+            return Err(kv::ErrorInner::Request(not_found_err).into());
         }
-        None
+        Ok(())
     }
 
     /// Releases all the latches held by a command.

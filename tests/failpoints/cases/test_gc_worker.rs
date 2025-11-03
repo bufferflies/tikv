@@ -11,7 +11,7 @@ use grpcio::{ChannelBuilder, Environment};
 use keys::data_key;
 use kvproto::{kvrpcpb::*, metapb::Region, tikvpb::TikvClient};
 use raftstore::coprocessor::{
-    RegionInfo, RegionInfoCallback, RegionInfoProvider, Result as CopResult, SeekRegionCallback,
+    RegionInfo, RegionInfoProvider, Result as CopResult, SeekRegionCallback,
 };
 use test_raftstore::*;
 use tikv::{
@@ -136,12 +136,8 @@ fn init_compaction_filter(cluster: &Cluster<ServerCluster>, store_id: u64) {
         fn seek_region(&self, _: &[u8], _: SeekRegionCallback) -> CopResult<()> {
             Ok(())
         }
-        fn find_region_by_id(
-            &self,
-            _: u64,
-            _: RegionInfoCallback<Option<RegionInfo>>,
-        ) -> CopResult<()> {
-            Ok(())
+        fn find_region_by_id(&self, _: u64) -> Option<RegionInfo> {
+            None
         }
         fn get_regions_in_range(
             &self,

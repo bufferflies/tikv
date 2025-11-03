@@ -45,6 +45,7 @@ use kvengine::{
 use kvproto::metapb::Store;
 use native_br::{common::send_request_to_store_with_retry, error::Error::HttpError};
 use pd_client::PdClient;
+use raftstore::coprocessor::RegionInfoProvider;
 use rand::prelude::*;
 use security::{GetSecurityManager, SecurityConfig, SecurityManager};
 pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
@@ -65,7 +66,7 @@ use tidb_query_datatype::{
 };
 use tikv::config::TikvConfig;
 use tikv_client::TimestampExt;
-use tikv_util::{box_err, error, info, time::Instant, warn};
+use tikv_util::{box_err, codec::bytes::encode_bytes, error, info, time::Instant, warn};
 use tokio::sync::{OwnedRwLockWriteGuard, Semaphore};
 use txn_types::Key;
 
@@ -707,6 +708,37 @@ pub(crate) fn verify_cluster_stats(cluster: &ServerCluster, bucket_size: u64, ti
         stats.log_all();
         panic!("check_buckets failed: {:?}", err);
     });
+}
+
+pub(crate) fn verify_region_info_accessor(cluster: &ServerCluster) {
+    let nodes = cluster.get_nodes();
+    for &node_id in &nodes {
+        let accessor = cluster.get_region_info_accessor(node_id);
+        let kvengine = cluster.get_kvengine(node_id);
+        let id_vers = kvengine.get_all_shard_id_vers();
+        assert_eq!(id_vers.len(), accessor.map_len());
+        assert_eq!(id_vers.len(), accessor.skl_len());
+        for id_ver in id_vers {
+            let shard = kvengine.get_shard(id_ver.id).unwrap();
+            let region = accessor.find_region_by_id(id_ver.id).unwrap_or_else(|| {
+                panic!(
+                    "region {} not found in region info accessor on node {}",
+                    id_ver, node_id
+                )
+            });
+            let region_version = region.region.get_region_epoch().get_version();
+            assert_eq!(shard.ver, region_version, "shard {}", id_ver);
+            assert_eq!(shard.is_active(), region.is_leader(), "shard {}", id_ver);
+            let encoded_start_key = encode_bytes(&shard.outer_start);
+            let Ok(region2) = accessor.find_region_by_key(&encoded_start_key) else {
+                panic!(
+                    "region for start key {:?} not found in region info accessor on node {}",
+                    shard.outer_start, node_id
+                )
+            };
+            assert_eq!(shard.id, region2.id, "shard {}", id_ver);
+        }
+    }
 }
 
 #[derive(Clone)]

@@ -596,6 +596,7 @@ impl RegionChangeObserver for RoleChangeNotifier {
                     }
                 }
                 RegionChangeEvent::UpdateBuckets(_) => {}
+                RegionChangeEvent::UpdateLeader(_) => {}
             }
         }
     }

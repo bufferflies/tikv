@@ -14,7 +14,7 @@ use std::{
 };
 
 use api_version::{api_v2::TXN_KEY_PREFIX, ApiV2};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use flate2::{write::GzEncoder, Compression};
@@ -31,6 +31,7 @@ use hyper::{
     Body, Method, Request, Response, Server, StatusCode,
 };
 use hyper_rustls::acceptor::TlsStream;
+use keys::next_key;
 use kvengine::{
     dfs::FileType,
     table::{BoundedDataSet, InnerKey, SnapVersion},
@@ -555,7 +556,7 @@ impl StatusServer {
 
     // URI: /kvengine/columnar_status?keyspace_id=xxx&table_id=xxx[&index_id=xxx]
     // Collect the columnar replica status of the table
-    async fn collect_columnar_status(
+    fn collect_columnar_status(
         req: Request<Body>,
         ctx: &StatusContext,
     ) -> hyper::Result<Response<Body>> {
@@ -586,36 +587,11 @@ impl StatusServer {
         };
         let mut table_prefix_key = api_version::ApiV2::get_txn_keyspace_prefix(keyspace_id);
         table_prefix_key.extend_from_slice(&encode_row_key_prefix(table_id));
-        let encoded_table_prefix_key = Bytes::from(encode_bytes(&table_prefix_key));
-        let (cb, fut) = paired_future_callback();
-        let Ok(()) = ctx.region_info_accessor.seek_region(
-            &encoded_table_prefix_key.clone(),
-            Box::new(move |iter| {
-                let mut ids = vec![];
-                for region in iter {
-                    ids.push(region.region.id);
-                    if !region
-                        .region
-                        .end_key
-                        .starts_with(encoded_table_prefix_key.chunk())
-                    {
-                        break;
-                    }
-                }
-                cb(ids);
-            }),
-        ) else {
-            return Ok(make_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "region info accessor seek_region error".to_string(),
-            ));
-        };
-        let Ok(ids) = fut.await else {
-            return Ok(make_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "region info accessor seek_region callback error".to_string(),
-            ));
-        };
+        let encoded_table_prefix_key = encode_bytes(&table_prefix_key);
+        let encoded_table_prefix_end_key = next_key(&encoded_table_prefix_key);
+        let ids = ctx
+            .region_info_accessor
+            .get_region_ids_in_range(encoded_table_prefix_key, encoded_table_prefix_end_key);
         let resp = ctx
             .kvengine
             .collect_columnar_status(keyspace_id, table_id, index_id, ids);
@@ -2354,36 +2330,19 @@ impl StatusServer {
             }
         };
 
-        let (callback, future) = paired_future_callback();
-        if let Err(e) = ctx
-            .region_info_accessor
-            .find_region_by_id(region_id, callback)
-        {
-            return Ok(make_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Internal Server Error {}", e),
-            ));
-        }
-        match future.await {
-            Ok(resp) => {
-                let body = if debug {
-                    format!("{:?}", resp).into_bytes()
-                } else {
-                    Self::make_sync_region_resp(
-                        ctx.stores_info.pd_client.get_cluster_id().unwrap(),
-                        ctx.rfengine.get_engine_id(),
-                        resp.as_slice(),
-                    )
-                    .write_to_bytes()
-                    .unwrap()
-                };
-                Ok(Response::new(body.into()))
-            }
-            Err(e) => Ok(make_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Internal Server Error {}", e),
-            )),
-        }
+        let resp = ctx.region_info_accessor.find_region_by_id(region_id);
+        let body = if debug {
+            format!("{:?}", resp).into_bytes()
+        } else {
+            Self::make_sync_region_resp(
+                ctx.stores_info.pd_client.get_cluster_id().unwrap(),
+                ctx.rfengine.get_engine_id(),
+                resp.as_slice(),
+            )
+            .write_to_bytes()
+            .unwrap()
+        };
+        Ok(Response::new(body.into()))
     }
 
     async fn handle_sync_region(
@@ -2429,36 +2388,21 @@ impl StatusServer {
             end.extend(GLOBAL_SHARD_END_KEY);
         }
         let end = encode_bytes(&end);
-        let (callback, future) = paired_future_callback();
-        if let Err(e) = ctx
+        let resp = ctx
             .region_info_accessor
-            .get_regions_in_range_opt(&start, &end, reverse, limit, callback)
-        {
-            return Ok(make_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Internal Server Error {}", e),
-            ));
-        }
-        match future.await {
-            Ok(resp) => {
-                let body = if debug {
-                    format!("{:#?}", resp).into_bytes()
-                } else {
-                    Self::make_sync_region_resp(
-                        ctx.stores_info.pd_client.get_cluster_id().unwrap(),
-                        ctx.rfengine.get_engine_id(),
-                        &resp,
-                    )
-                    .write_to_bytes()
-                    .unwrap()
-                };
-                Ok(Response::new(body.into()))
-            }
-            Err(e) => Ok(make_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Internal Server Error {}", e),
-            )),
-        }
+            .get_regions_in_range_opt(&start, &end, true, reverse, limit);
+        let body = if debug {
+            format!("{:#?}", resp).into_bytes()
+        } else {
+            Self::make_sync_region_resp(
+                ctx.stores_info.pd_client.get_cluster_id().unwrap(),
+                ctx.rfengine.get_engine_id(),
+                &resp,
+            )
+            .write_to_bytes()
+            .unwrap()
+        };
+        Ok(Response::new(body.into()))
     }
 
     fn make_sync_region_resp(
@@ -2660,7 +2604,7 @@ impl StatusServer {
                                 let res = if path.starts_with("/kvengine/snapshot/") {
                                     Self::dump_kvengine_snapshot(req, &ctx.kvengine, &ctx.router).await
                                 } else if path.starts_with("/kvengine/columnar_status") {
-                                    Self::collect_columnar_status(req, &ctx).await
+                                    Self::collect_columnar_status(req, &ctx)
                                 } else if path.starts_with("/kvengine/columnar_index_stats") {
                                     Self::collect_columnar_index_stats(req, &ctx).await
                                 } else if path.starts_with("/kvengine/meta/") {

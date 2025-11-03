@@ -6,7 +6,6 @@ extern crate test;
 
 mod coprocessor;
 mod keybuilder;
-mod raftkv;
 mod serialization;
 mod storage;
 mod util;

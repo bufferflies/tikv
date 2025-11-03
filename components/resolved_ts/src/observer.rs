@@ -130,6 +130,7 @@ impl RegionChangeObserver for Observer {
                 }
             }
             RegionChangeEvent::UpdateBuckets(_) => {}
+            RegionChangeEvent::UpdateLeader(_) => {}
         }
     }
 }

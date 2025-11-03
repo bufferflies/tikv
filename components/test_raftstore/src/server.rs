@@ -301,7 +301,7 @@ impl ServerCluster {
         let raft_engine = RaftKv::new(
             sim_router.clone(),
             engines.kv.clone(),
-            region_info_accessor.region_leaders(),
+            region_info_accessor.clone(),
         );
 
         if let Some(hooks) = self.coprocessor_hooks.get(&node_id) {
@@ -322,7 +322,7 @@ impl ServerCluster {
         let mut engine = RaftKv::new(
             sim_router.clone(),
             engines.kv.clone(),
-            region_info_accessor.region_leaders(),
+            region_info_accessor.clone(),
         );
         if let Some(scheduler) = self.txn_extra_schedulers.remove(&node_id) {
             engine.set_txn_extra_scheduler(scheduler);

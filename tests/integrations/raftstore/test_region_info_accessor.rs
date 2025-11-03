@@ -22,16 +22,19 @@ fn dump(c: &RegionInfoAccessor) -> Vec<(Region, StateRole)> {
     assert_eq!(regions.len(), region_ranges.len());
 
     let mut res = Vec::new();
-    for (end_key, id) in region_ranges {
+    let guard = regions.guard();
+    for e in region_ranges.iter() {
+        let end_key = e.key().clone();
+        let id = *e.value();
         let RegionInfo {
             ref region, role, ..
-        } = regions[&id];
+        } = regions.get(&id, &guard).unwrap();
         assert_eq!(
             end_key,
             RangeKey::from_end_key(region.get_end_key().to_vec())
         );
         assert_eq!(id, region.get_id());
-        res.push((region.clone(), role));
+        res.push((region.clone(), *role));
     }
 
     res

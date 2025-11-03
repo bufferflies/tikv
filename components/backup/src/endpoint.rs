@@ -22,7 +22,6 @@ use kvproto::{
     metapb::*,
 };
 use online_config::OnlineConfig;
-use raft::StateRole;
 use raftstore::coprocessor::RegionInfoProvider;
 use tikv::{
     config::BackupConfig,
@@ -760,7 +759,7 @@ impl<R: RegionInfoProvider> Progress<R> {
                             break;
                         }
                     }
-                    if info.role == StateRole::Leader {
+                    if info.is_leader() {
                         let ekey = get_min_end_key(end_key.as_ref(), region);
                         let skey = get_max_start_key(start_key.as_ref(), region);
                         assert!(!(skey == ekey && ekey.is_some()), "{:?} {:?}", skey, ekey);
@@ -1231,17 +1230,17 @@ pub mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
-        sync::{Mutex, RwLock},
+        sync::Mutex,
         time::Duration,
     };
 
     use api_version::{api_v2::RAW_KEY_PREFIX, dispatch_api_version, KvFormat, RawValue};
-    use collections::HashSet;
     use engine_traits::MiscExt;
     use external_storage_export::{make_local_backend, make_noop_backend};
     use file_system::{IoOp, IoRateLimiter, IoType};
     use futures::{executor::block_on, stream::StreamExt};
     use kvproto::metapb;
+    use raft::StateRole;
     use raftstore::coprocessor::{RegionCollector, Result as CopResult, SeekRegionCallback};
     use rand::Rng;
     use tempfile::TempDir;
@@ -1268,9 +1267,7 @@ pub mod tests {
     impl MockRegionInfoProvider {
         pub fn new(encode_key: bool) -> Self {
             MockRegionInfoProvider {
-                regions: Arc::new(Mutex::new(RegionCollector::new(Arc::new(RwLock::new(
-                    HashSet::default(),
-                ))))),
+                regions: Arc::new(Mutex::new(RegionCollector::default())),
                 cancel: None,
                 need_encode_key: encode_key,
             }
