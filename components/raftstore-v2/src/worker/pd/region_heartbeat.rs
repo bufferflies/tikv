@@ -122,6 +122,7 @@ where
             approximate_size,
             approximate_keys,
             approximate_kv_size: approximate_size,
+            approximate_columnar_kv_size: 0,
             last_report_ts,
             cpu_usage,
         };

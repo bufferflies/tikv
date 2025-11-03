@@ -609,7 +609,7 @@ impl PdRunner {
         term: u64,
         region: metapb::Region,
         peer: metapb::Peer,
-        region_stat: RegionStat,
+        mut region_stat: RegionStat,
         replication_status: Option<RegionReplicationStatus>,
     ) {
         self.store_stat
@@ -650,6 +650,16 @@ impl PdRunner {
                 .get(&store_id)
                 .map_or(false, |is_tiflash| *is_tiflash)
         });
+
+        // If a region has any TiFlash replicas, it is typically created according to a
+        // placement rule that ensures the region's key range contains only row data,
+        // not index data. Therefore, we can set `approximate_columnar_kv_size` equal to
+        // `approximate_kv_size` to accurately record the region’s uncompressed columnar
+        // KV size. Check whether `region_stat.approximate_columnar_kv_size` is zero to
+        // avoid any unexpected overwrites.
+        if has_tiflash_replicas && region_stat.approximate_columnar_kv_size == 0 {
+            region_stat.approximate_columnar_kv_size = region_stat.approximate_kv_size;
+        };
 
         let shard = self.kv.get_shard(region.get_id());
         PdRunner::set_storage_size_metric(
@@ -1625,6 +1635,7 @@ impl Runnable for PdRunner {
                         approximate_size: hb_task.approximate_size,
                         approximate_keys: hb_task.approximate_keys,
                         approximate_kv_size: hb_task.approximate_kv_size,
+                        approximate_columnar_kv_size: 0,
                         last_report_ts,
                         cpu_usage: 0,
                     },
