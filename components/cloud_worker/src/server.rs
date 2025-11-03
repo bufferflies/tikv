@@ -105,6 +105,11 @@ impl Context {
         } else {
             self.s3fs.clone()
         };
+        let prepare_type = if self.read_columnar {
+            PrepareType::All
+        } else {
+            PrepareType::SstOnly
+        };
         SnapCtx {
             dfs,
             master_key: self.master_key.clone(),
@@ -115,7 +120,7 @@ impl Context {
             schema_files: self.schema_files.clone(),
             txn_chunk_manager: self.txn_chunk_manager.clone(),
             ia_ctx: self.ia_ctx.clone(),
-            prepare_type: PrepareType::All,
+            prepare_type,
             read_columnar: self.read_columnar,
             meta_file_cache: self.meta_file_cache.clone(),
         }
