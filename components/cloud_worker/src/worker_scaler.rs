@@ -27,7 +27,10 @@ use serde_json::json;
 use tikv_util::{box_err, config::ReadableSize, error, info, time::Instant, warn};
 use tokio::sync::RwLock;
 
-use crate::metrics::WORKER_SCALER_QUERY_FAILURES_COUNTER_VEC;
+use crate::{
+    error::{Error, Result},
+    metrics::WORKER_SCALER_QUERY_FAILURES_COUNTER_VEC,
+};
 
 const DEFAULT_LOAD_DATA_WORKER_MIN_STORAGE_GB: usize = 20;
 const DEFAULT_LOAD_DATA_WORKER_NAME: &str = "load-data-worker";
@@ -366,8 +369,8 @@ impl WorkerScaler {
             let name = pod.name_any();
             let task_id = parse_task_id_by_pod_name(name.as_str());
             assert!(!task_id.is_empty());
-            info!("load pod {} task {}", name, task_id);
-            let worker_pod = WorkerPod::new(pod.name_any());
+            info!("load pod {}", name);
+            let worker_pod = WorkerPod::new(name);
             self.pods_map
                 .insert(task_id, Arc::new(RwLock::new(worker_pod)));
         }
@@ -403,19 +406,14 @@ impl WorkerScaler {
         self.delete_pvc_by_names(orphan_pvcs).await;
     }
 
-    pub(crate) async fn create_worker(
-        &self,
-        task_id: &str,
-        data_size_gb: usize,
-    ) -> kube::Result<()> {
+    pub(crate) async fn create_worker(&self, task_id: &str, data_size_gb: usize) -> Result<()> {
         if self.pods_map.len() >= self.config.worker_count_limit {
-            return Err(kube::Error::Service(box_err!(
+            return Err(Error::CheckError(format!(
                 "worker count limit {} reached",
                 self.config.worker_count_limit
             )));
         }
 
-        let mut create_worker = false;
         match self.pods_map.entry(task_id.to_string()) {
             Entry::Occupied(_) => {
                 // don't return directly because the pod may be not ready.
@@ -424,34 +422,67 @@ impl WorkerScaler {
                 let mut worker_pod = WorkerPod::default();
                 worker_pod.name = new_worker_pod_name(task_id);
                 e.insert(Arc::new(RwLock::new(worker_pod)));
-                create_worker = true;
             }
         }
 
-        if create_worker {
-            let sts_config = get_sts_config(data_size_gb, &self.config);
-            let sts_name = new_worker_sts_name(task_id);
-            let svc_name = new_worker_svc_name(task_id);
-            self.create_sts(task_id, sts_name.clone(), sts_config)
-                .await?;
-            self.create_svc(
+        let sts_config = get_sts_config(data_size_gb, &self.config);
+        let sts_name = new_worker_sts_name(task_id);
+        let svc_name = new_worker_svc_name(task_id);
+        match self.create_sts(task_id, sts_name.clone(), sts_config).await {
+            Ok(()) => {
+                info!("created sts {}", sts_name);
+            }
+            Err(kube::Error::Api(e)) if e.code == 409 => {
+                info!("sts {} has created", sts_name);
+            }
+            Err(e) => {
+                error!("failed to create sts {}, error {}", sts_name, e.to_string());
+                return Err(Error::K8sError(e.to_string()));
+            }
+        }
+
+        match self
+            .create_svc(
                 svc_name.clone(),
                 sts_name.clone(),
                 self.config.worker_port as i32,
             )
-            .await?;
-            info!("created sts {:?} with svc {:?}", sts_name, svc_name);
+            .await
+        {
+            Ok(()) => {
+                info!("created svc {}", svc_name);
+            }
+            Err(kube::Error::Api(e)) if e.code == 409 => {
+                info!("svc {} has created", svc_name);
+            }
+            Err(e) => {
+                error!("failed to create svc {}, error {}", svc_name, e.to_string());
+                return Err(Error::K8sError(e.to_string()));
+            }
         }
+        info!("created sts {:?} with svc {:?}", sts_name, svc_name);
 
-        let pod = self
+        match self
             .wait_worker_pod_ready(task_id, Duration::from_secs(DEFAULT_WAIT_POD_READY_TIMEOUT))
-            .await?;
-        let locked_worker_pod = self.pods_map.get_mut(task_id).unwrap().clone();
-        let mut worker_pod = locked_worker_pod.write().await;
-        if worker_pod.started_at == 0 {
-            worker_pod.init(task_id, &pod);
+            .await
+        {
+            Ok(pod) => {
+                let locked_worker_pod = self.pods_map.get_mut(task_id).unwrap().clone();
+                let mut worker_pod = locked_worker_pod.write().await;
+                if worker_pod.started_at == 0 {
+                    worker_pod.init(task_id, &pod);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                error!(
+                    "{} wait worker pod ready error {}",
+                    task_id,
+                    err.to_string()
+                );
+                Err(Error::CheckError(err.to_string()))
+            }
         }
-        Ok(())
     }
 
     async fn create_sts(
@@ -712,9 +743,15 @@ impl WorkerScaler {
         }
         let pod = pod.unwrap();
         if pod.status.is_none() || pod.status.clone().unwrap().phase.unwrap() != "Running" {
+            warn!("{} is not running", pod_name);
             return;
         }
 
+        let svc_name = new_worker_svc_name(task_id);
+        if let Err(err) = self.svc_api.get(&svc_name).await {
+            warn!("check svc {} err {:?}", svc_name, err);
+            return;
+        }
         let locked_worker_pod = self.pods_map.get_mut(task_id).unwrap().clone();
         let mut worker_pod = locked_worker_pod.write().await;
         if worker_pod.started_at == 0 {

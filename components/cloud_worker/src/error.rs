@@ -36,6 +36,8 @@ pub enum Error {
     SchemaError(String),
     #[error("file corrupted")]
     FileCorrupted,
+    #[error("k8s error {0}")]
+    K8sError(String),
     #[error("Other error {0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
