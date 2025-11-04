@@ -69,6 +69,8 @@ struct ErrorResponse {
 pub struct ChangefeedRequest {
     pub changefeed_id: String,
     pub sink_uri: String,
+    #[serde(default)]
+    pub start_ts: u64, // `0`: use current time.
 }
 
 #[derive(Serialize)]
@@ -286,6 +288,7 @@ impl ReplicationScheduler {
                 self.schedule(CdcMsg::NewTask {
                     keyspace_id,
                     changefeed_id: request.changefeed_id,
+                    start_ts: request.start_ts,
                     body,
                     cb,
                 });

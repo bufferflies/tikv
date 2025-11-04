@@ -220,7 +220,23 @@ fn test_random_replication() {
         },
     };
     let add_task_body = serde_json::to_string(&task_params).unwrap();
-    let resp = dispatch_http(&worker_client, add_task_url, "POST", add_task_body).unwrap();
+    let resp = must_wait_result(
+        || {
+            // Wait for replication worker to initialize (recover from backup).
+            dispatch_http(
+                &worker_client,
+                add_task_url.clone(),
+                "POST",
+                add_task_body.clone(),
+            )
+            .map_err(|err| {
+                assert!(err.contains("replication worker not ready"));
+                err
+            })
+        },
+        30,
+        || "wait for add task".into(),
+    );
     info!("add task resp: {}", resp);
 
     // Get task list has rep-task.

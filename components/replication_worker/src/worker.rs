@@ -47,6 +47,7 @@ use pd_client::{util::get_all_stores_except_tiflash, PdClient, RegionStat};
 use rfengine::{RfEngine, TRUNCATE_ALL_INDEX};
 use rfstore::store::ApplyContext;
 use security::{HttpClient, SecurityConfig};
+use serde_json::{json, Value};
 use tikv_util::{
     box_err, box_try, codec, debug, error, info,
     mpsc::{Receiver, SendError, Sender},
@@ -399,10 +400,11 @@ impl ReplicationWorker {
             CdcMsg::NewTask {
                 keyspace_id,
                 changefeed_id,
+                start_ts,
                 body,
                 cb,
             } => {
-                self.handle_new_task(keyspace_id, changefeed_id, body, cb);
+                self.handle_new_task(keyspace_id, changefeed_id, start_ts, body, cb);
             }
             CdcMsg::OpenConn(conn) => self.handle_open_conn(conn),
             CdcMsg::Register { request, conn_id } => {
@@ -493,10 +495,24 @@ impl ReplicationWorker {
         &mut self,
         keyspace_id: u32,
         changefeed_id: String,
-        body: Bytes,
+        start_ts: u64,
+        origin_body: Bytes,
         cb: Box<dyn FnOnce(Result<(StatusCode, Bytes)>) + Send>,
     ) {
         let tag = format!("{keyspace_id}:new_task");
+
+        let body = match Self::handle_start_ts(
+            &tag,
+            start_ts,
+            origin_body,
+            self.last_update_ts.into_inner(),
+        ) {
+            Ok(body) => body,
+            Err(err) => {
+                cb(Err(err));
+                return;
+            }
+        };
         let body_string = String::from_utf8_lossy(&body).to_string();
         info!("handle_new_task"; "keyspace" => keyspace_id, "changefeed" => &changefeed_id, "req" => &body_string);
         #[allow(clippy::map_entry)]
@@ -548,6 +564,35 @@ impl ReplicationWorker {
                 post_to_ticdc(&tag, &client, &new_cdc_task_uri, req_body, is_err_retryable).await;
             cb(res);
         });
+    }
+
+    fn handle_start_ts(
+        tag: &str,
+        start_ts: u64,
+        body: Bytes,
+        last_update_ts: u64,
+    ) -> Result<Bytes> {
+        if last_update_ts == 0 {
+            return Err(Error::OtherError("replication worker not ready".into()));
+        }
+        if start_ts > 0 {
+            if start_ts <= last_update_ts {
+                Ok(body)
+            } else {
+                error!("{}: start_ts too large", tag; "start_ts" => start_ts, "last_update_ts" => last_update_ts);
+                Err(Error::OtherError(
+                    format!("start_ts too large (> {})", last_update_ts).into(),
+                ))
+            }
+        } else {
+            let Ok(Value::Object(mut js_value)) = serde_json::from_slice(&body) else {
+                // The format has been verified in scheduler.
+                unreachable!();
+            };
+            debug!("{}: set start_ts as {}", tag, last_update_ts);
+            js_value.insert("start_ts".into(), json!(last_update_ts));
+            Ok(serde_json::to_vec(&json!(js_value)).unwrap().into())
+        }
     }
 
     fn handle_open_conn(&mut self, conn: Conn) {
@@ -1940,4 +1985,49 @@ impl ScanLocksHandler {
 // Ref: ObjectStorageWorker::near_overwritten_epoch
 fn near_overwritten_epoch(current_epoch: u32) -> u32 {
     current_epoch.saturating_sub(rfengine::EPOCH_ROTATE_LEN - 2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_handle_start_ts() {
+        {
+            let req = json!({
+                "changefeed_id": "cf1",
+                "sink_uri": "sink",
+                "a": 1,
+                "b": "b",
+            });
+            let req_body = serde_json::to_vec(&req).unwrap();
+            let updated_body =
+                ReplicationWorker::handle_start_ts("tag", 0, req_body.into(), 1000).unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&updated_body),
+                r#"{"changefeed_id":"cf1","sink_uri":"sink","a":1,"b":"b","start_ts":1000}"#
+            );
+        }
+
+        {
+            let req = json!({
+                "changefeed_id": "cf1",
+                "sink_uri": "sink",
+                "a": 1,
+                "b": "b",
+                "start_ts": 500,
+            });
+            let req_body = serde_json::to_vec(&req).unwrap();
+            let err = ReplicationWorker::handle_start_ts("tag", 500, req_body.clone().into(), 499)
+                .unwrap_err();
+            assert!(err.to_string().contains("start_ts too large"));
+
+            let updated_body =
+                ReplicationWorker::handle_start_ts("tag", 500, req_body.into(), 1000).unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&updated_body),
+                r#"{"changefeed_id":"cf1","sink_uri":"sink","a":1,"b":"b","start_ts":500}"#
+            );
+        }
+    }
 }

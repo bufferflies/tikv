@@ -168,6 +168,7 @@ pub enum CdcMsg {
     NewTask {
         keyspace_id: u32,
         changefeed_id: String,
+        start_ts: u64,
         body: Bytes,
         cb: Box<dyn FnOnce(Result<(StatusCode, Bytes)>) + Send>,
     },
