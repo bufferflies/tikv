@@ -302,6 +302,10 @@ impl ReplicationWorker {
         self.ctx.config.merged_store_id
     }
 
+    fn tolerate_store_err(&self) -> usize {
+        self.config.tolerate_store_err as usize
+    }
+
     #[inline]
     fn get_region_tag(&self, region_id: u64, region_version: u64) -> ShardTag {
         ShardTag::new(
@@ -326,6 +330,7 @@ impl ReplicationWorker {
         WalProgressFetcher::run(
             self.ctx.pd.clone(),
             TRACK_WAL_PROGRESS_TIMEOUT,
+            self.config.tolerate_store_err,
             self.runtime.handle().clone(),
             self.wal_progress_targets.clone(),
             self.config.sync_interval.0,
@@ -1173,7 +1178,7 @@ impl ReplicationWorker {
                 errors.push(err);
             }
         }
-        if errors.len() <= 1 {
+        if errors.len() <= self.tolerate_store_err() {
             return Ok(());
         }
         Err(errors.pop().unwrap())

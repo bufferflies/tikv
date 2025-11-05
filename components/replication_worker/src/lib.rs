@@ -70,6 +70,10 @@ pub struct ReplicationWorkerConfig {
     pub cdc_sts_name: String,
     pub namespace: String,
 
+    /// Whether to tolerate store errors (no more than 1 store) during update
+    /// WAL.
+    pub tolerate_store_err: bool,
+
     /// The interval to sync changes from WAL.
     pub sync_interval: ReadableDuration,
 
@@ -86,6 +90,7 @@ impl Default for ReplicationWorkerConfig {
             pd_sts_name: "".to_string(),
             cdc_sts_name: "".to_string(),
             namespace: "".to_string(),
+            tolerate_store_err: false,
             sync_interval: ReadableDuration::secs(3),
             report_region_interval: ReadableDuration::secs(60),
             merged_engine: Default::default(),

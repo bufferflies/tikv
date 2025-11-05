@@ -42,6 +42,7 @@ impl WalProgressTargets {
 pub(crate) struct WalProgressFetcher {
     pd: Arc<dyn PdClient>,
     timeout: Duration,
+    tolerate_store_err: bool,
     thread_pool: tokio::runtime::Handle,
     http_client: HttpClient,
 }
@@ -50,11 +51,17 @@ impl WalProgressFetcher {
     pub(crate) fn run(
         pd: Arc<dyn PdClient>,
         timeout: Duration,
+        tolerate_store_err: bool,
         thread_pool: tokio::runtime::Handle,
         targets: WalProgressTargets,
         interval: Duration,
     ) {
-        let fetcher = Arc::new(Self::new(pd, timeout, thread_pool.clone()));
+        let fetcher = Arc::new(Self::new(
+            pd,
+            timeout,
+            tolerate_store_err,
+            thread_pool.clone(),
+        ));
         thread_pool.spawn(async move {
             loop {
                 let start_time = Instant::now_coarse();
@@ -75,7 +82,12 @@ impl WalProgressFetcher {
         });
     }
 
-    fn new(pd: Arc<dyn PdClient>, timeout: Duration, thread_pool: tokio::runtime::Handle) -> Self {
+    fn new(
+        pd: Arc<dyn PdClient>,
+        timeout: Duration,
+        tolerate_store_err: bool,
+        thread_pool: tokio::runtime::Handle,
+    ) -> Self {
         let http_client = pd
             .get_security_mgr()
             .http_client(hyper::Client::builder())
@@ -83,9 +95,14 @@ impl WalProgressFetcher {
         Self {
             pd,
             timeout,
+            tolerate_store_err,
             http_client,
             thread_pool,
         }
+    }
+
+    fn tolerate_store_err(&self) -> usize {
+        self.tolerate_store_err as usize
     }
 
     async fn fetch_target_ts_and_progress(
@@ -129,7 +146,7 @@ impl WalProgressFetcher {
             }
         }
 
-        if errors.len() > 1 {
+        if errors.len() > self.tolerate_store_err() {
             return Err(errors.pop().unwrap());
         }
 
