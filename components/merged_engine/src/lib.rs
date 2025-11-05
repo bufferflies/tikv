@@ -198,6 +198,15 @@ impl RegionProgress {
         }
         self.entries.insert(log_index, or_insert());
     }
+
+    pub fn is_synced(&self) -> bool {
+        debug_assert!(
+            self.synced_index <= self.commit_index,
+            "unexpected progress: {:?}",
+            self
+        );
+        self.synced_index >= self.commit_index
+    }
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -906,8 +915,14 @@ impl MergedEngine {
         self.raft.clone()
     }
 
-    pub fn get_region_progress(&self, region_id: u64) -> Option<RegionProgress> {
-        self.region_progresses.get(&region_id).cloned()
+    pub fn get_region_progress(&self, region_id: u64) -> Option<&RegionProgress> {
+        self.region_progresses.get(&region_id)
+    }
+
+    pub fn region_is_synced(&self, region_id: u64) -> Option<bool> {
+        self.region_progresses
+            .get(&region_id)
+            .map(|x| x.is_synced())
     }
 
     pub fn get_store_progress(&self, store_id: u64) -> Option<StoreProgress> {
@@ -1196,23 +1211,19 @@ impl MergedEngine {
         // preprocess entries.
         for log_index in low..high {
             try_force_stop_err!(self);
-            let mut entry = progress
-                .entries
-                .get(&log_index)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{} entry not found for region {}, log index {}",
-                        tag, updated_region, log_index
-                    )
-                })
-                .to_entry();
+            let Some(raft_log) = progress.entries.get(&log_index) else {
+                // Ref: https://github.com/tidbcloud/cloud-storage-engine/issues/3654
+                info!("{} sync_region: no raft log: {}", tag, log_index;
+                    "progress" => ?progress);
+                break;
+            };
+            let mut entry = raft_log.to_entry();
             let mut admin_req = update_entry(&mut entry, merged_store_id);
             if let Some(admin) = admin_req.as_ref() {
                 if admin.has_commit_merge() {
                     let commit_merge = admin.get_commit_merge();
                     if !finished_regions.contains(&commit_merge.get_source().get_id()) {
                         // need to process source region first.
-                        progress.synced_index = log_index - 1;
                         res = SyncRegionResult::Postponed;
                         info!(
                             "{} commit merge postponed at {}, low {}, high {}",
@@ -1250,12 +1261,13 @@ impl MergedEngine {
             }
             entries.push(entry);
 
+            progress.synced_index = log_index;
+
             if log_index + 1 < high
                 && wb_encoded_len >= self.ctx.config.raft_write_batch_size.0 as i64
             {
                 debug!("{} sync_region: wb exceed size limit, break at {}", tag, log_index;
                     "wb_size" => wb_encoded_len, "low" => low, "high" => high);
-                progress.synced_index = log_index;
                 res = SyncRegionResult::Resume;
                 break;
             }
@@ -1356,20 +1368,19 @@ impl MergedEngine {
             tikv_util::set_current_region(region_id);
             let tag = ShardTag::new(self.merged_store_id(), IdVer::new(region_id, 0));
             let progress = self.region_progresses.get_mut(&region_id).unwrap();
-            let commit_index = progress.commit_index;
-            progress.synced_index = commit_index;
-            // We need to keep the uncommitted index for the next round.
-            progress.entries.retain(|&index, _| index > commit_index);
+            let synced_index = progress.synced_index;
+            // We need to keep the not-synced logs for the next round.
+            progress.entries.retain(|&index, _| index > synced_index);
 
             // Skip truncating region with dependents. The parent region may need the old
             // raft logs on recover.
-            let truncated_index = progress.truncated_index;
+            let truncated_index = cmp::min(progress.truncated_index, synced_index);
             let truncate_raft_log =
                 self.truncate_region_raft_log(region_id, truncated_index, raft_wb);
 
             debug!(
                 "{} update_progress_and_truncate: truncate entries <= {}, raft log <= {:?}",
-                tag, commit_index, truncate_raft_log
+                tag, synced_index, truncate_raft_log
             );
         }
     }

@@ -999,6 +999,23 @@ impl ReplicationWorker {
         self.resolved_regions.clear();
         for (&region_id, delegate) in &mut self.region_delegates {
             try_force_stop_err!(self);
+            tikv_util::set_current_region(region_id);
+            let tag = ShardTag::new(merged_store_id, IdVer::new(region_id, 0));
+
+            let Some(region_is_synced) = self.merged_engine.region_is_synced(region_id) else {
+                // The region is newly inserted but not start to sync yet.
+                warn!(
+                    "{} send_resolved_ts: region not in merged_engine, skip",
+                    tag
+                );
+                continue;
+            };
+            if !region_is_synced {
+                info!("{} send_resolved_ts: region is not synced, skip", tag;
+                    "progress" => ?self.merged_engine.get_region_progress(region_id));
+                continue;
+            }
+
             let Some(ts) = delegate
                 .resolver
                 .as_mut()
