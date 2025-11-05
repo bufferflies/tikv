@@ -363,9 +363,17 @@ impl<E: Engine> Endpoint<E> {
                 let quota_limiter = self.quota_limiter.clone();
                 let remote_ctx = self.remote_ctx.clone();
                 builder = Box::new(move |snap, req_ctx| {
-                    if let Some(handler) =
-                        try_remote_dag_handler(snap.get_kvengine_snap(), &dag, req_ctx, remote_ctx)
-                    {
+                    let paging_size = match req.get_paging_size() {
+                        0 => None,
+                        i => Some(i),
+                    };
+                    if let Some(handler) = try_remote_dag_handler(
+                        snap.get_kvengine_snap(),
+                        &dag,
+                        req_ctx,
+                        remote_ctx,
+                        paging_size,
+                    ) {
                         with_tls_tracker(|tracker| {
                             tracker.req_info.is_remote = true;
                         });
@@ -378,10 +386,6 @@ impl<E: Engine> Endpoint<E> {
                         req_ctx.bypass_locks.clone(),
                         !req_ctx.context.get_not_fill_cache(),
                     );
-                    let paging_size = match req.get_paging_size() {
-                        0 => None,
-                        i => Some(i),
-                    };
                     dag::DagHandlerBuilder::new(
                         dag,
                         req_ctx.ranges.clone(),

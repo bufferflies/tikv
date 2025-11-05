@@ -38,6 +38,7 @@ pub const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 pub const REMOTE_COP_FORMAT_V1: u32 = 1;
 
 const RETRY_MAX_ATTEMPTS: usize = 10;
+const REMOTE_MIN_PAGING_SIZE: u64 = 50000; // 50000 is the tidb default max paging size.
 const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
@@ -255,6 +256,7 @@ pub(crate) fn try_remote_dag_handler(
     dag: &DagRequest,
     req_ctx: &ReqContext,
     remote_ctx: Option<RemoteContext>,
+    paging_size: Option<u64>,
 ) -> Option<Box<dyn RequestHandler>> {
     let remote_ctx = remote_ctx?;
     let start_ts = req_ctx.txn_start_ts.into_inner();
@@ -263,6 +265,13 @@ pub(crate) fn try_remote_dag_handler(
         .cop_worker_provider
         .get(snap.get_keyspace_id(), start_ts)?;
     let keyspace_id = snap.get_keyspace_id();
+    if let Some(paging_size) = paging_size {
+        if is_index_full_scan(dag) && paging_size <= REMOTE_MIN_PAGING_SIZE {
+            // Do not offload index full scan with small paging size because the upper layer
+            // operator may quickly finish the query.
+            return None;
+        }
+    }
     let lazy_remote_pattern = if let Some(lazy_remote_pattern) = &req_ctx.lazy_remote_pattern {
         // Dag that extracts lazy remote pattern should be offloaded to remote
         // coprocessor based on actual execution cost.
@@ -334,6 +343,11 @@ pub(crate) fn try_remote_dag_handler(
         )
         .into_boxed(),
     )
+}
+
+fn is_index_full_scan(dag: &DagRequest) -> bool {
+    let executors = dag.get_executors();
+    executors.len() == 1 && executors[0].get_tp() == ExecType::TypeIndexScan
 }
 
 pub struct RemoteDagDispatcher {
