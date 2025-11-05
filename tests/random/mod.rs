@@ -52,6 +52,7 @@ pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
 use test_cloud_server::{
     client::ClusterTxnClient,
     keyspace::{ClusterKeyspaceClient, CreateKeyspaceOptions, KeyspaceManager},
+    must_wait_result,
     oss::ObjectStorageService,
     scheduler::Scheduler,
     tidb::TidbCluster,
@@ -715,9 +716,18 @@ pub(crate) fn verify_region_info_accessor(cluster: &ServerCluster) {
     for &node_id in &nodes {
         let accessor = cluster.get_region_info_accessor(node_id);
         let kvengine = cluster.get_kvengine(node_id);
-        let id_vers = kvengine.get_all_shard_id_vers();
-        assert_eq!(id_vers.len(), accessor.map_len());
-        assert_eq!(id_vers.len(), accessor.skl_len());
+        let id_vers = must_wait_result(
+            || {
+                let id_vers = kvengine.get_all_shard_id_vers();
+                if id_vers.len() == accessor.map_len() && id_vers.len() == accessor.skl_len() {
+                    Ok(id_vers)
+                } else {
+                    Err(())
+                }
+            },
+            30,
+            || "region count not match".into(),
+        );
         for id_ver in id_vers {
             let shard = kvengine.get_shard(id_ver.id).unwrap();
             let region = accessor.find_region_by_id(id_ver.id).unwrap_or_else(|| {

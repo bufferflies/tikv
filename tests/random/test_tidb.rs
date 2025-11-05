@@ -762,7 +762,7 @@ pub(crate) fn start_workloads(
 pub(crate) async fn stop_schedulers(pd_ctl: Arc<pd_control::PdControl>) {
     // Pause all schedulers to make stats stable.
     pd_ctl
-        .pause_or_resume_scheduler("all", Duration::MAX)
+        .pause_or_resume_scheduler("all", Duration::from_secs(3600))
         .await
         .expect("pause schedulers failed");
     let all_schedulers = pd_ctl.list_schedulers(None).await.unwrap();
