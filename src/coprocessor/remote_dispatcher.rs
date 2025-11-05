@@ -38,7 +38,7 @@ pub const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 pub const REMOTE_COP_FORMAT_V1: u32 = 1;
 
 const RETRY_MAX_ATTEMPTS: usize = 10;
-const REMOTE_MIN_PAGING_SIZE: u64 = 50000; // 50000 is the tidb default max paging size.
+const REMOTE_MIN_PAGING_SIZE: u64 = 4096;
 const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
