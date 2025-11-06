@@ -43,7 +43,8 @@ use schema::schema::{
 };
 use security::{SecurityConfig, SecurityManager};
 use tidb_query_datatype::VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC;
-use tikv_client::{BoundRange, Key, KvPair, TransactionOptions, Value};
+use tikv::storage::mvcc::TimeStamp;
+use tikv_client::{BoundRange, Key, KvPair, TimestampExt, TransactionOptions, Value};
 use tikv_util::{box_err, config::ReadableDuration, debug, error, info, warn};
 use tokio::sync::Semaphore;
 
@@ -657,29 +658,30 @@ impl SchemaManager {
         let kv_scanner = Arc::new(self.clone());
         let kv_getter = Arc::new(self.clone());
 
+        let start_ts = self.ctx.pd.get_tso().await?;
         // Get schema version without sync schema diff. We can avoid scanning schema
         // diffs if the schema version not changed.
-        let schema_version = match schema::get_schema_version(kv_getter.clone(), keyspace_id).await
-        {
-            // If the schema version is 0, it means the keyspace has been unsafe destroyed or
-            // created without bootstraped.
-            Ok(0) => {
-                info!(
-                    "{}: schema version is 0, skip, remove keyspace",
-                    keyspace_id
-                );
-                self.remove_keyspace_local_file(keyspace_id)?;
-                return Ok((0, vec![], true));
-            }
-            Ok(schema_version) => schema_version,
-            Err(err) => {
-                error!("{}: get schema version failed, skip", keyspace_id; "err" => ?err);
-                return Err(Error::Other(box_err!(
-                    "get schema version failed: {:?}",
-                    err
-                )));
-            }
-        };
+        let schema_version =
+            match schema::get_schema_version(kv_getter.clone(), keyspace_id, start_ts).await {
+                // If the schema version is 0, it means the keyspace has been unsafe destroyed or
+                // created without bootstraped.
+                Ok(0) => {
+                    info!(
+                        "{}: schema version is 0, skip, remove keyspace",
+                        keyspace_id
+                    );
+                    self.remove_keyspace_local_file(keyspace_id)?;
+                    return Ok((0, vec![], true));
+                }
+                Ok(schema_version) => schema_version,
+                Err(err) => {
+                    error!("{}: get schema version failed, skip", keyspace_id; "err" => ?err);
+                    return Err(Error::Other(box_err!(
+                        "get schema version failed: {:?}",
+                        err
+                    )));
+                }
+            };
 
         if checked_version.is_some_and(|v| v == schema_version) {
             debug!("{}: schema is up-to-date, skip", keyspace_id; "schema_ver" => schema_version,
@@ -703,6 +705,7 @@ impl SchemaManager {
             kv_scanner,
             keyspace_id,
             sync_from_version,
+            start_ts,
         )
         .await
         {
@@ -1492,15 +1495,12 @@ impl schema::KvScanner for SchemaManager {
         &self,
         start: &[u8],
         end: &[u8],
+        start_ts: TimeStamp,
     ) -> std::result::Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
-        let start_ts = self
-            .txn_client
-            .current_timestamp()
-            .await
-            .map_err(|e| e.to_string())?;
+        let txn_start_ts = tikv_client::Timestamp::from_version(start_ts.into_inner());
         let mut snapshot = self
             .txn_client
-            .snapshot(start_ts, TransactionOptions::new_pessimistic());
+            .snapshot(txn_start_ts, TransactionOptions::new_pessimistic());
 
         let mut pairs = Vec::new();
         let mut current_key = start.to_vec();
@@ -1535,15 +1535,15 @@ impl schema::KvScanner for SchemaManager {
 
 #[async_trait]
 impl schema::KvGetter for SchemaManager {
-    async fn get(&self, key: &[u8]) -> std::result::Result<Option<Vec<u8>>, String> {
-        let start_ts = self
-            .txn_client
-            .current_timestamp()
-            .await
-            .map_err(|e| format!("schema manager: get timestamp failed: {e:?})"))?;
+    async fn get(
+        &self,
+        key: &[u8],
+        start_ts: TimeStamp,
+    ) -> std::result::Result<Option<Vec<u8>>, String> {
+        let txn_start_ts = tikv_client::Timestamp::from_version(start_ts.into_inner());
         let mut snapshot = self
             .txn_client
-            .snapshot(start_ts.clone(), TransactionOptions::new_pessimistic());
+            .snapshot(txn_start_ts, TransactionOptions::new_pessimistic());
         let val = snapshot.get(key.to_vec()).await.map_err(|e| {
             format!(
                 "schema manager: kv get failed: {}: {e:?})",
@@ -1556,15 +1556,12 @@ impl schema::KvGetter for SchemaManager {
     async fn batch_get(
         &self,
         keys: &[Vec<u8>],
+        start_ts: TimeStamp,
     ) -> std::result::Result<Vec<Option<Vec<u8>>>, String> {
-        let start_ts = self
-            .txn_client
-            .current_timestamp()
-            .await
-            .map_err(|e| format!("schema manager: get timestamp failed: {e:?})"))?;
+        let txn_start_ts = tikv_client::Timestamp::from_version(start_ts.into_inner());
         let mut snapshot = self
             .txn_client
-            .snapshot(start_ts, TransactionOptions::new_pessimistic());
+            .snapshot(txn_start_ts, TransactionOptions::new_pessimistic());
         let pairs: HashMap<Key, Value> = snapshot
             .batch_get(keys.to_vec())
             .await

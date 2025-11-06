@@ -1,6 +1,6 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use api_version::ApiV2;
 use async_trait::async_trait;
@@ -9,6 +9,7 @@ use tikv_util::{
     codec::{bytes::encode_bytes, number::NumberEncoder},
     debug, info, warn,
 };
+use txn_types::TimeStamp;
 
 use crate::{
     load_schema,
@@ -28,8 +29,11 @@ const MAX_DIFF_VERSION: i64 = 256;
 pub async fn get_schema_version(
     kv_getter: Arc<dyn KvGetter>,
     keyspace_id: u32,
+    start_ts: TimeStamp,
 ) -> Result<i64, String> {
-    let schema_version_data = kv_getter.get(&schema_version_key(keyspace_id)).await?;
+    let schema_version_data = kv_getter
+        .get(&schema_version_key(keyspace_id), start_ts)
+        .await?;
     if schema_version_data.is_none() {
         return Ok(0);
     }
@@ -46,9 +50,12 @@ pub async fn sync_schema(
     kv_scanner: Arc<dyn KvScanner>,
     keyspace_id: u32,
     cur_version: Option<i64>,
+    start_ts: TimeStamp,
 ) -> Result<(i64, Vec<TableInfo>), String> {
     // Get schema version key from meta.
-    let schema_version_data = kv_getter.get(&schema_version_key(keyspace_id)).await?;
+    let schema_version_data = kv_getter
+        .get(&schema_version_key(keyspace_id), start_ts)
+        .await?;
     // This is a empty keyspace.
     if schema_version_data.is_none() {
         return Ok((0, vec![]));
@@ -61,16 +68,18 @@ pub async fn sync_schema(
         if cur_version == schema_version {
             return Ok((schema_version, vec![]));
         }
-        let mut table_infos = vec![];
+        let mut table_infos = HashMap::new();
         if cur_version > schema_version {
             debug_assert!(false, "{} {} {}", keyspace_id, cur_version, schema_version);
             warn!("{}: sync_schema: current version > schema meta, need full sync", keyspace_id;
                 "cur_ver" => cur_version, "schema_ver" => schema_version);
-            return sync_all_schemas(kv_scanner, keyspace_id, schema_version).await;
+            return sync_all_schemas(kv_getter, kv_scanner, keyspace_id, schema_version, start_ts)
+                .await;
         } else if cur_version + MAX_DIFF_VERSION < schema_version {
             info!("{}: sync_schema: diff too large, need full sync", keyspace_id;
                 "cur_ver" => cur_version, "schema_ver" => schema_version);
-            return sync_all_schemas(kv_scanner, keyspace_id, schema_version).await;
+            return sync_all_schemas(kv_getter, kv_scanner, keyspace_id, schema_version, start_ts)
+                .await;
         }
 
         debug!(
@@ -78,7 +87,8 @@ pub async fn sync_schema(
             keyspace_id, cur_version, schema_version
         );
         let version_range = cur_version + 1..=schema_version;
-        let schema_diffs = get_schema_diff(kv_getter.clone(), version_range, keyspace_id).await?;
+        let schema_diffs =
+            get_schema_diff(kv_getter.clone(), version_range, keyspace_id, start_ts).await?;
         debug!(
             "{}: sync_schema: schema diffs {:?}",
             keyspace_id, schema_diffs
@@ -93,7 +103,14 @@ pub async fn sync_schema(
         }
         for diff in schema_diffs {
             if diff.regenerate_schema_map {
-                return sync_all_schemas(kv_scanner, keyspace_id, schema_version).await;
+                return sync_all_schemas(
+                    kv_getter,
+                    kv_scanner,
+                    keyspace_id,
+                    schema_version,
+                    start_ts,
+                )
+                .await;
             }
             let db_id = diff.schema_id;
             if db_id == 1 {
@@ -101,8 +118,15 @@ pub async fn sync_schema(
             }
 
             let table_id = diff.table_id;
+            // If the table info already fetched, skip to avoid useless repeating fetching.
+            if table_infos.contains_key(&table_id) {
+                continue;
+            }
             let schema_data_key = schema_data_key(keyspace_id, db_id, table_id);
-            let schema_data = kv_getter.get(&schema_data_key).await?.unwrap_or_default();
+            let schema_data = kv_getter
+                .get(&schema_data_key, start_ts)
+                .await?
+                .unwrap_or_default();
             if schema_data.is_empty() {
                 warn!(
                     "sync_schema, schema data in diff keyspace: {} db: {} table: {}, diff: {} not found, skip",
@@ -118,7 +142,7 @@ pub async fn sync_schema(
                         keyspace_id, table_id, tbl
                     );
                     if tbl.state == STATE_PUBLIC {
-                        table_infos.push(tbl);
+                        table_infos.insert(table_id, tbl);
                     }
                 }
                 Err(err) => {
@@ -131,19 +155,33 @@ pub async fn sync_schema(
             }
         }
 
-        Ok((last_diff_ver, table_infos))
+        Ok((last_diff_ver, table_infos.into_values().collect()))
     } else {
-        sync_all_schemas(kv_scanner, keyspace_id, schema_version).await
+        sync_all_schemas(kv_getter, kv_scanner, keyspace_id, schema_version, start_ts).await
     }
 }
 
 async fn sync_all_schemas(
+    kv_getter: Arc<dyn KvGetter>,
     kv_scanner: Arc<dyn KvScanner>,
     keyspace_id: u32,
     schema_version: i64,
+    start_ts: TimeStamp,
 ) -> Result<(i64, Vec<TableInfo>), String> {
     let keyspace_prefix = ApiV2::get_keyspace_prefix_by_id(keyspace_id);
-    let db_infos = load_schema(kv_scanner, &keyspace_prefix).await?;
+    let db_infos = load_schema(kv_scanner, &keyspace_prefix, start_ts).await?;
+
+    // Check the latest schema diff exists, if not, use the previous schema version.
+    // In TiDB, the schema version key and schema diff key are not persisted in the
+    // same transaction. If we return `schema_version` directly, the last schema
+    // diff key will be missed.
+    let latest_schema_diff_exists =
+        schema_diff_key_exists(kv_getter.clone(), keyspace_id, schema_version, start_ts).await?;
+    let schema_version = if latest_schema_diff_exists {
+        schema_version
+    } else {
+        schema_version - 1
+    };
     Ok((
         schema_version,
         db_infos
@@ -157,13 +195,14 @@ async fn get_schema_diff(
     kv_getter: Arc<dyn KvGetter>,
     range: impl IntoIterator<Item = i64>,
     keyspace_id: u32,
+    start_ts: TimeStamp,
 ) -> Result<Vec<SchemaDiff>, String> {
     let schema_vers = range.into_iter().collect::<Vec<_>>();
     let mut schema_diff_keys = Vec::with_capacity(schema_vers.len());
     schema_vers.iter().for_each(|&ver| {
         schema_diff_keys.push(schema_diff_key(keyspace_id, ver));
     });
-    let schema_diffs = kv_getter.batch_get(&schema_diff_keys).await?;
+    let schema_diffs = kv_getter.batch_get(&schema_diff_keys, start_ts).await?;
     debug_assert_eq!(schema_diff_keys.len(), schema_diffs.len());
 
     let mut schema_diffs_res = Vec::with_capacity(schema_diffs.len());
@@ -196,6 +235,17 @@ async fn get_schema_diff(
         }
     }
     Ok(schema_diffs_res)
+}
+
+async fn schema_diff_key_exists(
+    kv_getter: Arc<dyn KvGetter>,
+    keyspace_id: u32,
+    schema_version: i64,
+    start_ts: TimeStamp,
+) -> Result<bool, String> {
+    let schema_diff_key = schema_diff_key(keyspace_id, schema_version);
+    let exists = kv_getter.get(&schema_diff_key, start_ts).await?;
+    Ok(exists.is_some())
 }
 
 fn schema_version_key(keyspace_id: u32) -> Vec<u8> {
@@ -237,8 +287,12 @@ fn schema_data_key(keyspace_id: u32, db_id: i64, table_id: i64) -> Vec<u8> {
 
 #[async_trait]
 pub trait KvGetter: Send + Sync {
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
-    async fn batch_get(&self, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>, String>;
+    async fn get(&self, key: &[u8], start_ts: TimeStamp) -> Result<Option<Vec<u8>>, String>;
+    async fn batch_get(
+        &self,
+        keys: &[Vec<u8>],
+        start_ts: TimeStamp,
+    ) -> Result<Vec<Option<Vec<u8>>>, String>;
 }
 
 #[cfg(feature = "testexport")]

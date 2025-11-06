@@ -7655,6 +7655,7 @@ dependencies = [
  "tidb_query_datatype",
  "tikv_util",
  "tipb",
+ "txn_types",
 ]
 
 [[package]]

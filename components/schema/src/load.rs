@@ -10,6 +10,7 @@ use tikv_util::{
     },
     debug, error, warn,
 };
+use txn_types::TimeStamp;
 
 use crate::schema::{DbInfo, TableInfo, STATE_PUBLIC};
 
@@ -19,6 +20,7 @@ const M_TABLE_PREFIX: &[u8] = b"Table";
 pub async fn load_schema(
     kv_scanner: Arc<dyn KvScanner>,
     keyspace: &[u8],
+    start_ts: TimeStamp,
 ) -> Result<Vec<DbInfo>, String> {
     let mut start = Vec::with_capacity(keyspace.len() + M_DBS.len());
     start.extend_from_slice(keyspace);
@@ -26,7 +28,7 @@ pub async fn load_schema(
     let mut end = start.clone();
     let last_idx = end.len() - 1;
     end[last_idx] += 1;
-    let pairs = kv_scanner.scan(&start, &end).await?;
+    let pairs = kv_scanner.scan(&start, &end, start_ts).await?;
     debug!(
         "scan pairs {}, start {:?}, end {:?}",
         pairs.len(),
@@ -52,7 +54,7 @@ pub async fn load_schema(
         let start_key = db_tables_start_key(keyspace, db.id);
         let prefix_len = start_key.len();
         let (start, end) = get_range_keys(start_key);
-        let pairs = kv_scanner.scan(&start, &end).await?;
+        let pairs = kv_scanner.scan(&start, &end, start_ts).await?;
         for (key, value) in pairs {
             let mut suffix = &key[prefix_len..];
             let field = decode_bytes(&mut suffix, false).unwrap();
@@ -96,5 +98,10 @@ fn get_range_keys(start_key: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
 
 #[async_trait]
 pub trait KvScanner: Send + Sync {
-    async fn scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String>;
+    async fn scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        start_ts: TimeStamp,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String>;
 }

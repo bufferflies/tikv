@@ -44,7 +44,7 @@ use tikv_util::{
     codec::number::{decode_i64, decode_u64},
     error, info,
 };
-use txn_types::KvPair;
+use txn_types::{KvPair, TimeStamp};
 
 use crate::check_table::Handle::{Common, Int};
 
@@ -184,7 +184,12 @@ pub fn execute_check_table(config: CheckTableConfig, params: CheckTableParams) {
             txn_chunk_manager.clone(),
         ));
         let keyspace_prefix = api_version::ApiV2::get_keyspace_prefix_by_id(keyspace_id);
-        let dbs = block_on(schema::load_schema(backup_reader.clone(), &keyspace_prefix)).unwrap();
+        let dbs = block_on(schema::load_schema(
+            backup_reader.clone(),
+            &keyspace_prefix,
+            TimeStamp::new(check_table_ts),
+        ))
+        .unwrap();
         let starts_from_table_id = if idx == 0 {
             params.starts_from_table_id
         } else {
@@ -676,7 +681,12 @@ impl kvengine::RecoverHandler for NoopRecoverHandler {
 
 #[async_trait]
 impl schema::KvScanner for BackupReader {
-    async fn scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<KvPair>, String> {
+    async fn scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        _start_ts: TimeStamp,
+    ) -> Result<Vec<KvPair>, String> {
         let mut pairs = vec![];
         self.iterate(start, end, |key, _, val| {
             pairs.push((key.to_vec(), val.to_vec()));

@@ -26,3 +26,4 @@ slog-term = "2.4"
 tidb_query_datatype = { workspace = true }
 tikv_util = { workspace = true }
 tipb = { workspace = true }
+txn_types = { workspace = true }
