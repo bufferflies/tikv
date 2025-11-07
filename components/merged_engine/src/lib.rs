@@ -835,6 +835,7 @@ impl MergedEngine {
             rlog_files.snap_epoch,
             rlog_files.snap_meta,
             rlog_files.snap_rlog,
+            store_config.rfengine.epoch_rotate_len,
         )?;
         let raft_db_path = Path::new(&store_config.raft_store.raftdb_path);
         let data_dir = Path::new(&store_config.storage.data_dir);

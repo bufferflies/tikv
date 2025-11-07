@@ -3240,6 +3240,7 @@ impl TikvConfig {
         self.rocksdb.validate()?;
         self.raftdb.validate()?;
         self.raft_engine.validate()?;
+        self.rfengine.validate(&self.raft_store.raftdb_path)?;
         self.server.validate()?;
         self.pd.validate()?;
         self.coprocessor.validate()?;

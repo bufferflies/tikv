@@ -83,6 +83,7 @@ pub(crate) struct CompactWorker {
     compacted_epoch: Arc<AtomicU32>,
     s3fs: Option<Arc<S3Fs>>,
     last_snap_epoch_id: u32,
+    epoch_rotate_len: usize,
 
     // Used to cache small rlogs to reduce disk IO when taking snapshot.
     rlog_cache: RlogCache,
@@ -101,14 +102,13 @@ pub(crate) struct CompactWorker {
 impl CompactWorker {
     pub(crate) fn new(
         dir: PathBuf,
+        cfg: &RfEngineConfig,
         task_rx: Receiver<CompactTask>,
         manifest: Manifest,
         compacted_epoch: Arc<AtomicU32>,
         lightweight_backup: Option<&(LightweightBackupConfig, Arc<S3Fs>)>,
         healthy: Healthy,
-        sync_concurrency: usize,
         rate_limiter: Option<Arc<IoRateLimiter>>,
-        rlog_file_size: u32,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
         let (rlog_cache, compress_type, s3fs) = if let Some((config, s3fs)) = lightweight_backup {
@@ -120,7 +120,9 @@ impl CompactWorker {
         } else {
             (RlogCache::none(), CompressionType::NoCompression, None)
         };
-
+        let epoch_rotate_len = cfg.epoch_rotate_len;
+        let sync_concurrency = cfg.compact_wal_sync_concurrency;
+        let rlog_file_size = cfg.rlog_file_size.0 as u32;
         Self {
             dir,
             manifest,
@@ -130,6 +132,7 @@ impl CompactWorker {
             compacted_epoch,
             s3fs,
             last_snap_epoch_id: 0,
+            epoch_rotate_len,
             rlog_cache,
             rlog_compression_type: compress_type,
             healthy,
@@ -232,7 +235,7 @@ impl CompactWorker {
     fn compact(&mut self, epoch_id: u32) -> Result<()> {
         let timer = Instant::now_coarse();
         let mut batch = WriteBatch::default();
-        let mut it = WalIterator::new(&self.dir, epoch_id)?;
+        let mut it = WalIterator::new(&self.dir, epoch_id, self.epoch_rotate_len)?;
         it.iterate_batch(|data, _| {
             iterate_peer_batch(data, |region_batch| {
                 batch.merge_peer(region_batch);
@@ -661,7 +664,7 @@ impl CompactWorker {
         start_off: u64,
         end_off: u64,
     ) -> Result<Vec<(String, Bytes)>> {
-        let wal_file_name = wal_file_name(&self.dir, wal_epoch);
+        let wal_file_name = wal_file_name(&self.dir, wal_epoch, self.epoch_rotate_len);
         let mut wal_file = fs::File::open(wal_file_name)?;
         let mut chunks = vec![];
         let mut total_size = 0;
@@ -858,8 +861,8 @@ impl RlogHeader {
     }
 }
 
-pub(crate) fn wal_file_name(dir: &Path, epoch_id: u32) -> PathBuf {
-    let idx = epoch_to_idx(epoch_id);
+pub(crate) fn wal_file_name(dir: &Path, epoch_id: u32, epoch_rotate_len: usize) -> PathBuf {
+    let idx = epoch_id as usize % epoch_rotate_len;
     dir.join(format!("{}.wal", idx))
 }
 
@@ -1069,7 +1072,7 @@ mod tests {
     use protobuf::Message;
     use rand::{distributions::Alphanumeric, Rng};
     use rfenginepb::{ChangeSet, PeerState, StoreBackupMeta, StoreRaftLogBackupMeta};
-    use tikv_util::defer;
+    use tikv_util::{config::ReadableSize, defer};
 
     use super::*;
     use crate::{
@@ -1123,16 +1126,16 @@ mod tests {
         let (_, rx) = tikv_util::mpsc::unbounded();
         let engine_id = 999;
         let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
+        let cfg = RfEngineConfig::default();
         let mut worker = CompactWorker::new(
             tmp_path.to_path_buf(),
+            &cfg,
             rx,
             manifest,
             AtomicU32::new(0).into(),
             None,
             dfs_worker::Healthy::default(),
-            1,
             None,
-            u32::MAX,
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 80, RANDOM_STR_MAX_LEN / 2)
@@ -1273,16 +1276,16 @@ mod tests {
         let (_, rx) = tikv_util::mpsc::unbounded();
         let engine_id = 1999;
         let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
+        let cfg = RfEngineConfig::default();
         let mut worker = CompactWorker::new(
             tmp_path.to_path_buf(),
+            &cfg,
             rx,
             manifest,
             AtomicU32::new(0).into(),
             None,
             dfs_worker::Healthy::default(),
-            1,
             None,
-            u32::MAX,
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 100 * 5, RANDOM_STR_MAX_LEN * 100 / 2)
@@ -1384,11 +1387,9 @@ mod tests {
         // Hack wal file to let RfEngine::open pass.
         let mut wal_writer = WalWriter::new(
             tmp_path2,
-            wal_size,
-            1024,
+            &cfg,
             AtomicU32::new(cs.epoch_id + 1).into(),
             WriterType::Sync,
-            cfg.write_throttle_duration.0,
         );
         wal_writer.open_file(cs.epoch_id + 1, 0).unwrap();
         // checksum inner should succeeds.
@@ -1423,16 +1424,17 @@ mod tests {
         let (_, rx) = tikv_util::mpsc::unbounded();
 
         let manifest = Manifest::open(tmp_path, AtomicU64::new(1).into()).unwrap();
+        let mut cfg = RfEngineConfig::default();
+        cfg.rlog_file_size = ReadableSize::kb(10);
         let mut worker = CompactWorker::new(
             tmp_path.to_path_buf(),
+            &cfg,
             rx,
             manifest,
             AtomicU32::new(0).into(),
             None,
             dfs_worker::Healthy::default(),
-            1,
             None,
-            10 * 1024, // rlog_file_size: 10KB
         );
 
         let mut peer_batch = PeerBatch::new(1, 1000);

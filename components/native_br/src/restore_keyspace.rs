@@ -900,6 +900,7 @@ impl BackupCluster {
             rlog_files.snap_epoch,
             rlog_files.snap_meta,
             rlog_files.snap_rlog,
+            conf.rfengine.epoch_rotate_len,
         )
         .map_err(|x| Error::RfEngine(x))?;
 
@@ -952,6 +953,7 @@ impl BackupCluster {
             store_id,
             Path::new(&conf.raft_store.raftdb_path),
             None, // TODO: pass `Some(keyspace_id)` in.
+            conf.rfengine.epoch_rotate_len,
         );
         let rf_engine = TikvServer::init_raft_engine(conf, None)?;
         Ok(rf_engine)

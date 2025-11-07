@@ -34,10 +34,10 @@ impl RfEngineCore {
         let mut epoch_id = manifest.epoch_id + 1;
         let mut wal_offset = 0;
         let mut async_offset = 0;
-        if wal_exists(self.wal_dir(), epoch_id) {
+        if wal_exists(self.wal_dir(), epoch_id, self.epoch_rotate_len) {
             (wal_offset, async_offset) = self.load_wal_file(epoch_id, true)?;
         }
-        while wal_exists(self.wal_dir(), epoch_id + 1) {
+        while wal_exists(self.wal_dir(), epoch_id + 1, self.epoch_rotate_len) {
             self.try_send_task(ServiceTask::Rotate { epoch_id });
             epoch_id += 1;
             let (offset, _) = self.load_wal_file(epoch_id, false)?;
@@ -54,7 +54,7 @@ impl RfEngineCore {
         let mut async_batch_cnt = 0;
         let mut async_offset = 0;
         if self.is_async_wal_enabled() && load_async {
-            let mut async_it = WalIterator::new(&self.dir, epoch_id)?;
+            let mut async_it = WalIterator::new(&self.dir, epoch_id, self.epoch_rotate_len)?;
             match async_it.iterate_batch(|_, _| {
                 async_batch_cnt += 1;
             }) {
@@ -74,7 +74,7 @@ impl RfEngineCore {
             }
         }
         let mut sync_batch_idx = 0;
-        let mut it = WalIterator::new(self.wal_dir(), epoch_id)?;
+        let mut it = WalIterator::new(self.wal_dir(), epoch_id, self.epoch_rotate_len)?;
         match it.iterate_batch(|data, _| {
             sync_batch_idx += 1;
             let mut wb = if self.is_async_wal_enabled() && sync_batch_idx > async_batch_cnt {
@@ -104,7 +104,7 @@ impl RfEngineCore {
             Err(Error::Corruption {
                 msg, offset, data, ..
             }) => {
-                if !is_last_wal(self.wal_dir(), epoch_id) {
+                if !is_last_wal(self.wal_dir(), epoch_id, self.epoch_rotate_len) {
                     return Err(Error::Corruption {
                         msg,
                         offset,
@@ -119,9 +119,11 @@ impl RfEngineCore {
                 );
                 // If the write batch data corrupted and it's in the last wal file,
                 // we reset the aligned wal header to EOF.
-                let file = fs::File::options()
-                    .write(true)
-                    .open(wal_file_name(self.wal_dir(), epoch_id))?;
+                let file = fs::File::options().write(true).open(wal_file_name(
+                    self.wal_dir(),
+                    epoch_id,
+                    self.epoch_rotate_len,
+                ))?;
                 file.write_all_at(&[0u8; BATCH_HEADER_SIZE], offset)?;
                 file.sync_all()?;
             }
@@ -214,12 +216,12 @@ impl RfEngineCore {
     }
 }
 
-pub(crate) fn wal_exists(dir: &Path, epoch_id: u32) -> bool {
-    check_wal_header(dir, epoch_id).is_ok()
+pub(crate) fn wal_exists(dir: &Path, epoch_id: u32, epoch_rotate_len: usize) -> bool {
+    check_wal_header(dir, epoch_id, epoch_rotate_len).is_ok()
 }
 
-pub(crate) fn is_last_wal(dir: &Path, epoch_id: u32) -> bool {
-    wal_exists(dir, epoch_id) && !wal_exists(dir, epoch_id + 1)
+pub(crate) fn is_last_wal(dir: &Path, epoch_id: u32, epoch_rotate_len: usize) -> bool {
+    wal_exists(dir, epoch_id, epoch_rotate_len) && !wal_exists(dir, epoch_id + 1, epoch_rotate_len)
 }
 
 #[cfg(test)]
@@ -247,14 +249,14 @@ mod tests {
         let writer = engine.writer.lock().unwrap();
         let current_epoch = writer.get_epoch_id();
 
-        let mut it = WalIterator::new(dir_path, current_epoch).unwrap();
+        let mut it = WalIterator::new(dir_path, current_epoch, cfg.epoch_rotate_len).unwrap();
         it.iterate_batch(|_, _| {
             // Do nothing.
         })
         .unwrap();
 
         // Write some corrupted data to the last page of the async wal file.
-        let filename = wal_file_name(dir_path, current_epoch);
+        let filename = wal_file_name(dir_path, current_epoch, cfg.epoch_rotate_len);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -290,7 +292,7 @@ mod tests {
         let writer = engine.writer.lock().unwrap();
         let current_epoch = writer.get_epoch_id();
 
-        let mut async_it = WalIterator::new(dir_path, current_epoch).unwrap();
+        let mut async_it = WalIterator::new(dir_path, current_epoch, cfg.epoch_rotate_len).unwrap();
         async_it
             .iterate_batch(|_, _| {
                 // Do nothing.
@@ -299,7 +301,7 @@ mod tests {
 
         let offset = async_it.offset;
         // Truncate the last write batch of async wal file.
-        let filename = wal_file_name(dir_path, current_epoch);
+        let filename = wal_file_name(dir_path, current_epoch, cfg.epoch_rotate_len);
         let file = OpenOptions::new().write(true).open(filename).unwrap();
         info!("truncate async wal to offset: {}", offset - 4096);
         file.write_all_at(&[0u8; BATCH_HEADER_SIZE], offset - 4096)
@@ -307,8 +309,9 @@ mod tests {
         file.sync_all().unwrap();
         drop(file);
 
-        let filename = wal_file_name(&sync_wal_path, current_epoch);
-        let mut sync_it = WalIterator::new(&sync_wal_path, current_epoch).unwrap();
+        let filename = wal_file_name(&sync_wal_path, current_epoch, cfg.epoch_rotate_len);
+        let mut sync_it =
+            WalIterator::new(&sync_wal_path, current_epoch, cfg.epoch_rotate_len).unwrap();
         sync_it
             .iterate_batch(|_, _| {
                 // Do nothing.
@@ -335,7 +338,8 @@ mod tests {
         let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
         assert_eq!(engine.peers.peers.len(), 10);
 
-        let mut sync_it = WalIterator::new(&sync_wal_path, current_epoch).unwrap();
+        let mut sync_it =
+            WalIterator::new(&sync_wal_path, current_epoch, cfg.epoch_rotate_len).unwrap();
         sync_it.iterate_batch(|_, _| {}).unwrap();
         check_async_wal(
             &engine,
@@ -377,8 +381,9 @@ mod tests {
         assert!(compacted_epoch + 1 < current_epoch);
 
         // Write corrupted data to `current_epoch - 1` wal file.
-        let filename = wal_file_name(&sync_wal_path, current_epoch - 1);
-        let mut sync_it = WalIterator::new(&sync_wal_path, current_epoch - 1).unwrap();
+        let filename = wal_file_name(&sync_wal_path, current_epoch - 1, cfg.epoch_rotate_len);
+        let mut sync_it =
+            WalIterator::new(&sync_wal_path, current_epoch - 1, cfg.epoch_rotate_len).unwrap();
         sync_it.iterate_batch(|_, _| {}).unwrap();
         let file = OpenOptions::new().write(true).open(filename).unwrap();
         let write_offset = sync_it.offset - 4096 + BATCH_HEADER_SIZE as u64;

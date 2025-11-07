@@ -1,6 +1,13 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use tikv_util::config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize};
+use std::path::Path;
+
+use tikv_util::{
+    config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
+    warn,
+};
+
+use crate::{MAX_EPOCH_ROTATE_LEN, MIN_EPOCH_ROTATE_LEN};
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
@@ -92,6 +99,10 @@ pub struct Config {
 
     /// Enable rate limiter for compact WAL files.
     pub enable_compact_rate_limiter: bool,
+
+    /// WAL file will be rotated and overwritten on every `epoch_rotate_len`
+    /// epoches.
+    pub epoch_rotate_len: usize,
 }
 
 impl Default for Config {
@@ -115,8 +126,53 @@ impl Default for Config {
             rlog_file_size: ReadableSize::mb(256),
             compact_bytes_per_sec: ReadableSize::mb(200),
             enable_compact_rate_limiter: false,
+            epoch_rotate_len: MIN_EPOCH_ROTATE_LEN,
         }
     }
+}
+
+impl Config {
+    pub fn validate(&mut self, dir: &str) -> Result<(), String> {
+        // make sure epoch_rotate_len is valid.
+        if self.epoch_rotate_len < MIN_EPOCH_ROTATE_LEN
+            || self.epoch_rotate_len > MAX_EPOCH_ROTATE_LEN
+        {
+            return Err(format!(
+                "rfengine epoch_rotate_len {} is invalid, it must be between {} and {}",
+                self.epoch_rotate_len, MIN_EPOCH_ROTATE_LEN, MAX_EPOCH_ROTATE_LEN
+            ));
+        };
+        // do not modify epoch_rotate_len if there are existing wal files.
+        let wal_file_count = wal_file_count(Path::new(dir));
+        if wal_file_count > 0 && wal_file_count != self.epoch_rotate_len {
+            if wal_file_count < MIN_EPOCH_ROTATE_LEN {
+                return Err(format!(
+                    "rfengine wal_file_count {} is less than {}, maybe interrupted on initialization",
+                    wal_file_count, MIN_EPOCH_ROTATE_LEN
+                ));
+            }
+            // The existing wal files count is different from the configured
+            // epoch_rotate_len, we keep the existing value.
+            warn!(
+                "rfengine epoch_rotate_len is modified from {} to {}, as there are existing wal files",
+                self.epoch_rotate_len, wal_file_count
+            );
+            self.epoch_rotate_len = wal_file_count;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn wal_file_count(dir: &Path) -> usize {
+    let mut count = 0;
+    loop {
+        let file_path = crate::engine::wal_file_path(dir, count);
+        if !file_path.exists() {
+            break;
+        }
+        count += 1;
+    }
+    count
 }
 
 #[cfg(test)]
@@ -125,5 +181,80 @@ impl Config {
         let mut cfg = Self::default();
         cfg.target_file_size = ReadableSize(target_file_size as u64);
         cfg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_config_validate() {
+        let tmp_dir = tempfile::Builder::new().tempdir().unwrap();
+        let base_path = tmp_dir.path();
+
+        // Test 1: Valid default configuration
+        let mut cfg = Config::default();
+        cfg.validate(base_path.to_str().unwrap()).unwrap();
+
+        // Test 2: Invalid epoch_rotate_len - too low
+        let mut cfg = Config::default();
+        cfg.epoch_rotate_len = MIN_EPOCH_ROTATE_LEN - 1;
+        assert!(cfg.validate(base_path.to_str().unwrap()).is_err());
+
+        // Test 3: Invalid epoch_rotate_len - too high
+        let mut cfg = Config::default();
+        cfg.epoch_rotate_len = MAX_EPOCH_ROTATE_LEN + 1;
+        assert!(cfg.validate(base_path.to_str().unwrap()).is_err());
+
+        // Test 4: Existing WAL files - should adjust epoch_rotate_len
+        let existing_files_path = base_path.join("existing_files");
+        std::fs::create_dir(&existing_files_path).unwrap();
+        create_wal_files(&existing_files_path, 6);
+
+        let mut cfg = Config::default();
+        cfg.epoch_rotate_len = 4; // Different from existing file count
+        cfg.validate(existing_files_path.to_str().unwrap()).unwrap();
+        assert_eq!(cfg.epoch_rotate_len, 6); // Should be adjusted to match existing files
+
+        // Test interruption scenarios - WAL file count less than MIN_EPOCH_ROTATE_LEN
+        test_interruption_scenario(base_path, "interruption_0_files", 0, true);
+        test_interruption_scenario(base_path, "interruption_1_file", 1, false);
+        test_interruption_scenario(base_path, "interruption_3_files", 3, false);
+        test_interruption_scenario(base_path, "interruption_2_files", 2, false);
+    }
+
+    fn create_wal_files(dir: &Path, count: usize) {
+        for i in 0..count {
+            let wal_path = crate::engine::wal_file_path(dir, i);
+            std::fs::write(&wal_path, b"test data").unwrap();
+        }
+    }
+
+    fn test_interruption_scenario(
+        base_path: &Path,
+        subdir_name: &str,
+        existing_files: usize,
+        should_pass: bool,
+    ) {
+        let test_path = base_path.join(subdir_name);
+        std::fs::create_dir(&test_path).unwrap();
+        create_wal_files(&test_path, existing_files);
+
+        let mut cfg = Config::default();
+        let result = cfg.validate(test_path.to_str().unwrap());
+
+        if should_pass {
+            assert!(
+                result.is_ok(),
+                "Expected validation to pass for {} files",
+                existing_files
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "Expected validation to fail for {} files (less than MIN_EPOCH_ROTATE_LEN)",
+                existing_files
+            );
+        }
     }
 }

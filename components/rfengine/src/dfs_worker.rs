@@ -25,7 +25,7 @@ use crate::{
     compact_worker::CompactTask, compress_lz4, decompress_lz4, decompress_lz4_to_buffer,
     get_integral_wal_chunks, get_lz4_decompressed_size, last_wal_chunk_file_key,
     manifest::Manifest, metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE, wal_chunk_file_key,
-    wal_chunk_file_prefix, wal_file_name, writer::EPOCH_ROTATE_LEN, Error, Result, WalChunkMeta,
+    wal_chunk_file_prefix, wal_file_name, Error, Result, WalChunkMeta,
 };
 
 #[derive(Debug)]
@@ -73,6 +73,7 @@ pub(crate) struct ObjectStorageWorker {
     buf: Vec<u8>,
     async_wal_file: Option<fs::File>,
     epoch_id: u32,
+    epoch_rotate_len: usize,
     start_off: u64, // The start offset of the current chunk.
     sync_off: u64,  // The offset of the syncing of current wal.
     s3fs: Arc<S3Fs>,
@@ -93,6 +94,7 @@ impl ObjectStorageWorker {
         config: LightweightBackupConfig,
         s3fs: Arc<S3Fs>,
         epoch_id: u32,
+        epoch_rotate_len: usize,
         engine_id: Arc<AtomicU64>,
         dfs_worker_healthy: Healthy,
         task_rx: Receiver<ObjectStorageTask>,
@@ -111,6 +113,7 @@ impl ObjectStorageWorker {
             service_worker_epoch,
             buf: Vec::with_capacity(wal_chunk_target_file_size),
             async_wal_file: None,
+            epoch_rotate_len,
             start_off: 0,
             sync_off: 0,
             s3fs,
@@ -276,7 +279,11 @@ impl ObjectStorageWorker {
     // Write wal chunk from `start_off` to end of current epoch in a single write.
     fn rebuild_wal_chunk(&mut self) -> Result<()> {
         let store_id = self.get_engine_id();
-        let mut fd = fs::File::open(wal_file_name(self.config.dir.as_path(), self.epoch_id))?;
+        let mut fd = fs::File::open(wal_file_name(
+            self.config.dir.as_path(),
+            self.epoch_id,
+            self.epoch_rotate_len,
+        ))?;
         if self.start_off > 0 {
             fd.seek(SeekFrom::Start(self.start_off))?;
         }
@@ -367,7 +374,8 @@ impl ObjectStorageWorker {
         let async_wal_file = match self.async_wal_file {
             Some(ref mut fd) => fd,
             None => {
-                let filename = wal_file_name(self.config.dir.as_path(), epoch_id);
+                let filename =
+                    wal_file_name(self.config.dir.as_path(), epoch_id, self.epoch_rotate_len);
                 let fd = fs::File::open(filename)?;
                 self.async_wal_file = Some(fd);
                 self.async_wal_file.as_mut().unwrap()
@@ -396,17 +404,17 @@ impl ObjectStorageWorker {
     fn overwritten_epoch(&self) -> u32 {
         self.service_worker_epoch
             .load(Ordering::SeqCst)
-            .saturating_sub(EPOCH_ROTATE_LEN)
+            .saturating_sub(self.epoch_rotate_len as u32)
     }
 
-    // `service_worker_epoch - 3` (`EPOCH_ROTATE_LEN - 1` == 3) is the cut-off value
-    // and would be overwritten soon.
+    // `service_worker_epoch - 3` (`self.epoch_rotate_len - 1` == 3) is the cut-off
+    // value and would be overwritten soon.
     // So `service_worker_epoch - 2` is used.
     #[inline]
     fn near_overwritten_epoch(&self) -> u32 {
         self.service_worker_epoch
             .load(Ordering::SeqCst)
-            .saturating_sub(EPOCH_ROTATE_LEN - 2)
+            .saturating_sub(self.epoch_rotate_len as u32 - 2)
     }
 
     fn check_overwritten_epoch(&self, ctx: &str) -> Result<()> {
@@ -803,6 +811,7 @@ mod tests {
             ),
             s3fs,
             1,
+            4,
             Arc::new(AtomicU64::new(1)),
             Healthy::default(),
             rx,
@@ -851,6 +860,7 @@ mod tests {
             ),
             s3fs,
             1,
+            4,
             Arc::new(AtomicU64::new(1)),
             Healthy::default(),
             rx,

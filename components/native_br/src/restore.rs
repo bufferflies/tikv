@@ -264,6 +264,7 @@ fn setup_raft_engine(
             rlog_files.snap_epoch,
             rlog_files.snap_meta,
             rlog_files.snap_rlog,
+            conf.rfengine.epoch_rotate_len,
         )
         .map_err(|x| Error::RfEngine(x))?;
         Some(rlog_files.snap_epoch)
@@ -274,6 +275,7 @@ fn setup_raft_engine(
             store_id,
             &PathBuf::from(path),
             None,
+            conf.rfengine.epoch_rotate_len,
         );
         None
     };

@@ -30,7 +30,7 @@ use crate::{
     manifest::Manifest,
     write_batch::PeerBatch,
     writer::WalWriter,
-    BackupTask, Error, Result,
+    BackupTask, Error, Result, RfEngineConfig,
 };
 
 pub(crate) struct ObjectStorageWorkerHandle {
@@ -110,6 +110,7 @@ pub(crate) struct ServiceWorker {
 impl ServiceWorker {
     pub(crate) fn new(
         dir: PathBuf,
+        cfg: &RfEngineConfig,
         epoch_id: u32,
         async_wal_writer: Option<WalWriter>,
         rx: Receiver<ServiceTask>,
@@ -117,22 +118,19 @@ impl ServiceWorker {
         compacted_epoch: Arc<AtomicU32>,
         lightweight_backup: Option<(LightweightBackupConfig, Arc<S3Fs>)>,
         healthy: Healthy,
-        compact_wal_sync_concurrency: usize,
         compact_rate_limiter: Option<Arc<IoRateLimiter>>,
-        rlog_file_size: u32,
     ) -> Self {
         let engine_id = manifest.engine_id.clone();
         let (compact_worker_tx, compact_rx) = tikv_util::mpsc::unbounded();
         let mut compact_worker = CompactWorker::new(
             dir.clone(),
+            cfg,
             compact_rx,
             manifest,
             compacted_epoch.clone(),
             lightweight_backup.as_ref(),
             healthy.clone(),
-            compact_wal_sync_concurrency,
             compact_rate_limiter,
-            rlog_file_size,
         );
         let handle = std::thread::Builder::new()
             .name("compact-wal-worker".to_string())
@@ -142,6 +140,7 @@ impl ServiceWorker {
             task_sender: compact_worker_tx.clone(),
             handle: Some(handle),
         };
+        let epoch_rotate_len = cfg.epoch_rotate_len;
 
         let service_worker_epoch = Arc::new(AtomicU32::new(epoch_id));
         let dfs_worker_handle = if let Some((cfg, s3fs)) = lightweight_backup {
@@ -150,6 +149,7 @@ impl ServiceWorker {
                 cfg,
                 s3fs,
                 epoch_id,
+                epoch_rotate_len,
                 engine_id.clone(),
                 healthy.clone(),
                 dfs_worker_rx,
@@ -268,7 +268,7 @@ impl ServiceWorker {
                 error!("{}", msg);
                 callback(Err(Error::Other(msg)));
                 return;
-            } else if epoch_id + 3 < writer.epoch_id {
+            } else if epoch_id + writer.epoch_rotate_len as u32 - 1 < writer.epoch_id {
                 // The epoch_id is too old and has been overwritten.
                 info!(
                     "{}: handle dump: epoch is overwritten: epoch {} writer epoch {}",
@@ -284,7 +284,8 @@ impl ServiceWorker {
                     writer.file_off
                 } else {
                     partial_content = true;
-                    let wal_file_name = wal_file_name(&writer.dir, epoch_id);
+                    let wal_file_name =
+                        wal_file_name(&writer.dir, epoch_id, writer.epoch_rotate_len);
                     let file_meta = fs::metadata(wal_file_name).unwrap();
                     file_meta.len()
                 }
@@ -294,7 +295,8 @@ impl ServiceWorker {
                     partial_content = true;
                     end_off.min(writer.file_off)
                 } else {
-                    let wal_file_name = wal_file_name(&writer.dir, epoch_id);
+                    let wal_file_name =
+                        wal_file_name(&writer.dir, epoch_id, writer.epoch_rotate_len);
                     let file_len = fs::metadata(wal_file_name).unwrap().len();
                     debug_assert!(end_off <= file_len);
                     partial_content = end_off < file_len;
@@ -305,7 +307,13 @@ impl ServiceWorker {
                 "{}: dump latest wal epoch {} start_off {} end_off {} effective_end_off {} writer epoch {}",
                 store_id, epoch_id, start_off, end_off, effective_end_off, writer.epoch_id,
             );
-            match dump_wal_chunk(&writer.dir, epoch_id, start_off, effective_end_off) {
+            match dump_wal_chunk(
+                &writer.dir,
+                epoch_id,
+                writer.epoch_rotate_len,
+                start_off,
+                effective_end_off,
+            ) {
                 Ok(chunk) => Ok((chunk, partial_content)),
                 Err(err) => {
                     let msg = format!(
@@ -424,9 +432,15 @@ impl ServiceWorker {
     }
 }
 
-fn dump_wal_chunk(dir: &Path, epoch_id: u32, start_off: u64, end_off: u64) -> crate::Result<Bytes> {
+fn dump_wal_chunk(
+    dir: &Path,
+    epoch_id: u32,
+    epoch_rotate_len: usize,
+    start_off: u64,
+    end_off: u64,
+) -> crate::Result<Bytes> {
     // `epoch_id` already checked in the caller.
-    let mut file = fs::File::open(wal_file_name(dir, epoch_id))?;
+    let mut file = fs::File::open(wal_file_name(dir, epoch_id, epoch_rotate_len))?;
     let file_len = file.metadata()?.len();
     if end_off > file_len {
         return Err(Error::Eof);

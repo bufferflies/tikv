@@ -44,7 +44,7 @@ use native_br::{
     wal::AssembledWalData,
 };
 use pd_client::{util::get_all_stores_except_tiflash, PdClient, RegionStat};
-use rfengine::{RfEngine, TRUNCATE_ALL_INDEX};
+use rfengine::{RfEngine, MIN_EPOCH_ROTATE_LEN, TRUNCATE_ALL_INDEX};
 use rfstore::store::ApplyContext;
 use security::{HttpClient, SecurityConfig};
 use serde_json::{json, Value};
@@ -1227,7 +1227,9 @@ impl ReplicationWorker {
             debug!("update_store_wal"; "store" => store_id, "epoch" => epoch,
                 "start" => start_off, "end" => end_off);
 
-            if store.is_none() || epoch <= near_overwritten_epoch(target.epoch) {
+            if store.is_none()
+                || epoch <= near_overwritten_epoch(target.epoch, MIN_EPOCH_ROTATE_LEN)
+            {
                 let rotated = self.update_store_wal_from_s3(store_id, epoch, start_off, target)?;
                 (epoch, start_off) = next_epoch_offset(epoch, end_off, rotated);
                 continue;
@@ -2005,8 +2007,8 @@ impl ScanLocksHandler {
 }
 
 // Ref: ObjectStorageWorker::near_overwritten_epoch
-fn near_overwritten_epoch(current_epoch: u32) -> u32 {
-    current_epoch.saturating_sub(rfengine::EPOCH_ROTATE_LEN - 2)
+fn near_overwritten_epoch(current_epoch: u32, epoch_rotate_len: usize) -> u32 {
+    current_epoch.saturating_sub(epoch_rotate_len as u32 - 2)
 }
 
 #[cfg(test)]

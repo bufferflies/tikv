@@ -26,10 +26,8 @@ use tikv_util::{
     warn,
 };
 
-use crate::{load::wal_exists, write_batch::PeerBatch, *};
+use crate::{config::Config, load::wal_exists, write_batch::PeerBatch, *};
 
-// WAL file will be rotated and overwritten on every `EPOCH_ROTATE_LEN` epoches.
-pub const EPOCH_ROTATE_LEN: u32 = 4;
 pub(crate) const EPOCH_SNAPSHOT_LEN: u32 = 8;
 
 pub const BATCH_HEADER_SIZE: usize = 4 /* epoch_id */ + 4 /* checksum */ + 4 /* batch_len */;
@@ -241,8 +239,12 @@ impl WalHeader {
     }
 }
 
-pub(crate) fn check_wal_header(dir: &Path, epoch_id: u32) -> Result<WalHeader> {
-    let filename = wal_file_name(dir, epoch_id);
+pub(crate) fn check_wal_header(
+    dir: &Path,
+    epoch_id: u32,
+    epoch_rotate_len: usize,
+) -> Result<WalHeader> {
+    let filename = wal_file_name(dir, epoch_id, epoch_rotate_len);
     if let Ok(mut file) = File::open(filename) {
         let mut buf = vec![0u8; WalHeader::len()];
         if file.read_exact(&mut buf).is_ok() {
@@ -297,16 +299,15 @@ pub(crate) struct WalWriter {
     pub(crate) compacted_epoch: Arc<AtomicU32>,
     pub(crate) writer_type: WriterType,
     pub(crate) write_throttle_duration: Duration,
+    pub(crate) epoch_rotate_len: usize,
 }
 
 impl WalWriter {
     pub(crate) fn new(
         dir: &Path,
-        wal_size: usize,
-        compression_threshold: usize,
+        cfg: &Config,
         compacted_epoch: Arc<AtomicU32>,
         writer_type: WriterType,
-        write_throttle_duration: Duration,
     ) -> Self {
         let version = Version::V2;
         let mut buf = DmaBuffer::new(INITIAL_BUF_SIZE);
@@ -315,6 +316,10 @@ impl WalWriter {
         unsafe {
             buf.advance_mut(BATCH_HEADER_SIZE);
         }
+        let wal_size = cfg.target_file_size.0 as usize;
+        let compression_threshold = cfg.batch_compression_threshold.0 as usize;
+        let write_throttle_duration = cfg.write_throttle_duration.0;
+        let epoch_rotate_len = cfg.epoch_rotate_len;
         Self {
             dir: dir.to_path_buf(),
             version,
@@ -328,6 +333,7 @@ impl WalWriter {
             compacted_epoch,
             writer_type,
             write_throttle_duration,
+            epoch_rotate_len,
         }
     }
 
@@ -335,7 +341,7 @@ impl WalWriter {
         self.epoch_id = epoch_id;
         self.file_off = file_off;
 
-        let filename = wal_file_name(&self.dir, epoch_id);
+        let filename = wal_file_name(&self.dir, epoch_id, self.epoch_rotate_len);
         let file = match self.writer_type {
             WriterType::Sync => open_direct_file(&filename, true)?,
             WriterType::Async => {
@@ -367,7 +373,7 @@ impl WalWriter {
         if file_off == 0 {
             self.write_header()?;
         } else {
-            match check_wal_header(self.dir.as_path(), epoch_id) {
+            match check_wal_header(self.dir.as_path(), epoch_id, self.epoch_rotate_len) {
                 Ok(_) => {}
                 Err(Error::Eof) => {
                     self.file_off = 0;
@@ -501,7 +507,7 @@ impl WalWriter {
     // epoch 2 wal, so we need to make sure epoch 2 is compacted.
     fn safe_to_rotate(&self) -> bool {
         let compacted_epoch = self.compacted_epoch.load(Ordering::SeqCst);
-        compacted_epoch + 4 > self.epoch_id
+        compacted_epoch + self.epoch_rotate_len as u32 > self.epoch_id
     }
 
     // When WAL compact is slow, we should slow down to make the compaction catch
@@ -511,10 +517,10 @@ impl WalWriter {
     // sleep for write_throttle_duration * 4 when compacted_epoch is 1.
     fn need_throttle(&self) -> Option<Duration> {
         let compacted_epoch = self.compacted_epoch.load(Ordering::SeqCst);
-        if self.epoch_id < 4 {
+        if self.epoch_id < self.epoch_rotate_len as u32 {
             return None;
         }
-        match (compacted_epoch + 3).cmp(&self.epoch_id) {
+        match (compacted_epoch + self.epoch_rotate_len as u32 - 1).cmp(&self.epoch_id) {
             cmp::Ordering::Less => Some(self.write_throttle_duration * 4),
             cmp::Ordering::Equal => Some(self.write_throttle_duration),
             cmp::Ordering::Greater => None,
@@ -555,10 +561,6 @@ pub(crate) fn write_eof(buf: &mut DmaBuffer) {
     buf.pad_to_align();
 }
 
-pub(crate) fn epoch_to_idx(epoch_id: u32) -> usize {
-    (epoch_id % EPOCH_ROTATE_LEN) as usize
-}
-
 pub(crate) enum WalWriterExt {
     SingleWriter(WalWriter),
     DoubleWriter(DoubleWriter),
@@ -594,16 +596,20 @@ impl WalWriterExt {
     }
 }
 
-fn load_epoch_offset(wal_dir: &Path, manifest_epoch: u32) -> Result<(u32, u64)> {
+fn load_epoch_offset(
+    wal_dir: &Path,
+    manifest_epoch: u32,
+    epoch_rotate_len: usize,
+) -> Result<(u32, u64)> {
     let mut epoch_id = manifest_epoch + 1;
-    if !wal_exists(wal_dir, epoch_id) {
+    if !wal_exists(wal_dir, epoch_id, epoch_rotate_len) {
         // may fall behind too much or newly created wal dir.
         return Ok((epoch_id, 0));
     }
-    while wal_exists(wal_dir, epoch_id + 1) {
+    while wal_exists(wal_dir, epoch_id + 1, epoch_rotate_len) {
         epoch_id += 1;
     }
-    let mut iter = WalIterator::new(wal_dir, epoch_id)?;
+    let mut iter = WalIterator::new(wal_dir, epoch_id, epoch_rotate_len)?;
     iter.iterate_batch(|_, _| {})?;
     Ok((epoch_id, iter.offset))
 }
@@ -624,7 +630,12 @@ impl DoubleWriter {
         manifest_epoch: u32,
         unhealthy_size: usize,
     ) -> Result<Self> {
-        Self::sync_writer_files(&primary_writer.dir, &secondary_writer.dir, manifest_epoch)?;
+        Self::sync_writer_files(
+            &primary_writer.dir,
+            &secondary_writer.dir,
+            manifest_epoch,
+            primary_writer.epoch_rotate_len,
+        )?;
         let total_size = Arc::new(AtomicUsize::new(0));
         let (primary_sender, primary_handle) =
             DoubleWriterWorker::start(primary_writer, unhealthy_size, total_size.clone());
@@ -644,11 +655,12 @@ impl DoubleWriter {
         primary_dir: &PathBuf,
         secondary_dir: &PathBuf,
         manifest_epoch: u32,
+        epoch_rotate_len: usize,
     ) -> Result<()> {
         let (primary_epoch_id, primary_file_off) =
-            load_epoch_offset(primary_dir.as_path(), manifest_epoch)?;
+            load_epoch_offset(primary_dir.as_path(), manifest_epoch, epoch_rotate_len)?;
         let (secondary_epoch_id, secondary_file_off) =
-            load_epoch_offset(secondary_dir.as_path(), manifest_epoch)?;
+            load_epoch_offset(secondary_dir.as_path(), manifest_epoch, epoch_rotate_len)?;
         let mut faster_dir = primary_dir;
         let mut faster_epoch = primary_epoch_id;
         let mut faster_file_off = primary_file_off;
@@ -669,8 +681,8 @@ impl DoubleWriter {
             // The slower writer maybe newly created, so we need to copy all files.
             let start_epoch = (manifest_epoch + 1).max(slower_epoch);
             for epoch_id in start_epoch..=faster_epoch {
-                let faster_file_path = wal_file_name(faster_dir, epoch_id);
-                let slower_file_path = wal_file_name(slower_dir, epoch_id);
+                let faster_file_path = wal_file_name(faster_dir, epoch_id, epoch_rotate_len);
+                let slower_file_path = wal_file_name(slower_dir, epoch_id, epoch_rotate_len);
                 info!(
                     "copy file at epoch {} from {} to {}",
                     epoch_id, fast_dir_str, slow_dir_str,
@@ -680,12 +692,12 @@ impl DoubleWriter {
             file_system::sync_dir(slower_dir.as_path())?;
         } else if faster_file_off != slower_file_off {
             // Only need to copy the delta.
-            let faster_file_path = wal_file_name(faster_dir, faster_epoch);
+            let faster_file_path = wal_file_name(faster_dir, faster_epoch, epoch_rotate_len);
             let faster_file = File::open(faster_file_path)?;
             let delta_size = (faster_file_off - slower_file_off) + BATCH_HEADER_SIZE as u64;
             let mut delta_buf = vec![0u8; delta_size as usize];
             faster_file.read_exact_at(&mut delta_buf, slower_file_off)?;
-            let slower_file_path = wal_file_name(slower_dir, faster_epoch);
+            let slower_file_path = wal_file_name(slower_dir, faster_epoch, epoch_rotate_len);
             info!(
                 "sync wal files at epoch {} from {} file_off {} to {} file_off {}",
                 faster_epoch, fast_dir_str, faster_file_off, slow_dir_str, slower_file_off
@@ -914,9 +926,14 @@ mod tests {
                 &wal_secondary_path
             };
             let truncate_epoch_id = rnd.gen_range((manifest_epoch + 1)..=epoch);
-            let wal_file = wal_file_name(truncate_path.as_path(), truncate_epoch_id);
+            let wal_file = wal_file_name(
+                truncate_path.as_path(),
+                truncate_epoch_id,
+                cfg.epoch_rotate_len,
+            );
             assert!(wal_file.exists());
-            let mut wal_iter = WalIterator::new(truncate_path, truncate_epoch_id).unwrap();
+            let mut wal_iter =
+                WalIterator::new(truncate_path, truncate_epoch_id, cfg.epoch_rotate_len).unwrap();
             let mut file_offs = vec![];
             wal_iter
                 .iterate_batch(|_, file_off| {
@@ -940,7 +957,11 @@ mod tests {
             // We also need to reset the next file header to simulate a slow wal writer.
             // Because we fast check the next file header to determine if the current file
             // is valid.
-            let next_wal_file_path = wal_file_name(truncate_path.as_path(), truncate_epoch_id + 1);
+            let next_wal_file_path = wal_file_name(
+                truncate_path.as_path(),
+                truncate_epoch_id + 1,
+                cfg.epoch_rotate_len,
+            );
             let next_wal_file = std::fs::OpenOptions::new()
                 .write(true)
                 .open(&next_wal_file_path)
