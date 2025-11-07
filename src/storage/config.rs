@@ -238,7 +238,7 @@ pub struct FlowControlConfig {
 impl Default for FlowControlConfig {
     fn default() -> FlowControlConfig {
         FlowControlConfig {
-            enable: false,
+            enable: true,
             soft_pending_compaction_bytes_limit: ReadableSize::gb(192),
             hard_pending_compaction_bytes_limit: ReadableSize::gb(1024),
             memtables_threshold: 5,
