@@ -232,22 +232,33 @@ impl RaftWorker {
             self.aux_handles.push(aux_handle);
         }
         loop {
+            let loop_start = tikv_util::time::Instant::now_coarse();
             self.handle_store_msg();
+            // Using global histograms is OK since this loop is single-threaded.
+            // Consider switching to local histograms if parallelized.
+            STORE_STORE_MSG_DURATION_HISTOGRAM
+                .observe(duration_to_sec(loop_start.saturating_elapsed()));
+
             if self.store_fsm.stopped {
                 self.stop();
                 return;
             }
 
-            let loop_start = match self.receive_msgs(&mut inboxes) {
-                Ok(start_time) => start_time,
-                Err(_) => return,
-            };
+            if self.receive_msgs(&mut inboxes).is_err() {
+                return; // channel closed, exit loop
+            }
+
             // If store msg is empty, we can sync aux_worker after receive latest messages.
             self.sync_aux_worker();
+
+            let send_start = tikv_util::time::Instant::now_coarse();
             let mut inboxes_vec: Vec<PeerInbox> =
                 inboxes.inboxes.drain().map(|(_, inbox)| inbox).collect();
             self.try_send_aux_task(&mut inboxes_vec);
-            let process_start = tikv_util::time::Instant::now();
+            STORE_SEND_AUX_TASK_DURATION_HISTOGRAM
+                .observe(duration_to_sec(send_start.saturating_elapsed()));
+
+            let process_start = tikv_util::time::Instant::now_coarse();
             inboxes_vec.into_iter().for_each(|mut inbox| {
                 inbox.process(
                     &mut self.ctx,
@@ -256,6 +267,8 @@ impl RaftWorker {
                 );
             });
             let process_inbox_duration = process_start.saturating_elapsed();
+            STORE_PROC_MSGS_DURATION_HISTOGRAM.observe(duration_to_sec(process_inbox_duration));
+
             if process_inbox_duration > Duration::from_millis(50) {
                 inbox_peer_stats.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
                 warn!(
@@ -379,13 +392,10 @@ impl RaftWorker {
     }
 
     /// return true means channel is disconnected, return outer loop.
-    fn receive_msgs(
-        &mut self,
-        inboxes: &mut Inboxes,
-    ) -> std::result::Result<tikv_util::time::Instant, RecvTimeoutError> {
+    fn receive_msgs(&mut self, inboxes: &mut Inboxes) -> std::result::Result<(), RecvTimeoutError> {
         self.batch_msg_count = 0;
         let res = self.receiver.recv_timeout(Duration::from_millis(10));
-        let receive_time = tikv_util::time::Instant::now();
+        let receive_time = tikv_util::time::Instant::now_coarse();
         match res {
             Ok((region_id, msg)) => {
                 let mut batch_size = msg.size();
@@ -399,6 +409,9 @@ impl RaftWorker {
                         break;
                     }
                 }
+                // record batch size and batch count metrics
+                STORE_RECV_MSGS_COUNT_HISTOGRAM.observe(self.batch_msg_count as f64);
+                STORE_RECV_MSGS_SIZE_HISTOGRAM.observe(batch_size as f64);
             }
             Err(RecvTimeoutError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
             Err(RecvTimeoutError::Timeout) => {}
@@ -434,7 +447,10 @@ impl RaftWorker {
         } else {
             self.tick_seg_idx = next_tick_seg_idx;
         }
-        Ok(receive_time)
+
+        STORE_RECV_MSGS_DURATION_HISTOGRAM
+            .observe(duration_to_sec(receive_time.saturating_elapsed()));
+        Ok(())
     }
 
     fn append_msg(&mut self, inboxes: &mut Inboxes, region_id: u64, msg: Box<PeerMsg>) {

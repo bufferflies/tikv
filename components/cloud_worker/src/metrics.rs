@@ -104,6 +104,12 @@ lazy_static! {
     )
     .unwrap();
 
+    pub static ref REMOTE_COPR_PROCESS_HISTOGRAM: Histogram = register_histogram!(
+        "tikv_worker_remote_cop_process_duration_seconds",
+        "Bucketed histogram of remote copr process duration",
+        exponential_buckets(0.0005, 2.0, 20).unwrap()
+    ).unwrap();
+
     pub static ref REMOTE_COPR_REQ_HANDLE_HISTOGRAM: Histogram = register_histogram!(
         "tikv_worker_remote_cop_request_duration_seconds",
         "Bucketed histogram of remote copr request duration",

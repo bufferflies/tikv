@@ -83,6 +83,7 @@ pub use write::*;
 pub const NUM_CFS: usize = 3;
 // WRITE_CF, LOCK_CF, EXTRA_CF
 pub const CF_LEVELS: [usize; NUM_CFS] = [3, 2, 1];
+pub const CF_NAMES: [&str; NUM_CFS] = ["write", "lock", "extra"];
 const CF_MANAGED: [bool; NUM_CFS] = [true, false, true];
 
 pub const COLUMNAR_LEVELS: usize = 3;

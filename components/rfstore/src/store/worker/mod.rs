@@ -2,6 +2,7 @@
 
 mod check_leader;
 mod gc;
+mod metrics;
 mod pd;
 mod read;
 pub mod schema;

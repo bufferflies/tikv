@@ -1963,6 +1963,7 @@ impl<'a> PeerMsgHandler<'a> {
             }
         }));
         self.propose_raft_command(req, cb, None);
+        self.ctx.raft_metrics.propose.change_set.inc();
     }
 
     fn new_raft_cmd_request(&self) -> RaftCmdRequest {

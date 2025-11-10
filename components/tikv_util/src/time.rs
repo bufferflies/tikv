@@ -14,19 +14,34 @@ use std::{
 use async_speed_limit::clock::{BlockingClock, Clock, StandardClock};
 use time::{Duration as TimeDuration, Timespec};
 
+/// Returns the monotonic raw time since some unspecified starting point.
+pub use self::inner::monotonic_raw_now;
+pub use self::inner::{monotonic_coarse_now, monotonic_now};
+use crate::sys::thread::StdThreadBuildWrapper;
+
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+const MILLISECONDS_PER_SECOND: u64 = 1_000;
+const MICROSECONDS_PER_SECOND: u64 = 1_000_000;
+const NANOSECONDS_PER_MILLISECOND: u64 = 1_000_000;
+const NANOSECONDS_PER_MICROSECOND: u64 = 1_000;
+
 /// Converts Duration to milliseconds.
 #[inline]
 pub fn duration_to_ms(d: Duration) -> u64 {
     let nanos = u64::from(d.subsec_nanos());
     // If Duration is too large, the result may be overflow.
-    d.as_secs() * 1_000 + (nanos / 1_000_000)
+    d.as_secs() * MILLISECONDS_PER_SECOND + (nanos / NANOSECONDS_PER_MILLISECOND)
 }
 
 /// Converts Duration to seconds.
 #[inline]
 pub fn duration_to_sec(d: Duration) -> f64 {
     let nanos = f64::from(d.subsec_nanos());
-    d.as_secs() as f64 + (nanos / 1_000_000_000.0)
+    d.as_secs() as f64 + (nanos / NANOSECONDS_PER_SECOND as f64)
+}
+
+pub fn nanos_to_secs(nanos: u64) -> f64 {
+    nanos as f64 / NANOSECONDS_PER_SECOND as f64
 }
 
 /// Converts Duration to microseconds.
@@ -34,7 +49,7 @@ pub fn duration_to_sec(d: Duration) -> f64 {
 pub fn duration_to_us(d: Duration) -> u64 {
     let nanos = u64::from(d.subsec_nanos());
     // If Duration is too large, the result may be overflow.
-    d.as_secs() * 1_000_000 + (nanos / 1_000)
+    d.as_secs() * MICROSECONDS_PER_SECOND + (nanos / NANOSECONDS_PER_MICROSECOND)
 }
 
 /// Converts TimeSpec to nanoseconds
@@ -48,7 +63,7 @@ pub fn timespec_to_ns(t: Timespec) -> u64 {
 pub fn duration_to_ns(d: Duration) -> u64 {
     let nanos = u64::from(d.subsec_nanos());
     // If Duration is too large, the result may be overflow.
-    d.as_secs() * 1_000_000_000 + nanos
+    d.as_secs() * NANOSECONDS_PER_SECOND + nanos
 }
 
 pub trait InstantExt {
@@ -204,16 +219,6 @@ impl Drop for Monitor {
         }
     }
 }
-
-use self::inner::monotonic_coarse_now;
-pub use self::inner::monotonic_now;
-/// Returns the monotonic raw time since some unspecified starting point.
-pub use self::inner::monotonic_raw_now;
-use crate::sys::thread::StdThreadBuildWrapper;
-
-const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
-const MILLISECOND_PER_SECOND: i64 = 1_000;
-const NANOSECONDS_PER_MILLISECOND: i64 = 1_000_000;
 
 #[cfg(not(target_os = "linux"))]
 mod inner {
@@ -405,10 +410,10 @@ impl Instant {
         later: Timespec,
         earlier: Timespec,
     ) -> Duration {
-        let later_ms = later.sec * MILLISECOND_PER_SECOND
-            + i64::from(later.nsec) / NANOSECONDS_PER_MILLISECOND;
-        let earlier_ms = earlier.sec * MILLISECOND_PER_SECOND
-            + i64::from(earlier.nsec) / NANOSECONDS_PER_MILLISECOND;
+        let later_ms = later.sec * MILLISECONDS_PER_SECOND as i64
+            + i64::from(later.nsec) / NANOSECONDS_PER_MILLISECOND as i64;
+        let earlier_ms = earlier.sec * MILLISECONDS_PER_SECOND as i64
+            + i64::from(earlier.nsec) / NANOSECONDS_PER_MILLISECOND as i64;
         let dur = later_ms - earlier_ms;
         if dur >= 0 {
             Duration::from_millis(dur as u64)
@@ -600,6 +605,16 @@ mod tests {
             assert_eq!(ms * 1_000, duration_to_us(d));
             assert_eq!(ms * 1_000_000, duration_to_ns(d));
         }
+    }
+
+    #[test]
+    fn test_nanos_to_secs() {
+        assert_eq!(nanos_to_secs(0), 0.0);
+        assert_eq!(nanos_to_secs(1), 1e-9);
+        assert_eq!(nanos_to_secs(NANOSECONDS_PER_SECOND), 1.0);
+        assert_eq!(nanos_to_secs(1_500_000_000), 1.5);
+        // Test with a large number of nanoseconds (e.g., 10 billion ns = 10 seconds)
+        assert_eq!(nanos_to_secs(10 * NANOSECONDS_PER_SECOND), 10.0);
     }
 
     #[test]

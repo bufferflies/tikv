@@ -22,6 +22,8 @@ use kvproto::import_sstpb::SwitchMode;
 use sst_importer::SstImporter;
 use tikv_util::{error, info, warn, worker::Runnable};
 
+use crate::store::worker::metrics::*;
+
 const COLUMNAR_FILE_SUFFIX: &str = ".col";
 const SCHEMA_FILE_SUFFIX: &str = ".schema";
 const VECTOR_INDEX_FILE_SUFFIX: &str = ".vec";
@@ -31,6 +33,30 @@ pub struct GcTask {}
 impl Display for GcTask {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "GcTask")
+    }
+}
+
+enum LocalFileType {
+    Sst,
+    AsyncSst,
+    Txn,
+    Col,
+    Schema,
+    VecIdx,
+    Temp,
+}
+
+impl LocalFileType {
+    fn label(&self) -> &str {
+        match self {
+            LocalFileType::Sst => "sst",
+            LocalFileType::AsyncSst => "async_sst",
+            LocalFileType::Txn => "txn",
+            LocalFileType::Col => "col",
+            LocalFileType::Schema => "schema",
+            LocalFileType::VecIdx => "vec",
+            LocalFileType::Temp => "tmp",
+        }
     }
 }
 
@@ -78,6 +104,7 @@ impl Runnable for GcRunner {
 
     fn run(&mut self, _: GcTask) {
         if let Err(err) = self.gc_kv_files() {
+            LOCAL_FILE_GC_ERRORS.inc();
             error!("local file gc kv files failed {:?}", err);
         }
         if let Err(err) = self.gc_importer_files() {
@@ -119,10 +146,34 @@ impl GcRunner {
     fn gc_kv_files(&mut self) -> kvengine::Result<()> {
         // Take a snapshot of the filesystem at the beginning of GC process.
         let collect_fs_files = self.collect_files_from_dir()?;
+        LOCAL_FILES
+            .set((collect_fs_files.normal_files.len() + collect_fs_files.txn_files.len()) as i64);
+
         let collect_file_ids = self.collect_file_ids();
+        LOCAL_ALIVE_FILES
+            .with_label_values(&[LocalFileType::Sst.label()])
+            .set(collect_file_ids.sst_file_ids.len() as i64);
+        LOCAL_ALIVE_FILES
+            .with_label_values(&[LocalFileType::AsyncSst.label()])
+            .set(collect_file_ids.async_sst_file_ids.len() as i64);
+        LOCAL_ALIVE_FILES
+            .with_label_values(&[LocalFileType::Txn.label()])
+            .set(collect_file_ids.txn_chunk_ids.len() as i64);
+        LOCAL_ALIVE_FILES
+            .with_label_values(&[LocalFileType::Col.label()])
+            .set(collect_file_ids.col_file_ids.len() as i64);
+        LOCAL_ALIVE_FILES
+            .with_label_values(&[LocalFileType::Schema.label()])
+            .set(collect_file_ids.schema_file_ids.len() as i64);
+        LOCAL_ALIVE_FILES
+            .with_label_values(&[LocalFileType::VecIdx.label()])
+            .set(collect_file_ids.vec_idx_file_ids.len() as i64);
+        LOCAL_SKIP_GC_FILES.set(collect_file_ids.skip_gc_file_ids.len() as i64);
+
         fail_point!("after_gc_collect_kvengine_files");
-        self.remove_garbage_files_normal(&collect_fs_files.normal_files, &collect_file_ids)?;
-        self.remove_kv_garbage_txn_files(
+        let mut pending_gc_count =
+            self.remove_garbage_files_normal(&collect_fs_files.normal_files, &collect_file_ids)?;
+        pending_gc_count += self.remove_kv_garbage_txn_files(
             &collect_fs_files.txn_files,
             &collect_file_ids.txn_chunk_ids,
             &collect_file_ids.skip_gc_file_ids,
@@ -132,6 +183,7 @@ impl GcRunner {
             &collect_file_ids.async_sst_file_ids,
             &collect_file_ids.skip_gc_file_ids,
         )?;
+        LOCAL_PENDING_GC_FILES.set(pending_gc_count);
         Ok(())
     }
 
@@ -222,7 +274,7 @@ impl GcRunner {
         &mut self,
         collect_normal_files: &Vec<PathBuf>,
         collect_file_ids: &CollectFileIds,
-    ) -> kvengine::Result<()> {
+    ) -> kvengine::Result<i64> {
         let CollectFileIds {
             sst_file_ids,
             async_sst_file_ids: _,
@@ -232,17 +284,19 @@ impl GcRunner {
             schema_file_ids,
             vec_idx_file_ids,
         } = collect_file_ids;
+        let mut pending_gc_file_count = 0;
         let store_id = self.kv.get_engine_id();
         for path in collect_normal_files {
             let path_str = path.to_str().unwrap();
             if path_str.ends_with(".tmp") {
                 let meta =
                     fs::metadata(path).with_ctx(|| format!("gc.tmp.metadata: {path_str}"))?;
-                if !self.is_old_file(meta) {
-                    continue;
+                if self.is_old_file(meta) {
+                    Self::remove_file(store_id, path, LocalFileType::Temp)
+                        .with_ctx(|| format!("gc.tmp.remove_file: {path_str}"))?;
+                } else {
+                    pending_gc_file_count += 1;
                 }
-                Self::remove_file(store_id, path)
-                    .with_ctx(|| format!("gc.tmp.remove_file: {path_str}"))?;
             } else if path_str.ends_with(".sst") {
                 let id = sstable::parse_file_id(path)?;
                 if !sst_file_ids.contains(&id) {
@@ -252,7 +306,10 @@ impl GcRunner {
                     }
                     let meta = fs::metadata(path).table_ctx(id, "gc.sst.metadata")?;
                     if self.is_old_file(meta) {
-                        Self::remove_file(store_id, path).table_ctx(id, "gc.sst.remove_file")?;
+                        Self::remove_file(store_id, path, LocalFileType::Sst)
+                            .table_ctx(id, "gc.sst.remove_file")?;
+                    } else {
+                        pending_gc_file_count += 1;
                     }
                 }
             } else if path_str.ends_with(COLUMNAR_FILE_SUFFIX) {
@@ -265,7 +322,10 @@ impl GcRunner {
 
                     let meta = fs::metadata(path).table_ctx(id, "gc.col.metadata")?;
                     if self.is_old_file(meta) {
-                        Self::remove_file(store_id, path).table_ctx(id, "gc.col.remove_file")?;
+                        Self::remove_file(store_id, path, LocalFileType::Col)
+                            .table_ctx(id, "gc.col.remove_file")?;
+                    } else {
+                        pending_gc_file_count += 1;
                     }
                 }
             } else if path_str.ends_with(SCHEMA_FILE_SUFFIX) {
@@ -277,7 +337,10 @@ impl GcRunner {
                     }
                     let meta = fs::metadata(path).table_ctx(id, "gc.schema.metadata")?;
                     if self.is_old_file(meta) {
-                        Self::remove_file(store_id, path).table_ctx(id, "gc.schema.remove_file")?;
+                        Self::remove_file(store_id, path, LocalFileType::Schema)
+                            .table_ctx(id, "gc.schema.remove_file")?;
+                    } else {
+                        pending_gc_file_count += 1;
                     }
                 }
             } else if path_str.ends_with(VECTOR_INDEX_FILE_SUFFIX) {
@@ -289,18 +352,22 @@ impl GcRunner {
                     }
                     let meta = fs::metadata(path).table_ctx(id, "gc.vec.metadata")?;
                     if self.is_old_file(meta) {
-                        Self::remove_file(store_id, path).table_ctx(id, "gc.vec.remove_file")?;
+                        Self::remove_file(store_id, path, LocalFileType::VecIdx)
+                            .table_ctx(id, "gc.vec.remove_file")?;
+                    } else {
+                        pending_gc_file_count += 1;
                     }
                 }
             } else if !path_str.ends_with("LOCK") {
                 warn!("unexpected file {:?}", path);
             }
         }
-        Ok(())
+        Ok(pending_gc_file_count)
     }
 
-    fn remove_file(store_id: u64, file: &Path) -> std::io::Result<()> {
+    fn remove_file(store_id: u64, file: &Path, file_type: LocalFileType) -> std::io::Result<()> {
         info!("{} local file GC remove file {:?}", store_id, file);
+        LOCAL_FILE_GC.with_label_values(&[file_type.label()]).inc();
         fs::remove_file(file)
     }
 
@@ -333,8 +400,9 @@ impl GcRunner {
         txn_files: &[PathBuf],
         kv_txn_chunk_ids: &HashSet<u64>,
         blacklist_file_ids: &HashSet<u64>,
-    ) -> kvengine::Result<()> {
+    ) -> kvengine::Result<i64> {
         let store_id = self.kv.get_engine_id();
+        let mut pending_gc_file_count = 0;
         let txn_chunk_manager = self.kv.get_txn_chunk_manager();
         for path in txn_files {
             let meta = fs::metadata(path).with_ctx(|| format!("gc.txn.metadata: {path:?}"))?;
@@ -344,11 +412,12 @@ impl GcRunner {
                 .to_str()
                 .unwrap_or_default();
             if filename.ends_with(".tmp") {
-                if !self.is_old_file(meta) {
-                    continue;
+                if self.is_old_file(meta) {
+                    Self::remove_file(store_id, path, LocalFileType::Temp)
+                        .with_ctx(|| format!("gc.txn.tmp.remove_file: {path:?}"))?;
+                } else {
+                    pending_gc_file_count += 1;
                 }
-                Self::remove_file(store_id, path)
-                    .with_ctx(|| format!("gc.txn.tmp.remove_file: {path:?}"))?;
             } else if filename.ends_with(".txn") {
                 if let Some(id) = kvengine::txn_chunk_manager::parse_txn_chunk_id(filename) {
                     if !kv_txn_chunk_ids.contains(&id)
@@ -364,7 +433,7 @@ impl GcRunner {
                 warn!("unexpected file {:?}", path);
             }
         }
-        Ok(())
+        Ok(pending_gc_file_count)
     }
 
     fn remove_kv_garbage_ia_files(

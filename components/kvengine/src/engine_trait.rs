@@ -18,7 +18,7 @@ type TraitsResult<T> = std::result::Result<T, engine_traits::Error>;
 
 impl CfNamesExt for Engine {
     fn cf_names(&self) -> Vec<&str> {
-        vec!["write", "lock", "extra"]
+        CF_NAMES.to_vec()
     }
 }
 

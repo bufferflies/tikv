@@ -48,7 +48,7 @@ use raft_proto::eraftpb;
 use raftstore::{
     coprocessor::{Cmd, CmdBatch, CmdObserveInfo, CoprocessorHost, ObserveHandle},
     store::{
-        fsm::{metrics::*, ChangeObserver, ObserverType},
+        fsm::{apply::confchange_cmd_metric, metrics::*, ChangeObserver, ObserverType},
         metrics::*,
         util,
         util::{ChangePeerI, ConfChangeKind},
@@ -770,6 +770,7 @@ impl Applier {
             wb.set_property(TERM_KEY, &ctx.exec_log_term.to_le_bytes());
             self.last_property_term = ctx.exec_log_term;
         }
+        inc_apply_custom_log_metric(cl.get_type());
         let timer = Instant::now();
         match cl.get_type() {
             CustomRaftLogType::Prewrite => cl.iterate_lock(|k, v| {
@@ -1204,6 +1205,7 @@ impl Applier {
             |_| { unreachable!() }
         );
         let star_time = Instant::now();
+        PEER_ADMIN_CMD_COUNTER.batch_split.all.inc();
         // Write the engine before run finish split, or we will get shard not match
         // error.
         let cs = self.pending_split.remove(&ctx.exec_log_index);
@@ -1253,6 +1255,7 @@ impl Applier {
         RF_PEER_ADMIN_CMD_HISTOGRAM
             .batch_split
             .observe(duration_to_sec(star_time.saturating_elapsed()));
+        PEER_ADMIN_CMD_COUNTER.batch_split.success.inc();
         Ok((resp, result))
     }
 
@@ -1261,6 +1264,7 @@ impl Applier {
         ctx: &mut ApplyContext,
     ) -> Result<(AdminResponse, ApplyResult)> {
         let star_time = Instant::now();
+        PEER_ADMIN_CMD_COUNTER.prepare_merge.all.inc();
         ctx.engine.prepare_merge(
             self.region_id(),
             self.region.get_region_epoch().get_version(),
@@ -1273,6 +1277,7 @@ impl Applier {
         RF_PEER_ADMIN_CMD_HISTOGRAM
             .prepare_merge
             .observe(duration_to_sec(star_time.saturating_elapsed()));
+        PEER_ADMIN_CMD_COUNTER.prepare_merge.success.inc();
         Ok((
             AdminResponse::default(),
             ApplyResult::Res(ExecResult::PrepareMerge { region }),
@@ -1288,6 +1293,7 @@ impl Applier {
             unimplemented!()
         });
         let star_time = Instant::now();
+        PEER_ADMIN_CMD_COUNTER.rollback_merge.all.inc();
         ctx.engine.rollback_merge(
             self.region_id(),
             self.region.get_region_epoch().version,
@@ -1300,6 +1306,7 @@ impl Applier {
         RF_PEER_ADMIN_CMD_HISTOGRAM
             .rollback_merge
             .observe(duration_to_sec(star_time.saturating_elapsed()));
+        PEER_ADMIN_CMD_COUNTER.rollback_merge.success.inc();
         Ok((
             AdminResponse::default(),
             ApplyResult::Res(ExecResult::RollbackMerge { region, commit }),
@@ -1312,6 +1319,7 @@ impl Applier {
         request: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult)> {
         let star_time = Instant::now();
+        PEER_ADMIN_CMD_COUNTER.commit_merge.all.inc();
         let source_id = request.get_commit_merge().get_source().get_id();
         let source_tables = self
             .commit_merge_source_tables
@@ -1329,6 +1337,7 @@ impl Applier {
         RF_PEER_ADMIN_CMD_HISTOGRAM
             .commit_merge
             .observe(duration_to_sec(star_time.saturating_elapsed()));
+        PEER_ADMIN_CMD_COUNTER.commit_merge.success.inc();
         Ok((
             AdminResponse::default(),
             ApplyResult::Res(ExecResult::CommitMerge {
@@ -1521,9 +1530,11 @@ impl Applier {
             let label = change_set_label(&cs.change_set);
             let cs_pb = cs.change_set.clone();
             let result = if cs.has_snapshot() {
+                PEER_WRITE_CMD_COUNTER.ingest_shard.inc();
                 self.apply_state = RaftApplyState::from_snapshot(cs.get_snapshot());
                 ctx.engine.ingest(cs, false)
             } else {
+                PEER_WRITE_CMD_COUNTER.change_set.inc();
                 ctx.engine.apply_change_set(&cs)
             };
 
@@ -2485,6 +2496,8 @@ pub(crate) fn region_apply_conf_change(
         let (change_type, peer) = (cp.get_change_type(), cp.get_peer());
         let store_id = peer.get_store_id();
 
+        confchange_cmd_metric::inc_all(change_type);
+
         if let Some(exist_peer) = find_peer(&region, store_id) {
             let r = exist_peer.get_role();
             if r == PeerRole::IncomingVoter || r == PeerRole::DemotingVoter {
@@ -2601,7 +2614,7 @@ pub(crate) fn region_apply_conf_change(
                 }
             }
         }
-        // confchange_cmd_metric::inc_success(change_type);
+        confchange_cmd_metric::inc_success(change_type);
     }
     let conf_ver = region.get_region_epoch().get_conf_ver() + changes.len() as u64;
     region.mut_region_epoch().set_conf_ver(conf_ver);
@@ -3019,6 +3032,44 @@ pub(crate) fn is_index_key(key: &[u8]) -> bool {
     }
     let trimmed_key = &key[..PREFIX_LEN];
     trimmed_key.starts_with(TABLE_PREFIX) && trimmed_key.ends_with(INDEX_PREFIX_SEP)
+}
+
+fn inc_apply_custom_log_metric(tp: CustomRaftLogType) {
+    match tp {
+        CustomRaftLogType::Prewrite => {
+            PEER_WRITE_CMD_COUNTER.prewrite.inc();
+        }
+        CustomRaftLogType::Commit => {
+            PEER_WRITE_CMD_COUNTER.commit.inc();
+        }
+        CustomRaftLogType::Rollback => {
+            PEER_WRITE_CMD_COUNTER.rollback.inc();
+        }
+        CustomRaftLogType::PessimisticLock => {
+            PEER_WRITE_CMD_COUNTER.pessimistic_lock.inc();
+        }
+        CustomRaftLogType::PessimisticRollback => {
+            PEER_WRITE_CMD_COUNTER.pessimistic_rollback.inc();
+        }
+        CustomRaftLogType::OnePc => {
+            PEER_WRITE_CMD_COUNTER.one_pc.inc();
+        }
+        CustomRaftLogType::EngineMeta => {
+            PEER_WRITE_CMD_COUNTER.engine_meta.inc();
+        }
+        CustomRaftLogType::ResolveLock => {
+            PEER_WRITE_CMD_COUNTER.resolve_lock.inc();
+        }
+        CustomRaftLogType::SwitchMemTable => {
+            PEER_WRITE_CMD_COUNTER.switch_mem_table.inc();
+        }
+        CustomRaftLogType::TriggerTrimOverBound => {
+            PEER_WRITE_CMD_COUNTER.trigger_trim_over_bound.inc();
+        }
+        CustomRaftLogType::TxnFileRef => {
+            PEER_WRITE_CMD_COUNTER.txn_file_ref.inc();
+        }
+    }
 }
 
 #[cfg(test)]

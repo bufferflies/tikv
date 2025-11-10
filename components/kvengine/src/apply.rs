@@ -18,7 +18,7 @@ use crate::{
     context::PrepareType,
     dfs::FileType,
     meta::is_move_down,
-    metrics::ENGINE_INGEST_LEVEL_HISTOGRAM,
+    metrics::*,
     table::{
         blobtable::blobtable::BlobTable,
         columnar::{ColumnarFile, ColumnarLevels, SchemaFile},
@@ -335,34 +335,47 @@ impl EngineCore {
             || cs.has_update_vector_index()
         {
             if cs.has_compaction() {
+                ENGINE_APPLY_CHANGE_SET_COUNTER.compaction.inc();
                 self.apply_compaction(&shard, cs);
             } else if cs.has_destroy_range() {
+                ENGINE_APPLY_CHANGE_SET_COUNTER.destroy_range.inc();
                 self.apply_destroy_range(&shard, cs);
             } else if cs.has_truncate_ts() {
+                ENGINE_APPLY_CHANGE_SET_COUNTER.truncate_ts.inc();
                 self.apply_truncate_ts(&shard, cs);
             } else if cs.has_trim_over_bound() {
+                ENGINE_APPLY_CHANGE_SET_COUNTER.trim_over_bound.inc();
                 self.apply_trim_over_bound(&shard, cs);
             } else if cs.has_major_compaction() {
+                ENGINE_APPLY_CHANGE_SET_COUNTER.major_compaction.inc();
                 self.apply_major_compaction(&shard, cs);
             } else if cs.has_columnar_compaction() {
+                ENGINE_APPLY_CHANGE_SET_COUNTER.columnar_compaction.inc();
                 self.apply_columnar_compaction(&shard, cs);
             } else if cs.has_update_vector_index() {
+                ENGINE_APPLY_CHANGE_SET_COUNTER.update_vector_index.inc();
                 self.apply_update_vector_index(&shard, cs);
             }
             store_bool(&shard.compacting, false);
             self.send_compact_msg(CompactMsg::Applied(IdVer::new(shard.id, shard.ver)));
         } else if cs.has_initial_flush() {
+            ENGINE_APPLY_CHANGE_SET_COUNTER.initial_flush.inc();
             self.apply_initial_flush(&shard, cs);
         } else if cs.has_ingest_files() {
+            ENGINE_APPLY_CHANGE_SET_COUNTER.ingest_files.inc();
             self.apply_ingest_files(&shard, cs)?;
         } else if cs.has_restore_shard() {
+            ENGINE_APPLY_CHANGE_SET_COUNTER.restore_shard.inc();
             self.apply_restore_shard(&shard, cs)?;
         } else if cs.has_update_schema_meta() {
+            ENGINE_APPLY_CHANGE_SET_COUNTER.update_schema_meta.inc();
             self.apply_update_schema_meta(&shard, cs);
         } else if cs.get_clear_columnar() {
+            ENGINE_APPLY_CHANGE_SET_COUNTER.update_vector_index.inc();
             self.apply_clear_columnar(&shard);
         }
         if !cs.get_property_key().is_empty() && cs.get_property_key() == STORAGE_CLASS_KEY {
+            ENGINE_APPLY_CHANGE_SET_COUNTER.update_storage_class.inc();
             self.apply_update_storage_class(&shard, cs)
         }
         debug!("{} finished applying change set: {:?}", shard.tag(), cs);

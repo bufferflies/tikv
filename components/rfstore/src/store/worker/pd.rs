@@ -16,11 +16,11 @@ use std::{
 use api_version::{api_v2::is_whole_keyspace_range, ApiV2};
 use cloud_encryption::{KeyspaceEncryptionConfig, MasterKeyConfig};
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::{CfNamesExt, MiscExt};
+use engine_traits::MiscExt;
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
 use futures::{compat::Future01CompatExt, FutureExt};
-use kvengine::{context::IaCtx, Shard, GLOBAL_SHARD_END_KEY};
+use kvengine::{context::IaCtx, Shard, CF_NAMES, GLOBAL_SHARD_END_KEY};
 use kvproto::{
     metapb,
     metapb::Region,
@@ -934,10 +934,10 @@ impl PdRunner {
             }
         }
 
-        for cf in 0..kv_engine_stats.cf_total_sizes.len() {
+        for (cf, level_size) in kv_engine_stats.cf_level_sizes.iter().enumerate() {
             STORE_ENGINE_SIZE_GAUGE_VEC
-                .with_label_values(&["kv", store_info.kv_engine.cf_names()[cf]])
-                .set(kv_engine_stats.cf_total_sizes[cf] as i64);
+                .with_label_values(&["kv", CF_NAMES[cf]])
+                .set(level_size.iter().sum::<u64>() as i64);
         }
         STORE_ENGINE_MEM_SIZE_GAUGE_VEC
             .with_label_values(&["kv", "memtable"])

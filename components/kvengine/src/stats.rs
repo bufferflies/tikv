@@ -14,7 +14,7 @@ use crate::{
     },
     shard::ShardData,
     table::{BoundedDataSet, DataBound, InnerKey},
-    IdVer, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
+    IdVer, CF_LEVELS, COLUMNAR_LEVELS, EXTRA_CF, NUM_CFS, WRITE_CF,
 };
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -39,10 +39,8 @@ pub struct EngineStats {
     pub partial_l0_count: usize,
     pub partial_blob_count: usize,
     pub partial_ln_count: usize,
-    pub cfs_num_files: Vec<usize>,
-    pub cf_total_sizes: Vec<u64>,
-    pub level_num_files: Vec<usize>,
-    pub level_total_sizes: Vec<u64>,
+    pub cf_level_files: Vec<Vec<usize>>, // [cf][level] = num_files
+    pub cf_level_sizes: Vec<Vec<u64>>,   // [cf][level] = total_size
     pub index_size: u64,
     pub in_mem_index_size: u64,
     pub filter_size: u64,
@@ -63,10 +61,12 @@ pub struct EngineStats {
 impl EngineStats {
     pub fn new() -> Self {
         let mut stats = EngineStats::default();
-        stats.cfs_num_files = vec![0; 3];
-        stats.cf_total_sizes = vec![0; 3];
-        stats.level_num_files = vec![0; 3];
-        stats.level_total_sizes = vec![0; 3];
+        stats.cf_level_files = Vec::with_capacity(NUM_CFS);
+        stats.cf_level_sizes = Vec::with_capacity(NUM_CFS);
+        for cf in 0..NUM_CFS {
+            stats.cf_level_files.push(vec![0; CF_LEVELS[cf]]);
+            stats.cf_level_sizes.push(vec![0; CF_LEVELS[cf]]);
+        }
         stats
     }
 }
@@ -172,11 +172,9 @@ impl super::Engine {
             engine_stats.open_files += shard.open_files;
             for cf in 0..NUM_CFS {
                 let shard_cf_stat = &shard.cfs[cf];
-                for (i, level_stat) in shard_cf_stat.levels.iter().enumerate() {
-                    engine_stats.level_num_files[i] += level_stat.num_tables;
-                    engine_stats.cfs_num_files[cf] += level_stat.num_tables;
-                    engine_stats.level_total_sizes[i] += level_stat.data_size;
-                    engine_stats.cf_total_sizes[cf] += level_stat.data_size;
+                for (level, level_stat) in shard_cf_stat.levels.iter().enumerate() {
+                    engine_stats.cf_level_files[cf][level] += level_stat.num_tables;
+                    engine_stats.cf_level_sizes[cf][level] += level_stat.data_size;
                 }
             }
             engine_stats.txn_file_locks += shard.txn_file_locks;

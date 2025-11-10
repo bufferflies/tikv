@@ -1927,7 +1927,7 @@ where
     }
 }
 
-mod confchange_cmd_metric {
+pub mod confchange_cmd_metric {
     use super::*;
 
     pub fn inc_all(cct: ConfChangeType) {

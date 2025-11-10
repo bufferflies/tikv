@@ -521,6 +521,7 @@ async fn handle_remote_coprocessor_internal(
     let handle_duration = finish_time.saturating_duration_since(start_ts);
     REMOTE_COPR_SNAPSHOT_HISTOGRAM.observe(snap_duration.as_secs_f64());
     REMOTE_COPR_PREFETCH_HISTOGRAM.observe(prefetch_duration.as_secs_f64());
+    REMOTE_COPR_PROCESS_HISTOGRAM.observe(process_duration.as_secs_f64());
     REMOTE_COPR_REQ_HANDLE_HISTOGRAM.observe(handle_duration.as_secs_f64());
     let response = result.unwrap();
     info!(

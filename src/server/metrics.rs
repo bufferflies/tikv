@@ -98,6 +98,17 @@ make_auto_flush_static_metric! {
         fail,
     }
 
+    pub label_enum RaftMessageDurationKind {
+        // This duration **begins** when the RaftStore thread sends the RaftMessage to
+        // the RaftClient and **ends** when the RaftMessage leaves the
+        // BatchRaftMessage buffer, just before being flushed to the gRPC client.
+        send_wait,
+        // This duration **begins** after the send_wait finishes and continues as the
+        // message is sent over the network, **ends** when the target peer receives it.
+        // This metric is reported by the receiver, so it is named receive delay.
+        receive_delay,
+    }
+
     pub struct GcCommandCounterVec: LocalIntCounter {
         "type" => GcCommandKind,
     }
@@ -137,6 +148,10 @@ make_auto_flush_static_metric! {
 
     pub struct ReplicaReadLockCheckHistogramVec: LocalHistogram {
         "result" => ReplicaReadLockCheckResult,
+    }
+
+    pub struct RaftMessageDurationVec: LocalHistogram {
+        "type" => RaftMessageDurationKind,
     }
 }
 
@@ -389,6 +404,13 @@ lazy_static! {
         &["type", "store_id"]
     )
     .unwrap();
+    pub static ref RAFT_MESSAGE_DURATION_VEC: HistogramVec = register_histogram_vec!(
+        "tikv_server_raft_message_duration_seconds",
+        "Duration of raft messages.",
+        &["type"],
+        exponential_buckets(0.00001, 2.0, 26).unwrap()
+    )
+    .unwrap();
     pub static ref RAFT_MESSAGE_FLUSH_COUNTER: RaftMessageFlushCounterVec =
         register_static_int_counter_vec!(
             RaftMessageFlushCounterVec,
@@ -436,6 +458,11 @@ lazy_static! {
         &["type"],
     )
     .unwrap();
+}
+
+lazy_static! {
+    pub static ref RAFT_MESSAGE_DURATION: RaftMessageDurationVec =
+        auto_flush_from!(RAFT_MESSAGE_DURATION_VEC, RaftMessageDurationVec);
 }
 
 make_auto_flush_static_metric! {

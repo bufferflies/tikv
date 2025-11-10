@@ -21,6 +21,19 @@ make_auto_flush_static_metric! {
         delete,
         delete_range,
         ingest_sst,
+        ingest_shard,
+        change_set,
+        prewrite,
+        commit,
+        rollback,
+        pessimistic_lock,
+        pessimistic_rollback,
+        one_pc,
+        resolve_lock,
+        engine_meta,
+        switch_mem_table,
+        trigger_trim_over_bound,
+        txn_file_ref,
     }
 
     pub label_enum AdminCmdType {
@@ -203,6 +216,7 @@ make_static_metric! {
         conf_change,
         batch,
         dropped_read_index,
+        change_set,
     }
 
     pub label_enum RaftInvalidProposal {

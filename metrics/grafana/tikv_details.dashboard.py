@@ -2183,6 +2183,66 @@ def RaftPropose() -> RowPanel:
         ]
     )
     layout.row(
+        [
+            graph_panel(
+                title="Raft write apply",
+                description="The number of write apply",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_write_cmd_total",
+                            by_labels=["type"],
+                        ),
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Raft change_set apply",
+                description="The number of change_set apply",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kvengine_apply_change_set_total",
+                            by_labels=["type"],
+                        ),
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Raft change set proposals per server",
+                description="The number of change set proposals which are made by each TiKV instance",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_proposal_total",
+                            label_selectors=['type=~"change_set"'],
+                        ),
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Raft change set apply per server",
+                description="The number of change set apply which are made by each TiKV instance",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_raftstore_write_cmd_total",
+                            label_selectors=['type=~"change_set|shard_ingest"'],
+                        ),
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
         heatmap_panel_graph_panel_histogram_quantile_pairs(
             heatmap_title="Propose wait duration",
             heatmap_description="The wait time of each proposal",
@@ -2335,91 +2395,82 @@ def RaftProcess() -> RowPanel:
     layout.row(
         [
             heatmap_panel(
+                title="rfstore batch message count",
+                description="Number of messages polled in one batch by the main peer worker",
+                metric="rfstore_receive_msgs_count_bucket",
+            ),
+            heatmap_panel(
+                title="rfstore batch message size",
+                description="Size of messages polled in one batch by the main peer worker",
+                metric="rfstore_receive_msgs_size_bytes_bucket",
+                yaxis=yaxis(format=UNITS.SHORT),
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="rfstore main worker time breakdown",
+                description="Time spent in different steps of the rfstore main worker loop",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "rfstore_store_msg_duration_seconds",
+                            by_labels=["instance"],
+                            is_optional_quantile=True,
+                        ),
+                        legend_format="{{instance}}-handle-store-msg-"
+                        + OPTIONAL_QUANTILE_INPUT,
+                    ),
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "rfstore_receive_msgs_duration_seconds",
+                            by_labels=["instance"],
+                            is_optional_quantile=True,
+                        ),
+                        legend_format="{{instance}}-receive-msgs-"
+                        + OPTIONAL_QUANTILE_INPUT,
+                    ),
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "rfstore_sync_aux_worker_duration_seconds",
+                            by_labels=["instance"],
+                            is_optional_quantile=True,
+                        ),
+                        legend_format="{{instance}}-sync-aux-workers-"
+                        + OPTIONAL_QUANTILE_INPUT,
+                    ),
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "rfstore_send_aux_task_duration_seconds",
+                            by_labels=["instance"],
+                            is_optional_quantile=True,
+                        ),
+                        legend_format="{{instance}}-send-aux-tasks-"
+                        + OPTIONAL_QUANTILE_INPUT,
+                    ),
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "rfstore_process_msgs_duration_seconds",
+                            by_labels=["instance"],
+                            is_optional_quantile=True,
+                        ),
+                        legend_format="{{instance}}-process-msgs-"
+                        + OPTIONAL_QUANTILE_INPUT,
+                    ),
+                ],
+            ),
+            heatmap_panel(
                 title="Replica read lock checking duration",
                 description="Replica read lock checking duration",
                 yaxis=yaxis(format=UNITS.SECONDS),
                 metric="tikv_replica_read_lock_check_duration_seconds_bucket",
-            ),
-            graph_panel(
-                title="Fsm reschedule ops",
-                description="The number of fsm reschedule ops",
-                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
-                targets=[
-                    target(
-                        expr=expr_sum_rate(
-                            "tikv_batch_system_fsm_reschedule_total",
-                            by_labels=["type"],
-                        ),
-                    ),
-                ],
-            ),
-        ]
-    )
-    layout.row(
-        [
-            heatmap_panel(
-                title="Store fsm schedule wait duration",
-                description="Duration of store fsm waiting to be polled",
-                yaxis=yaxis(format=UNITS.SECONDS),
-                metric="tikv_batch_system_fsm_schedule_wait_seconds_bucket",
-                label_selectors=['type="store"'],
-            ),
-            heatmap_panel(
-                title="Apply fsm schedule wait duration",
-                description="Duration of apply fsm waiting to be polled.e",
-                yaxis=yaxis(format=UNITS.SECONDS),
-                metric="tikv_batch_system_fsm_schedule_wait_seconds_bucket",
-                label_selectors=['type="apply"'],
-            ),
-        ]
-    )
-    layout.row(
-        [
-            heatmap_panel(
-                title="Store fsm poll duration",
-                description="Total time for an store FSM to finish processing all messages, potentially over multiple polling rounds.",
-                yaxis=yaxis(format=UNITS.SECONDS),
-                metric="tikv_batch_system_fsm_poll_seconds_bucket",
-                label_selectors=['type="store"'],
-            ),
-            heatmap_panel(
-                title="Apply fsm poll duration",
-                description="Total time for an apply FSM to finish processing all messages, potentially over multiple polling rounds",
-                yaxis=yaxis(format=UNITS.SECONDS),
-                metric="tikv_batch_system_fsm_poll_seconds_bucket",
-                label_selectors=['type="apply"'],
-            ),
-        ]
-    )
-    layout.row(
-        [
-            heatmap_panel(
-                title="Store fsm poll round",
-                description="Number of polling rounds for an store FSM to finish processing all messages",
-                metric="tikv_batch_system_fsm_poll_rounds_bucket",
-                label_selectors=['type="store"'],
-            ),
-            heatmap_panel(
-                title="Apply fsm poll round",
-                description="Number of polling rounds for an apply FSM to finish processing all messages",
-                metric="tikv_batch_system_fsm_poll_rounds_bucket",
-                label_selectors=['type="apply"'],
-            ),
-        ]
-    )
-    layout.row(
-        [
-            heatmap_panel(
-                title="Store fsm count per poll",
-                description="Number of store fsm polled in one poll",
-                metric="tikv_batch_system_fsm_count_per_poll_bucket",
-                label_selectors=['type="store"'],
-            ),
-            heatmap_panel(
-                title="Apply fsm count per poll",
-                description="Number of apply fsm polled in one poll",
-                metric="tikv_batch_system_fsm_count_per_poll_bucket",
-                label_selectors=['type="apply"'],
             ),
         ]
     )
@@ -5289,14 +5340,104 @@ def KvEngine() -> RowPanel:
                 ],
             ),
             graph_panel(
-                title="Files Count",
-                description="The number of files in KV Engine",
-                yaxes=yaxes(left_format=UNITS.SHORT),
+                title="Shards",
+                description="The number of shards in KV Engine",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
                 targets=[
                     target(
-                        expr=expr_avg(
-                            "kv_engine_open_files",
-                            by_labels=[],
+                        expr=expr_sum(
+                            "kv_engine_shards_total",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="total",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_initial_flushed_shards",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="initial_flushed",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_active_shards",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="active",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_compacting_shards",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="compacting",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_pending_compaction_shards",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="pending_compaction",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_has_del_prefixes_shards",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="has_del_prefixes",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_inner_key_shards",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        hide=True,
+                        legend_format="inner_key",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_ready_destroy_range_shards",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="ready_destroy_range",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Files Count",
+                description="The number of files in KV Engine",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_cf_level_num_files",
+                            by_labels=["cf", "level"],
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Files Size",
+                description="The size of files in KV Engine",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_cf_level_total_sizes_bytes",
+                            by_labels=["cf", "level"],
                         ),
                         additional_groupby=True,
                     ),
@@ -5304,6 +5445,229 @@ def KvEngine() -> RowPanel:
             ),
         ]
     )
+    layout.row(
+        [
+            graph_panel(
+                title="Memtable Count",
+                description="The count of memtables",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_mem_tables_count",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Memtable Size",
+                description="The size of memtables",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_mem_size_bytes",
+                            label_selectors=[
+                                'db="kv"',
+                                'type="memtable"',
+                            ],  # only select `kv` db
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="L0 Table Count",
+                description="The count of L0 tables",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_l0_tables_count",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="L0 Table Size",
+                description="The size of L0 tables",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_l0_tables_size_bytes",
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Blob Table Count",
+                description="The count of blob tables",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_blob_tables_count",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Blob Table Size",
+                description="The size of blob tables",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_in_use_blob_size_bytes",
+                        ),
+                        legend_format="in_use",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_total_blob_size_bytes",
+                        ),
+                        legend_format="total",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Partial File Count",
+                description="The count of partial files",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_partial_l0_count",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="partial_l0",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_partial_blob_count",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="partial_blob",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_partial_ln_count",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="partial_ln",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Index & Filter Size",
+                description="The size of index and filter files",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_index_size_bytes",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="index",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_filter_size_bytes",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="filter",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Entries Count",
+                description="The count of entries",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_entries",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="entries",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_old_entries",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="old_entries",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_tombstones",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="tombstones",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Top Write Shards ID",
+                description="The shard id of the top write shards",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_top_10_write_shards",
+                            label_selectors=['rank="1"'],
+                        ),
+                        legend_format="top1-{{instance}}",
+                        additional_groupby=False,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "kv_engine_top_10_write_shards",
+                            by_labels=["rank", "instance"],
+                        ),
+                        hide=True,
+                        legend_format="{{rank}}-{{instance}}",
+                        additional_groupby=False,
+                    ),
+                ],
+            ),
+        ]
+    )
+
     layout.row(
         [
             graph_panel(
@@ -5321,6 +5685,21 @@ def KvEngine() -> RowPanel:
                             label_selectors=['dfs_type="s3"'],
                         ),
                         legend_format="{{type}}",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Level Write Throughput",
+                description="The throughput of load file at each level",
+                yaxes=yaxes(left_format=UNITS.BYTES_SEC_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_level_write_bytes",
+                            by_labels=["level"],
+                        ),
+                        legend_format="{{level}}",
                         additional_groupby=True,
                     ),
                 ],
@@ -5388,6 +5767,29 @@ def KvEngine() -> RowPanel:
                 metric="kv_engine_dfs_load_memory_wait_duration_seconds",
                 hide_count=True,
             ),
+            graph_panel(
+                title="Prepare ChangeSet File Load Source",
+                description="The file load statistic when preparing changeset",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_prepare_load_remote_file",
+                            by_labels=[],
+                        ),
+                        legend_format="s3",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "kv_engine_prepare_use_local_file",
+                            by_labels=[],
+                        ),
+                        legend_format="local",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
         ]
     )
     layout.row(
@@ -5425,29 +5827,6 @@ def KvEngine() -> RowPanel:
                             ),
                         ),
                         legend_format="rate-{{instance}}",
-                        additional_groupby=True,
-                    ),
-                ],
-            ),
-            graph_panel(
-                title="Prepare ChangeSet File Load Source",
-                description="The file load statistic when preparing changeset",
-                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
-                targets=[
-                    target(
-                        expr=expr_sum_rate(
-                            "kv_engine_prepare_load_remote_file",
-                            by_labels=[],
-                        ),
-                        legend_format="s3",
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_sum_rate(
-                            "kv_engine_prepare_use_local_file",
-                            by_labels=[],
-                        ),
-                        legend_format="local",
                         additional_groupby=True,
                     ),
                 ],
@@ -5953,12 +6332,70 @@ def CloudWorkerService() -> RowPanel:
     layout.row(
         [
             graph_panel(
+                title="Remote Processing Requests",
+                description="Number of remote compaction or coprocessor requests are under processing",
+                yaxes=yaxes(left_format=UNITS.SHORT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "tikv_worker_remote_compact_processing_requests_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
+                            by_labels=[],
+                            skip_default_instance=True,
+                        ),
+                        additional_groupby=True,
+                        legend_format="compact-processing",
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "tikv_worker_remote_cop_processing_requests_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
+                            by_labels=[],
+                            skip_default_instance=True,
+                        ),
+                        additional_groupby=True,
+                        legend_format="copr-processing",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Remote Requests Failures",
+                description="The number of remote requests that failed to acquire permit, by failure reason",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_remote_compact_failed_requests_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
+                            by_labels=["type"],
+                            skip_default_instance=True,
+                        ),
+                        additional_groupby=True,
+                        legend_format="compact-{{type}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_worker_remote_cop_failed_requests_counter",
+                            label_selectors=['instance=~"$worker_instance"'],
+                            by_labels=["type"],
+                            skip_default_instance=True,
+                        ),
+                        additional_groupby=True,
+                        legend_format="copr-{{type}}",
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
                 title="Concurrency Limiter Waiting Length",
                 description="Number of remote requests being waiting, limited by concurrency limiter",
                 yaxes=yaxes(left_format=UNITS.SHORT),
                 targets=[
                     target(
-                        expr=expr_sum_rate(
+                        expr=expr_sum(
                             "tikv_worker_limiter_waiting_requests_counter",
                             label_selectors=['instance=~"$worker_instance"'],
                             by_labels=["type"],
@@ -5989,64 +6426,6 @@ def CloudWorkerService() -> RowPanel:
         ]
     )
     layout.row(
-        [
-            graph_panel(
-                title="Remote Processing Requests",
-                description="Number of remote compaction or coprocessor requests are under processing",
-                yaxes=yaxes(left_format=UNITS.SHORT),
-                targets=[
-                    target(
-                        expr=expr_sum_rate(
-                            "tikv_worker_remote_compact_processing_requests_counter",
-                            label_selectors=['instance=~"$worker_instance"'],
-                            by_labels=[],
-                            skip_default_instance=True,
-                        ),
-                        additional_groupby=True,
-                        legend_format="compact-processing",
-                    ),
-                    target(
-                        expr=expr_sum_rate(
-                            "tikv_worker_remote_cop_processing_requests_counter",
-                            label_selectors=['instance=~"$worker_instance"'],
-                            by_labels=[],
-                            skip_default_instance=True,
-                        ),
-                        additional_groupby=True,
-                        legend_format="copr-processing",
-                    ),
-                ],
-            ),
-            graph_panel(
-                title="Remote Requests Failures",
-                description="The number of remote requests that failed to acquire permit, by failure reason",
-                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
-                targets=[
-                    target(
-                        expr=expr_sum_rate(
-                            "tikv_worker_remote_compact_failed_requests_counter",
-                            label_selectors=['instance=~"$worker_instance"'],
-                            by_labels=["type"],
-                            skip_default_instance=True,
-                        ),
-                        additional_groupby=True,
-                        legend_format="compact-failure",
-                    ),
-                    target(
-                        expr=expr_sum_rate(
-                            "tikv_worker_remote_cop_failed_requests_counter",
-                            label_selectors=['instance=~"$worker_instance"'],
-                            by_labels=["type"],
-                            skip_default_instance=True,
-                        ),
-                        additional_groupby=True,
-                        legend_format="copr-failure",
-                    ),
-                ],
-            ),
-        ]
-    )
-    layout.row(
         heatmap_panel_graph_panel_histogram_quantile_pairs(
             heatmap_title="Snapshot Request duration",
             heatmap_description="The time consumed to handle remote copr snapshot duration",
@@ -6054,6 +6433,18 @@ def CloudWorkerService() -> RowPanel:
             graph_description="The time consumed to handle remote copr snapshot duration",
             yaxis_format=UNITS.SECONDS,
             metric="tikv_worker_remote_cop_snapshot_duration_seconds",
+            label_selectors=['instance=~"$worker_instance"'],
+            skip_default_instance=True,
+        ),
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Copr Request Process duration",
+            heatmap_description="The time consumed to handle remote copr process duration",
+            graph_title="Copr Request Process duration",
+            graph_description="The time consumed to handle remote copr process duration",
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_worker_remote_cop_process_duration_seconds",
             label_selectors=['instance=~"$worker_instance"'],
             skip_default_instance=True,
         ),
@@ -6142,6 +6533,24 @@ def CloudWorkerService() -> RowPanel:
                             skip_default_instance=True,
                         ),
                         legend_format="checksum",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Memory Limiter Usage",
+                description="Number of bytes are currently being used by requests limited by memory limiter",
+                yaxes=yaxes(left_format=UNITS.SHORT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "tikv_worker_memory_limiter_current_used",
+                            label_selectors=['instance=~"$worker_instance"'],
+                        ),
                         additional_groupby=True,
                     ),
                 ],
@@ -6265,6 +6674,95 @@ def CloudWorkerService() -> RowPanel:
                 description="Duration of restore snapshot of a shard",
                 metric="native_br_restore_snapshot_request_secs_bucket",
                 yaxis=yaxis(format=UNITS.SECONDS),
+            ),
+        ]
+    )
+    return layout.row_panel
+
+
+def LocalFileGC() -> RowPanel:
+    layout = Layout(title="Local File GC")
+    layout.row(
+        [
+            graph_panel(
+                title="On Disk Files",
+                description="The number of files on disk",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "rfstore_local_file_on_disk",
+                        ),
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Alive Files",
+                description="The number of alive files used by kvengine",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "rfstore_local_file_alive",
+                        ),
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="GC Files",
+                description="The number of files garbage collected",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "rfstore_local_file_gc_total",
+                        ),
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Skip GC Files",
+                description="The number of files skipped by GC",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "rfstore_local_file_skip_gc",
+                        ),
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Pending GC Files",
+                description="The number of files pending for garbage collection",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "rfstore_local_file_pending_gc",
+                        ),
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="GC Errors",
+                description="The number of local file GC errors",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "rfstore_local_file_error_total",
+                        ),
+                    ),
+                ],
             ),
         ]
     )
@@ -8381,6 +8879,7 @@ dashboard = Dashboard(
         KvEngine(),
         InMemoryEngine(),
         CloudWorkerService(),
+        LocalFileGC(),
         # Scheduler and Read Pools
         FlowControl(),
         Scheduler(),

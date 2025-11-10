@@ -46,9 +46,52 @@ lazy_static! {
         &["status"]
     )
     .unwrap();
+
+    pub static ref STORE_RECV_MSGS_COUNT_HISTOGRAM: Histogram = register_histogram!(
+        "rfstore_receive_msgs_count",
+        "Bucketed histogram of receive messages count",
+        exponential_buckets(1.0, 2.0, 20).unwrap()
+    )
+    .unwrap();
+
+    pub static ref STORE_RECV_MSGS_SIZE_HISTOGRAM: Histogram = register_histogram!(
+        "rfstore_receive_msgs_size_bytes",
+        "Bucketed histogram of receive messages size",
+        exponential_buckets(512.0, 2.0, 20).unwrap()
+    )
+    .unwrap();
+
+    pub static ref STORE_STORE_MSG_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "rfstore_store_msg_duration_seconds",
+        "Bucketed histogram of store message handling duration",
+        exponential_buckets(0.00001, 2.0, 26).unwrap()
+    )
+    .unwrap();
+
+    pub static ref STORE_RECV_MSGS_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "rfstore_receive_msgs_duration_seconds",
+        "Bucketed histogram of receive messages duration",
+        exponential_buckets(0.00001, 2.0, 26).unwrap()
+    )
+    .unwrap();
+
     pub static ref STORE_SYNC_AUX_WORKER_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "rfstore_sync_aux_worker_duration_seconds",
         "Bucketed histogram of syncing aux workers",
+        exponential_buckets(0.00001, 2.0, 26).unwrap()
+    )
+    .unwrap();
+
+    pub static ref STORE_SEND_AUX_TASK_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "rfstore_send_aux_task_duration_seconds",
+        "Bucketed histogram of send aux task duration",
+        exponential_buckets(0.00001, 2.0, 26).unwrap()
+    )
+    .unwrap();
+
+    pub static ref STORE_PROC_MSGS_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "rfstore_process_msgs_duration_seconds",
+        "Bucketed histogram of process messages duration",
         exponential_buckets(0.00001, 2.0, 26).unwrap()
     )
     .unwrap();

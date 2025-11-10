@@ -1,6 +1,9 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use api_version::KvFormat;
 use futures::{
@@ -48,7 +51,7 @@ use tikv_kv::StageLatencyStats;
 use tikv_util::{
     future::{paired_future_callback, poll_future_notify},
     mpsc::future::{unbounded, BatchReceiver, Sender, WakePolicy},
-    time::Instant,
+    time::{nanos_to_secs, Instant},
     worker::Scheduler,
 };
 use tracker::{set_tls_trace_id, TraceId, TrackedFuture};
@@ -556,22 +559,31 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         let store_id = self.store_id;
         let ch = self.ch.clone();
         ctx.spawn(async move {
-            let res = stream.map_err(Error::from).try_for_each(move |mut msgs| {
-                let len = msgs.get_msgs().len();
-                RAFT_MESSAGE_RECV_COUNTER.inc_by(len as u64);
-                RAFT_MESSAGE_BATCH_SIZE.observe(len as f64);
-                for msg in msgs.take_msgs().into_iter() {
-                    let to_store_id = msg.get_to_peer().get_store_id();
-                    if to_store_id != store_id {
-                        return future::err(Error::from(RaftStoreError::StoreNotMatch {
-                            to_store_id,
-                            my_store_id: store_id,
-                        }));
+            let res = stream
+                .map_err(Error::from)
+                .try_for_each(move |mut batch_msg| {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as u64;
+                    let elapsed = nanos_to_secs(now.saturating_sub(batch_msg.last_observed_time));
+                    RAFT_MESSAGE_DURATION.receive_delay.observe(elapsed);
+
+                    let len = batch_msg.get_msgs().len();
+                    RAFT_MESSAGE_RECV_COUNTER.inc_by(len as u64);
+                    RAFT_MESSAGE_BATCH_SIZE.observe(len as f64);
+                    for msg in batch_msg.take_msgs().into_iter() {
+                        let to_store_id = msg.get_to_peer().get_store_id();
+                        if to_store_id != store_id {
+                            return future::err(Error::from(RaftStoreError::StoreNotMatch {
+                                to_store_id,
+                                my_store_id: store_id,
+                            }));
+                        }
+                        ch.send_raft_msg(msg);
                     }
-                    ch.send_raft_msg(msg);
-                }
-                future::ok(())
-            });
+                    future::ok(())
+                });
             let status = match res.await {
                 Err(e) => {
                     let msg = format!("{:?}", e);
