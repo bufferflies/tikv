@@ -1,6 +1,6 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{cmp, collections::VecDeque, sync::Arc, time::Duration};
 
 use collections::{HashMap, HashMapExt};
 use kvproto::metapb;
@@ -18,6 +18,21 @@ use crate::{util::send_request_to_store, Error, Result};
 
 // None: When the store is not ready.
 pub(crate) type StoreWalProgresses = HashMap<u64 /* store_id */, Option<StoreProgress>>;
+
+#[derive(Debug)]
+pub(crate) struct StoreTargetAndLag {
+    pub(crate) target: Option<StoreProgress>,
+    pub(crate) epoch_lag: u32,
+    pub(crate) offset_lag: i64, // Can be negative.
+}
+
+impl StoreTargetAndLag {
+    pub(crate) fn compare(&self, other: &Self) -> cmp::Ordering {
+        self.epoch_lag
+            .cmp(&other.epoch_lag)
+            .then_with(|| self.offset_lag.cmp(&other.offset_lag))
+    }
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct WalProgressTargets {
@@ -220,5 +235,20 @@ impl WalCache {
 
     pub(crate) fn contains_store(&self, store_id: u64) -> bool {
         self.inner.contains_key(&store_id)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum UpdateWalResult {
+    Finished { wal_size: u64 },
+    NotFinished { wal_size: u64 },
+}
+
+impl UpdateWalResult {
+    pub(crate) fn metric_label(&self) -> &'static str {
+        match self {
+            Self::Finished { .. } => "finished",
+            Self::NotFinished { .. } => "not_finished",
+        }
     }
 }

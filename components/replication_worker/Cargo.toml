@@ -32,6 +32,7 @@ native_br = { workspace = true }
 nix = "0.24"
 parking_lot = "0.12"
 pd_client = { workspace = true }
+prometheus = { version = "0.13", features = ["nightly"] }
 protobuf = "2.8"
 resolved_ts = { workspace = true }
 rfengine = { workspace = true }

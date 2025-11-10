@@ -61,6 +61,7 @@ use crate::{
     apply_observer::{is_index_key, CdcApplyObserver, RegionEvents},
     delegate::{RegionDelegate, RegionResolver, RequestId, RequestKey},
     kube::{KeyspaceKubeService, KubeApi},
+    metrics::*,
     provisioned::KeyspaceProvisionedService,
     scheduler::get_cdc_status,
     ticdc_util::TiCdcError,
@@ -68,7 +69,10 @@ use crate::{
         build_request_range_for_keyspace, keyspace_prefix_len, post_to_ticdc,
         send_request_to_store, DISPATCH_CDC_TIMEOUT,
     },
-    wal::{StoreWalProgresses, WalCache, WalProgressFetcher, WalProgressTargets},
+    wal::{
+        StoreTargetAndLag, StoreWalProgresses, UpdateWalResult, WalCache, WalProgressFetcher,
+        WalProgressTargets,
+    },
     CdcMsg, Deregister, Error, KeyspaceService, KeyspaceStates, ReplicationScheduler,
     ReplicationService, ReplicationWorkerConfig, Result,
 };
@@ -126,6 +130,7 @@ pub struct ReplicationWorker {
     last_update_ts: TimeStamp,
     wal_progress_targets: WalProgressTargets,
     wal_cache: WalCache,
+    update_stores_wal_size_limit: u64,
 
     working_dir: PathBuf,
     stop: bool,
@@ -215,6 +220,7 @@ impl ReplicationWorker {
             .build()
             .unwrap();
         let interval = config.report_region_interval.0;
+        let update_stores_wal_size_limit = config.update_stores_wal_size_limit.as_memory_size();
         for (&keyspace_id, ks_svc) in &keyspace_services {
             let raft = merged_engine.get_raft();
             let kv = merged_engine.get_kv();
@@ -251,6 +257,7 @@ impl ReplicationWorker {
             last_update_ts: TimeStamp::zero(),
             wal_progress_targets: WalProgressTargets::default(),
             wal_cache: WalCache::default(),
+            update_stores_wal_size_limit,
             working_dir: worker_dir,
             stop: false,
             force_stop,
@@ -1069,16 +1076,28 @@ impl ReplicationWorker {
 
     fn maybe_update_merged_engine(&mut self) -> Result<()> {
         let Some((target_ts, target_progresses)) = self.wal_progress_targets.front() else {
-            debug!("maybe_update_merged_engine: no new target");
+            debug!("maybe_update_merged_engine: no new target"; "store" => self.merged_store_id());
             return Ok(());
         };
-        self.update_stores_with_retry(UPDATE_STORES_TIMEOUT, target_progresses)?;
+        let update_stores_res =
+            self.update_stores_with_retry(UPDATE_STORES_TIMEOUT, target_progresses)?;
+        debug!("maybe_update_merged_engine: update_stores: {:?}", update_stores_res; "store" => self.merged_store_id());
         self.merged_engine.sync_merged(&mut self.apply_ctx)?;
         self.apply_ctx.flush_observer();
 
-        let target = self.wal_progress_targets.pop_front();
-        debug_assert!(target.is_some_and(|(ts, _)| ts == target_ts));
-        self.last_update_ts = target_ts;
+        match update_stores_res {
+            UpdateWalResult::Finished { .. } => {
+                let target = self.wal_progress_targets.pop_front();
+                debug_assert!(target.is_some_and(|(ts, _)| ts == target_ts));
+                self.last_update_ts = target_ts;
+            }
+            UpdateWalResult::NotFinished { wal_size } => {
+                // Skip update `self.last_update_ts`.
+                info!("maybe_update_merged_engine: update_stores not finished";
+                    "store" => self.merged_store_id(), "wal_size" => wal_size,
+                    "last_update_ts" => self.last_update_ts, "target_ts" => target_ts);
+            }
+        }
         Ok(())
     }
 
@@ -1147,41 +1166,130 @@ impl ReplicationWorker {
         &mut self,
         timeout: Duration,
         targets: StoreWalProgresses,
-    ) -> Result<()> {
+    ) -> Result<UpdateWalResult> {
         let mut last_err: Option<Error> = None;
         let start_time = Instant::now_coarse();
         while start_time.saturating_elapsed() < timeout {
             try_force_stop_err!(self);
             match self.update_stores(&targets) {
-                Ok(()) => return Ok(()),
+                Ok(x) => {
+                    REP_UPDATE_STORE_COUNTER
+                        .with_label_values(&["all", x.metric_label()])
+                        .inc();
+                    REP_UPDATE_STORE_DURATION
+                        .with_label_values(&["all"])
+                        .observe(start_time.saturating_elapsed().as_secs_f64());
+
+                    return Ok(x);
+                }
                 Err(err) => {
                     last_err = Some(err);
                     std::thread::sleep(Duration::from_secs(1));
                 }
             }
         }
+        REP_UPDATE_STORE_COUNTER
+            .with_label_values(&["all", "error"])
+            .inc();
         Err(last_err.unwrap())
     }
 
-    fn update_stores(&mut self, targets: &StoreWalProgresses) -> Result<()> {
+    fn update_stores(&mut self, targets: &StoreWalProgresses) -> Result<UpdateWalResult> {
         let _enter = self.ctx.fs.get_runtime().enter();
         let stores = get_all_stores_except_tiflash(self.ctx.pd.as_ref())?;
+        let wal_size_limit = self.update_stores_wal_size_limit / targets.len() as u64;
+        let mut total_wal_size = 0;
+        let mut finished = true;
         let mut errors = vec![];
-        for (&store_id, &target) in targets {
+        let targets_and_lags = self.get_decreasing_stores_lag(targets);
+        for (store_id, target_and_lag) in targets_and_lags {
+            debug!("update_store_wal"; "store" => store_id, "lag" => ?target_and_lag);
+            let target = target_and_lag.target;
             let Some(target) = target else {
                 errors.push(box_err!("target store not ready: {}", store_id));
                 continue;
             };
+            let store_id_str = format!("{store_id}");
+            REP_UPDATE_STORE_EPOCH_LAG
+                .with_label_values(&[&store_id_str])
+                .set(target_and_lag.epoch_lag as i64);
+
             let store = stores.iter().find(|s| s.id == store_id);
-            if let Err(err) = self.update_store_wal(store_id, store, target) {
-                warn!("update_store_wal: failed: {:?}", err; "store" => store_id);
-                errors.push(err);
+            let start_time = Instant::now_coarse();
+            match self.update_store_wal(store_id, store, target, wal_size_limit) {
+                Ok(x) => {
+                    REP_UPDATE_STORE_COUNTER
+                        .with_label_values(&[&store_id_str, x.metric_label()])
+                        .inc();
+                    match x {
+                        UpdateWalResult::Finished { wal_size } => total_wal_size += wal_size,
+                        UpdateWalResult::NotFinished { wal_size } => {
+                            total_wal_size += wal_size;
+                            finished = false;
+                        }
+                    }
+                }
+                Err(err) => {
+                    REP_UPDATE_STORE_COUNTER
+                        .with_label_values(&[&store_id_str, "error"])
+                        .inc();
+                    warn!("update_store_wal: failed: {:?}", err; "store" => store_id);
+                    errors.push(err);
+                }
+            }
+            REP_UPDATE_STORE_DURATION
+                .with_label_values(&[&store_id_str])
+                .observe(start_time.saturating_elapsed().as_secs_f64());
+
+            if total_wal_size >= self.update_stores_wal_size_limit {
+                finished = false;
+                break;
             }
         }
         if errors.len() <= self.tolerate_store_err() {
-            return Ok(());
+            let res = if finished {
+                UpdateWalResult::Finished {
+                    wal_size: total_wal_size,
+                }
+            } else {
+                UpdateWalResult::NotFinished {
+                    wal_size: total_wal_size,
+                }
+            };
+            return Ok(res);
         }
         Err(errors.pop().unwrap())
+    }
+
+    fn get_decreasing_stores_lag(
+        &mut self,
+        targets: &StoreWalProgresses,
+    ) -> Vec<(
+        u64, // store_id
+        StoreTargetAndLag,
+    )> {
+        let mut lags = vec![];
+        for (store_id, target) in targets {
+            let target_and_lag = if let Some(target) = target {
+                let current = self.merged_engine.get_or_insert_store_progress(*store_id);
+                let epoch_lag = target.epoch.saturating_sub(current.epoch);
+                let offset_lag = target.offset as i64 - current.offset as i64;
+                StoreTargetAndLag {
+                    target: Some(*target),
+                    epoch_lag,
+                    offset_lag,
+                }
+            } else {
+                StoreTargetAndLag {
+                    target: None,
+                    epoch_lag: 0,
+                    offset_lag: 0,
+                }
+            };
+            lags.push((*store_id, target_and_lag))
+        }
+        lags.sort_by(|m, n| n.1.compare(&m.1)); // Decreasing sort.
+        lags
     }
 
     fn update_store_wal(
@@ -1189,13 +1297,14 @@ impl ReplicationWorker {
         store_id: u64,
         store: Option<&metapb::Store>,
         target: StoreProgress,
-    ) -> Result<()> {
+        wal_size_limit: u64,
+    ) -> Result<UpdateWalResult> {
         let store_progress = self.merged_engine.get_or_insert_store_progress(store_id);
         info!("update_store_wal";
             "store" => store_id, "current" => %store_progress, "target" => %target);
         if store_progress >= target {
             debug!("update_store_wal: store is up-to-date"; "store" => store_id);
-            return Ok(());
+            return Ok(UpdateWalResult::Finished { wal_size: 0 });
         }
 
         let get_end_off = |epoch: u32| {
@@ -1218,10 +1327,17 @@ impl ReplicationWorker {
         };
 
         let security_mgr = self.ctx.pd.get_security_mgr();
+        let mut total_wal_size = 0;
         let mut epoch = store_progress.epoch;
         let mut start_off = store_progress.offset;
         while (epoch, start_off) < (target.epoch, target.offset) {
             try_force_stop_err!(self);
+
+            if total_wal_size >= wal_size_limit {
+                return Ok(UpdateWalResult::NotFinished {
+                    wal_size: total_wal_size,
+                });
+            }
 
             let end_off = get_end_off(epoch);
             debug!("update_store_wal"; "store" => store_id, "epoch" => epoch,
@@ -1230,7 +1346,9 @@ impl ReplicationWorker {
             if store.is_none()
                 || epoch <= near_overwritten_epoch(target.epoch, MIN_EPOCH_ROTATE_LEN)
             {
-                let rotated = self.update_store_wal_from_s3(store_id, epoch, start_off, target)?;
+                let (rotated, wal_size) =
+                    self.update_store_wal_from_s3(store_id, epoch, start_off, target)?;
+                total_wal_size += wal_size;
                 (epoch, start_off) = next_epoch_offset(epoch, end_off, rotated);
                 continue;
             }
@@ -1249,7 +1367,9 @@ impl ReplicationWorker {
             let (status, data) =
                 block_on(send_request_to_store(req, &http_client, FETCH_WAL_TIMEOUT))?;
             if status == StatusCode::GONE {
-                let rotated = self.update_store_wal_from_s3(store_id, epoch, start_off, target)?;
+                let (rotated, wal_size) =
+                    self.update_store_wal_from_s3(store_id, epoch, start_off, target)?;
+                total_wal_size += wal_size;
                 (epoch, start_off) = next_epoch_offset(epoch, end_off, rotated);
                 continue;
             }
@@ -1258,6 +1378,7 @@ impl ReplicationWorker {
                 return Err(box_err!("{}", err_str));
             }
             let end_off = start_off + data.len() as u64;
+            total_wal_size += data.len() as u64;
             self.merged_engine
                 .update_wal(store_id, epoch, start_off, end_off, data.reader())?;
             let rotate = if epoch < target.epoch {
@@ -1272,7 +1393,9 @@ impl ReplicationWorker {
             }
             (epoch, start_off) = next_epoch_offset(epoch, end_off, rotate);
         }
-        Ok(())
+        Ok(UpdateWalResult::Finished {
+            wal_size: total_wal_size,
+        })
     }
 
     fn update_store_wal_from_s3(
@@ -1281,7 +1404,7 @@ impl ReplicationWorker {
         epoch_id: u32,
         start_off: u64,
         target: StoreProgress,
-    ) -> Result<bool /* rotated */> {
+    ) -> Result<(bool /* rotated */, u64 /* wal_size */)> {
         info!("update_store_wal_from_s3"; "store" => store_id,
             "epoch" => epoch_id, "start" => start_off, "target" => %target);
         let wal_data = match self.wal_cache.get_mut(store_id, epoch_id) {
@@ -1298,6 +1421,7 @@ impl ReplicationWorker {
         } else {
             wal_data.len()
         };
+        let wal_size = end_off - start_off;
         let reader = box_try!(wal_data.range_reader(start_off, end_off));
         self.merged_engine
             .update_wal(store_id, epoch_id, start_off, end_off, reader)?;
@@ -1306,7 +1430,7 @@ impl ReplicationWorker {
             self.wal_cache.remove_cache(store_id);
             self.merged_engine.rotate_wal(store_id, epoch_id, end_off)?;
         }
-        Ok(rotate)
+        Ok((rotate, wal_size))
     }
 
     // Fetch the complete WAL of the epoch.

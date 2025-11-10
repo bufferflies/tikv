@@ -6,6 +6,7 @@ mod apply_observer;
 mod delegate;
 mod error;
 mod kube;
+mod metrics;
 mod provisioned;
 mod scheduler;
 mod ticdc_util;
@@ -48,7 +49,10 @@ pub use provisioned::local_provider::LocalProvider;
 pub use scheduler::*;
 use serde_derive::{Deserialize, Serialize};
 use tikv::tikv_build_version;
-use tikv_util::{config::ReadableDuration, error, info, warn};
+use tikv_util::{
+    config::{AbsoluteOrPercentSize, ReadableDuration},
+    error, info, warn,
+};
 use txn_types::TimeStamp;
 pub use worker::ReplicationWorker;
 
@@ -73,6 +77,7 @@ pub struct ReplicationWorkerConfig {
     /// Whether to tolerate store errors (no more than 1 store) during update
     /// WAL.
     pub tolerate_store_err: bool,
+    pub update_stores_wal_size_limit: AbsoluteOrPercentSize,
 
     /// The interval to sync changes from WAL.
     pub sync_interval: ReadableDuration,
@@ -91,6 +96,7 @@ impl Default for ReplicationWorkerConfig {
             cdc_sts_name: "".to_string(),
             namespace: "".to_string(),
             tolerate_store_err: false,
+            update_stores_wal_size_limit: AbsoluteOrPercentSize::Percent(20.0),
             sync_interval: ReadableDuration::secs(3),
             report_region_interval: ReadableDuration::secs(60),
             merged_engine: Default::default(),
