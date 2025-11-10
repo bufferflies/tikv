@@ -1491,8 +1491,11 @@ fn future_get<L: LockManager, F: KvFormat>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
-    let trace_id = req.get_context().get_trace_id();
-    set_tls_trace_id(TraceId::new(trace_id));
+    let ctx = req.get_context();
+    set_tls_trace_id(TraceId::new(
+        ctx.get_trace_id(),
+        ctx.get_trace_control_flags(),
+    ));
     let start = Instant::now();
     let v = storage.get(
         req.take_context(),
@@ -1553,8 +1556,11 @@ fn future_scan<L: LockManager, F: KvFormat>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
-    let trace_id = req.get_context().get_trace_id();
-    set_tls_trace_id(TraceId::new(trace_id));
+    let ctx = req.get_context();
+    set_tls_trace_id(TraceId::new(
+        ctx.get_trace_id(),
+        ctx.get_trace_control_flags(),
+    ));
     let end_key = Key::from_raw_maybe_unbounded(req.get_end_key());
     let rev_range = if req.reverse && req.version == u64::MAX {
         Some((req.start_key.clone(), req.end_key.clone()))
@@ -1618,8 +1624,11 @@ fn future_batch_get<L: LockManager, F: KvFormat>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
-    let trace_id = req.get_context().get_trace_id();
-    set_tls_trace_id(TraceId::new(trace_id));
+    let ctx = req.get_context();
+    set_tls_trace_id(TraceId::new(
+        ctx.get_trace_id(),
+        ctx.get_trace_control_flags(),
+    ));
     let start = Instant::now();
     let keys = req.get_keys().iter().map(|x| Key::from_raw(x)).collect();
     let v = storage.batch_get(req.take_context(), keys, req.get_version().into());
@@ -1662,8 +1671,11 @@ fn future_scan_lock<L: LockManager, F: KvFormat>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
-    let trace_id = req.get_context().get_trace_id();
-    set_tls_trace_id(TraceId::new(trace_id));
+    let ctx = req.get_context();
+    set_tls_trace_id(TraceId::new(
+        ctx.get_trace_id(),
+        ctx.get_trace_control_flags(),
+    ));
     let start_key = Key::from_raw_maybe_unbounded(req.get_start_key());
     let end_key = Key::from_raw_maybe_unbounded(req.get_end_key());
 
@@ -1704,8 +1716,11 @@ fn future_delete_range<L: LockManager, F: KvFormat>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
-    let trace_id = req.get_context().get_trace_id();
-    set_tls_trace_id(TraceId::new(trace_id));
+    let ctx = req.get_context();
+    set_tls_trace_id(TraceId::new(
+        ctx.get_trace_id(),
+        ctx.get_trace_control_flags(),
+    ));
     let (cb, f) = paired_future_callback();
     let res = storage.delete_range(
         req.take_context(),
@@ -1739,8 +1754,11 @@ fn future_copr<E: Engine>(
     if recovery::check_request_rejected(req.get_context().keyspace_id) {
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
-    let trace_id = req.get_context().get_trace_id();
-    set_tls_trace_id(TraceId::new(trace_id));
+    let ctx = req.get_context();
+    set_tls_trace_id(TraceId::new(
+        ctx.get_trace_id(),
+        ctx.get_trace_control_flags(),
+    ));
     let ret = copr.parse_and_handle_unary_request(req, peer);
     async move { Ok(ret.await) }.boxed()
 }
@@ -1752,8 +1770,8 @@ macro_rules! txn_command_future {
             $req: $req_ty,
         ) -> impl Future<Output = ServerResult<$resp_ty>> {
             $prelude
-            let trace_id = $req.get_context().get_trace_id();
-            set_tls_trace_id(TraceId::new(trace_id));
+            let ctx = $req.get_context();
+            set_tls_trace_id(TraceId::new(ctx.get_trace_id(), ctx.get_trace_control_flags()));
             let (cb, f) = paired_future_callback();
             let res = storage.sched_txn_command($req.into(), cb);
 

@@ -98,7 +98,7 @@ impl<S: Store> Storage for TikvStorage<S> {
             let snap_info = self
                 .get_kvengine_snap()
                 .map(|snap| (snap.get_keyspace_id(), snap.get_id()));
-            txn_debug!(
+            txn_debug!(tikv_util::logger::TraceCategory::ReadDetails,
                 "TikvStorage::scan_next";
                 "read_ts" => read_ts,
                 "keyspace_id" => snap_info.map(|(keyspace, _)| keyspace),

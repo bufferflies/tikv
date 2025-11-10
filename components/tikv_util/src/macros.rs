@@ -163,31 +163,53 @@ macro_rules! impl_display_as_debug {
     };
 }
 
-/// Transaction debug logging macro controlled by `log.txn-info-logging`.
-/// When promotion is enabled, logs at info level for visibility; otherwise it
-/// logs at debug level.
+/// Transaction debug logging with category-based control.
+///
+/// This macro logs transaction-related debug information with category
+/// filtering based on trace_control_flags from the request context. Logs are
+/// output to INFO level if:
+/// - The category is enabled via trace_control_flags, AND
+/// - Either immediate_log flag is set OR global txn_info_logging is enabled
+///
+/// Otherwise logs go to DEBUG level and may be filtered out.
 ///
 /// This macro supports both slog-style structured logging and standard format
 /// strings:
 ///
-/// slog style: txn_debug!("message"; "key1" => value1, "key2" => ?value2)
-/// standard style: txn_debug!("message: {}, key2: {:?}", value1, value2)
+/// slog style: txn_debug!(tikv_util::logger::TraceCategory::ReqResp, "message";
+/// "key1" => value1, "key2" => ?value2) standard style:
+/// txn_debug!(tikv_util::logger::TraceCategory::WriteDetails, "message: {},
+/// key2: {:?}", value1, value2)
 #[macro_export]
 macro_rules! txn_debug {
-    // slog-style: message; key-value pairs
-    ($msg:expr; $($args:tt)*) => {
-        if $crate::logger::unlikely($crate::logger::txn_info_logging_enabled()) {
-            info!($msg; "trace_id" => tracker::get_tls_trace_id(), $($args)*);
-        } else {
-            debug!($msg; "trace_id" => tracker::get_tls_trace_id(), $($args)*);
+    // slog-style: category, message; key-value pairs
+    ($category:expr, $msg:expr; $($args:tt)*) => {
+        {
+            let __trace_id = tracker::get_tls_trace_id();
+            let __control_flags = __trace_id.control_flags();
+            let __category_flag = $category.flag_bit();
+            if $crate::logger::is_category_enabled(__control_flags, __category_flag) {
+                if $crate::logger::is_immediate_log_enabled(__control_flags) || $crate::logger::unlikely($crate::logger::txn_info_logging_enabled()) {
+                    info!($msg; "trace_id" => __trace_id, $($args)*);
+                } else {
+                    debug!($msg; "trace_id" => __trace_id, $($args)*);
+                }
+            }
         }
     };
-    // Standard format string style: message with format args
-    ($($arg:tt)+) => {
-        if $crate::logger::unlikely($crate::logger::txn_info_logging_enabled()) {
-            log::info!($($arg)+);
-        } else {
-            log::debug!($($arg)+);
+    // Standard format string style: category, message with format args
+    ($category:expr, $($arg:tt)+) => {
+        {
+            let __trace_id = tracker::get_tls_trace_id();
+            let __control_flags = __trace_id.control_flags();
+            let __category_flag = $category.flag_bit();
+            if $crate::logger::is_category_enabled(__control_flags, __category_flag) {
+                if $crate::logger::is_immediate_log_enabled(__control_flags) || $crate::logger::unlikely($crate::logger::txn_info_logging_enabled()) {
+                    log::info!($($arg)+);
+                } else {
+                    log::debug!($($arg)+);
+                }
+            }
         }
     };
 }

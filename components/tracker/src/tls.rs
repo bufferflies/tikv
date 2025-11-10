@@ -14,15 +14,19 @@ use slog::{Record, Serializer, Value};
 use crate::{slab::TrackerToken, Tracker, GLOBAL_TRACKERS, INVALID_TRACKER_TOKEN};
 
 #[derive(Clone, Default)]
-pub struct TraceId(pub Option<Arc<[u8]>>);
+pub struct TraceId(pub Option<Arc<[u8]>>, pub u64);
 
 impl TraceId {
-    pub fn new(trace_id: &[u8]) -> TraceId {
+    pub fn new(trace_id: &[u8], control_flags: u64) -> TraceId {
         if !trace_id.is_empty() {
-            TraceId(Some(Arc::from(trace_id)))
+            TraceId(Some(Arc::from(trace_id)), control_flags)
         } else {
-            TraceId(None)
+            TraceId(None, control_flags)
         }
+    }
+
+    pub fn control_flags(&self) -> u64 {
+        self.1
     }
 }
 
@@ -42,7 +46,7 @@ impl Value for TraceId {
 
 thread_local! {
     static TLS_TRACKER_TOKEN: Cell<TrackerToken> = Cell::new(INVALID_TRACKER_TOKEN);
-    static TLS_TRACE_ID: Cell<TraceId> = Cell::new(TraceId(None));
+    static TLS_TRACE_ID: Cell<TraceId> = Cell::new(TraceId(None, 0));
 }
 
 pub fn set_tls_tracker_token(token: TrackerToken) {
@@ -114,7 +118,7 @@ impl<F: Future> Future for TrackedFuture<F> {
         let res = this.future.poll(cx);
 
         TLS_TRACKER_TOKEN.with(|c| c.set(INVALID_TRACKER_TOKEN));
-        TLS_TRACE_ID.with(|c| c.set(TraceId(None)));
+        TLS_TRACE_ID.with(|c| c.set(TraceId(None, 0)));
 
         res
     }

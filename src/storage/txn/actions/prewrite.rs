@@ -858,6 +858,7 @@ fn async_commit_timestamps(
         let min_commit_ts = cmp::max(cmp::max(max_ts, start_ts), for_update_ts).next();
         let mut min_commit_ts = cmp::max(lock.min_commit_ts, min_commit_ts);
         tikv_util::txn_debug!(
+            tikv_util::logger::TraceCategory::WriteDetails,
             "async_commit_timestamps: key: {:?}, start_ts: {:?}, for_update_ts: {:?}, max_commit_ts: {:?}, max_ts: {:?}, lock.min_commit_ts: {:?}, calculated min_commit_ts: {:?}",
             key,
             start_ts,

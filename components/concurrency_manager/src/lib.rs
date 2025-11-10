@@ -265,13 +265,7 @@ impl ConcurrencyManager {
             return Ok(());
         }
 
-        txn_debug!(
-            "ConcurrencyManager::update_max_ts entry";
-            "new_ts" => ?new_ts,
-            "old_max_ts" => ?self.max_ts(),
-            "source" => source.clone().into_error_source()
-        );
-
+        let error_source = source.clone().into_error_source();
         let limit = self.max_ts_limit.load();
 
         // check that new_ts is less than or equal to the limit
@@ -303,11 +297,21 @@ impl ConcurrencyManager {
             }
         }
 
-        MAX_TS_GAUGE.set(
-            self.max_ts
-                .fetch_max(new_ts.into_inner(), Ordering::SeqCst)
-                .max(new_ts.into_inner()) as i64,
-        );
+        let old_max_ts =
+            TimeStamp::new(self.max_ts.fetch_max(new_ts.into_inner(), Ordering::SeqCst));
+        MAX_TS_GAUGE.set(old_max_ts.into_inner().max(new_ts.into_inner()) as i64);
+
+        // Only log when max_ts is successfully updated to a larger value
+        if new_ts > old_max_ts {
+            txn_debug!(
+                tikv_util::logger::TraceCategory::ReqResp,
+                "ConcurrencyManager::update_max_ts successful";
+                "new_ts" => ?new_ts,
+                "old_max_ts" => ?old_max_ts,
+                "source" => error_source
+            );
+        }
+
         Ok(())
     }
 

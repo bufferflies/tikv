@@ -60,7 +60,7 @@ use tikv_util::{
 };
 use tracker::{
     get_tls_trace_id, get_tls_tracker_token, set_tls_trace_id, set_tls_tracker_token, TraceId,
-    TrackedFuture, TrackerToken,
+    TrackerToken,
 };
 use txn_types::TimeStamp;
 
@@ -412,6 +412,7 @@ impl<L: LockManager> SchedulerInner<L> {
                     .wakeup_deadline_exceeded
                     .inc();
                 txn_debug!(
+                    tikv_util::logger::TraceCategory::WriteDetails,
                     "acquire_lock_on_wakeup: deadline exceeded";
                     "cid" => cid, "lock" => ?tctx.lock
                 );
@@ -549,16 +550,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     }
 
     pub(in crate::storage) fn run_cmd(&self, cmd: Command, callback: StorageCallback) {
-        txn_debug!(
-            "Scheduler::run_cmd";
-            "cmd" => ?cmd, "region_id" => cmd.ctx().get_region_id(),
-            "request_source" => cmd.ctx().get_request_source()
-        );
-
         // write flow control
         if cmd.need_flow_control() && self.inner.too_busy(cmd.ctx().region_id) {
             SCHED_TOO_BUSY_COUNTER_VEC.get(cmd.tag()).inc();
             txn_debug!(
+                tikv_util::logger::TraceCategory::ReqResp,
                 "Scheduler::run_cmd flow control rejected";
                 "cmd" => ?cmd, "region_id" => cmd.ctx().get_region_id()
             );
@@ -601,8 +597,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let cid = specified_cid.unwrap_or_else(|| self.inner.gen_id());
         let tracker = get_tls_tracker_token();
         txn_debug!(
+            tikv_util::logger::TraceCategory::ReqResp,
             "received new command";
-            "cid" => cid, "cmd" => ?cmd, "tracker" => ?tracker
+            "cid" => cid, "cmd" => ?cmd, "tracker" => ?tracker,
+            "source" => cmd.ctx().get_request_source()
         );
         #[cfg(feature = "debug-trace-txn-tasks")]
         crate::storage::txn::debug::trace_txn_task(cid, &cmd);
@@ -760,7 +758,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         F: Future<Output = ()> + Send + 'static,
     {
         if let Err(err) = self.get_sched_pool().spawn(f, priority, cid) {
-            txn_debug!("try spawn task failed"; "cid" => cid, "err" => ?err);
+            txn_debug!(tikv_util::logger::TraceCategory::WriteDetails, "try spawn task failed"; "cid" => cid, "err" => ?err);
             SCHED_TOO_BUSY_COUNTER_VEC.get(tag).inc();
             self.finish_with_err(cid, StorageError::from(StorageErrorInner::SchedTooBusy));
         }
@@ -781,6 +779,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         set_tls_tracker_token(task.tracker);
         set_tls_trace_id(task.trace_id.clone());
         txn_debug!(
+            tikv_util::logger::TraceCategory::WriteDetails,
             "Scheduler::execute";
             "cid" => task.cid, "cmd" => ?task.cmd, "region_id" => task.cmd.ctx().get_region_id(), "tracker" => ?task.tracker
         );
@@ -789,11 +788,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let cid = task.cid;
         let tag = task.cmd.tag();
         self.try_spawn(
-	    TrackedFuture::new(async move {
-		fail_point!("scheduler_start_execute");
-		if sched.check_task_deadline_exceeded(&task) {
-		    return;
-		}
+    	      async move {
+	              fail_point!("scheduler_start_execute");
+                if sched.check_task_deadline_exceeded(&task) {
+		                return;
+		            }
 
                 SCHED_STAGE_COUNTER_VEC.get(tag).snapshot.inc();
 
@@ -843,6 +842,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                         task.extra_op = extra_op;
 
                         txn_debug!(
+                            tikv_util::logger::TraceCategory::WriteDetails,
                             "process cmd with snapshot";
                             "cid" => task.cid, "term" => ?term, "extra_op" => ?extra_op, "tracker" => ?task.tracker
                         );
@@ -851,11 +851,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                     Err(err) => {
                         SCHED_STAGE_COUNTER_VEC.get(tag).snapshot_err.inc();
 
-                        txn_debug!("get snapshot failed"; "cid" => task.cid, "err" => ?err);
+                        txn_debug!(tikv_util::logger::TraceCategory::WriteDetails, "get snapshot failed"; "cid" => task.cid, "err" => ?err);
                         sched.finish_with_err(task.cid, Error::from(err));
                     }
                 }
-            }),
+            },
             pri,
             cid,
             tag,
@@ -874,6 +874,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let tctx = self.inner.dequeue_task_context(cid);
         let tracker = tctx.task.as_ref().map(|t| t.tracker);
         txn_debug!(
+            tikv_util::logger::TraceCategory::ReqResp,
             "write command finished with error";
             "cid" => cid, "err" => ?err, "tracker" => ?tracker
         );
@@ -898,6 +899,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         SCHED_STAGE_COUNTER_VEC.get(tag).read_finish.inc();
 
         txn_debug!(
+            tikv_util::logger::TraceCategory::ReqResp,
             "Scheduler::on_read_finished";
             "cid" => cid, "tag" => ?tag, "result" => ?pr
         );
@@ -940,6 +942,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         }
 
         txn_debug!(
+            tikv_util::logger::TraceCategory::ReqResp,
             "Scheduler::on_write_finished";
             "cid" => cid, "tag" => ?tag, "pipelined" => pipelined,
             "async_apply_prewrite" => async_apply_prewrite, "result" => ?result, "pr" => ?pr
@@ -1037,7 +1040,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let is_first_lock = lock_info.parameters.is_first_lock;
         let wait_timeout = lock_info.parameters.wait_timeout;
 
-        txn_debug!("wait for lock"; "cid" => cid, "key" => %key, "start_ts" => ?start_ts, "tracker" => ?tracker, "is_first_lock" => is_first_lock, "wait_timeout" => ?wait_timeout);
+        txn_debug!(tikv_util::logger::TraceCategory::WriteDetails, "wait for lock"; "cid" => cid, "key" => %key, "start_ts" => ?start_ts, "tracker" => ?tracker, "is_first_lock" => is_first_lock, "wait_timeout" => ?wait_timeout);
 
         let diag_ctx = DiagnosticContext {
             key: lock_info.key.to_raw().unwrap(),
@@ -1195,7 +1198,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         tag: CommandKind,
         stage: CommandStageKind,
     ) {
-        txn_debug!("early return response"; "cid" => cid, "tag" => ?tag, "stage" => ?stage);
+        txn_debug!(tikv_util::logger::TraceCategory::ReqResp, "early return response"; "cid" => cid, "tag" => ?tag, "stage" => ?stage, "pr" => ?pr);
         SCHED_STAGE_COUNTER_VEC.get(tag).get(stage).inc();
         cb.execute(pr);
         // It won't release locks here until write finished.
@@ -1258,7 +1261,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     /// `ReadFinished` message back to the `Scheduler`.
     async fn process_read(self, snapshot: E::Snap, task: Task, statistics: &mut Statistics) {
         fail_point!("txn_before_process_read");
-        txn_debug!("process read cmd in worker pool"; "cid" => task.cid, "tracker" => ?task.tracker);
+        txn_debug!(tikv_util::logger::TraceCategory::ReadDetails, "process read cmd in worker pool"; "cid" => task.cid, "tracker" => ?task.tracker);
 
         if let Some(snap_access) = snapshot.get_kvengine_snap() {
             tikv_util::set_current_region(snap_access.get_id());
@@ -1368,7 +1371,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             // the error to the callback, and releases the latches.
             Err(err) => {
                 SCHED_STAGE_COUNTER_VEC.get(tag).prepare_write_err.inc();
-                txn_debug!("write command failed"; "cid" => cid, "err" => ?err, "tracker" => ?tracker);
+                txn_debug!(tikv_util::logger::TraceCategory::WriteDetails, "write command failed"; "cid" => cid, "err" => ?err, "tracker" => ?tracker);
                 scheduler.finish_with_err(cid, err);
                 return;
             }
@@ -2003,6 +2006,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                     Err(err) => {
                         SCHED_STAGE_COUNTER_VEC.get(tag).snapshot_err.inc();
                         txn_debug!(
+                            tikv_util::logger::TraceCategory::WriteDetails,
                             "txn file: get snapshot failed";
                             "cid" => cid, "cmd" => ?cmd, "err" => ?err
                         );
