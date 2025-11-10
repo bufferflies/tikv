@@ -122,6 +122,11 @@ lazy_static! {
         exponential_buckets(0.01, 2.0, 15).unwrap() // start from 0.01s
     )
     .unwrap();
+    pub static ref RFENGINE_DFS_RUNNING_UPLOADS: IntGauge = register_int_gauge!(
+        "raft_engine_dfs_running_uploads",
+        "Number of running uploads to DFS",
+    )
+    .unwrap();
 }
 
 #[cfg(feature = "testexport")]

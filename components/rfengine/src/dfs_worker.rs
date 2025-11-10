@@ -20,12 +20,15 @@ use tikv_util::{
     errors::{Context as _, IoError},
     mpsc::{Receiver, Sender},
 };
+use tokio::task::JoinHandle;
 
 use crate::{
-    compact_worker::CompactTask, compress_lz4, decompress_lz4, decompress_lz4_to_buffer,
-    get_integral_wal_chunks, get_lz4_decompressed_size, last_wal_chunk_file_key,
-    manifest::Manifest, metrics::RFENGINE_DFS_WORKER_HEALTHY_GAUGE, wal_chunk_file_key,
-    wal_chunk_file_prefix, wal_file_name, Error, Result, WalChunkMeta,
+    compact_worker::CompactTask,
+    compress_lz4, decompress_lz4, decompress_lz4_to_buffer, get_integral_wal_chunks,
+    get_lz4_decompressed_size, last_wal_chunk_file_key,
+    manifest::Manifest,
+    metrics::{self, RFENGINE_DFS_WORKER_HEALTHY_GAUGE},
+    wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name, Error, Result, WalChunkMeta,
 };
 
 #[derive(Debug)]
@@ -64,6 +67,12 @@ impl LightweightBackupConfig {
     }
 }
 
+struct BackgroundUpload {
+    file_key: String,
+    epoch_id: u32,
+    join_handle: JoinHandle<()>,
+}
+
 pub(crate) struct ObjectStorageWorker {
     config: LightweightBackupConfig,
     engine_id: Arc<AtomicU64>,
@@ -79,6 +88,7 @@ pub(crate) struct ObjectStorageWorker {
     s3fs: Arc<S3Fs>,
     healthy: Healthy,
     memory_limiter: MemoryLimiter,
+    background_uploads: Vec<BackgroundUpload>,
 }
 
 impl ObjectStorageWorker {
@@ -119,6 +129,7 @@ impl ObjectStorageWorker {
             s3fs,
             healthy: dfs_worker_healthy,
             memory_limiter,
+            background_uploads: vec![],
         }
     }
 
@@ -270,6 +281,7 @@ impl ObjectStorageWorker {
                     if !self.buf.is_empty() && self.next_chunk(false).is_err() {
                         self.healthy.set_unhealthy(self.epoch_id, "handle flush");
                     }
+                    self.wait_uploads();
                 }
                 ObjectStorageTask::Close => unreachable!(),
             }
@@ -478,6 +490,38 @@ impl ObjectStorageWorker {
         res
     }
 
+    fn wait_an_upload(&self, upload: BackgroundUpload) {
+        match self.s3fs.get_runtime().block_on(upload.join_handle) {
+            Ok(()) => info!("noticed an upload has finished."; "tag" => upload.file_key),
+            Err(err) => {
+                let msg = format!(
+                    "wait_an_upload: background task exits abnormally: {}",
+                    upload.file_key
+                );
+                error!("wait_an_upload failed"; "err" => ?err, "tag" => upload.file_key);
+                self.healthy.set_unhealthy(upload.epoch_id, &msg);
+            }
+        }
+    }
+
+    /// Remove finished background uploads.
+    /// Won't block on unfinished uploads.
+    fn gc_finished_uploads(&mut self) {
+        let finished = self
+            .background_uploads
+            .extract_if(|upload| upload.join_handle.is_finished())
+            .collect::<Vec<_>>();
+
+        finished.into_iter().for_each(|v| self.wait_an_upload(v));
+    }
+
+    /// Wait all background uploads to finish.
+    fn wait_uploads(&mut self) {
+        std::mem::take(&mut self.background_uploads)
+            .into_iter()
+            .for_each(|upload| self.wait_an_upload(upload));
+    }
+
     fn next_chunk(&mut self, rotate: bool) -> Result<()> {
         let store_id = self.get_engine_id();
         let file_key = if rotate {
@@ -498,14 +542,26 @@ impl ObjectStorageWorker {
         let healthy = self.healthy.clone();
         let acquired = self.memory_limiter.acquire(chunk.len())?;
         let epoch_id = self.epoch_id;
-        self.s3fs.get_runtime().spawn_blocking(move || {
-            if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
-                error!("{} put wal chunk failed", store_id, ; "err" => ?err);
-                healthy.set_unhealthy(epoch_id, "put wal chunk");
-            }
-            drop(acquired);
-        });
+        metrics::RFENGINE_DFS_RUNNING_UPLOADS.inc();
+        let handle = {
+            let file_key = file_key.clone();
+            self.s3fs.get_runtime().spawn_blocking(move || {
+                if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
+                    error!("{} put wal chunk failed", store_id, ; "err" => ?err);
+                    healthy.set_unhealthy(epoch_id, "put wal chunk");
+                }
+                metrics::RFENGINE_DFS_RUNNING_UPLOADS.dec();
+                drop(acquired);
+            })
+        };
 
+        self.gc_finished_uploads();
+        let bg_upload = BackgroundUpload {
+            file_key,
+            epoch_id,
+            join_handle: handle,
+        };
+        self.background_uploads.push(bg_upload);
         Ok(())
     }
 
