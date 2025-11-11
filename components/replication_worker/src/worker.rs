@@ -4,6 +4,7 @@ use std::{
     collections::{hash_map::Entry, HashMap as StdHashMap},
     fs, mem,
     net::SocketAddr,
+    ops,
     ops::Deref,
     path::PathBuf,
     str::FromStr,
@@ -14,7 +15,7 @@ use std::{
 use api_version::ApiV2;
 use bytes::{Buf, Bytes};
 use cdc::{CdcEvent, Conn, ConnId};
-use collections::{HashMap, HashSet};
+use collections::{HashMap, HashMapEntry, HashSet};
 use futures::executor::block_on;
 use grpcio::{ChannelBuilder, EnvBuilder, ServerBuilder};
 use grpcio_health::{create_health, HealthService, ServingStatus};
@@ -111,7 +112,7 @@ pub struct ReplicationWorker {
     kube_api: Option<Arc<KubeApi>>,
     runtime: tokio::runtime::Runtime,
 
-    keyspaces: HashMap<u32, Box<dyn KeyspaceService>>,
+    keyspaces: HashMap<u32, Keyspace>,
     cdc_addrs: Arc<dashmap::DashMap<u32, String>>,
 
     conns: HashMap<ConnId, Conn>,
@@ -176,7 +177,7 @@ impl ReplicationWorker {
         let runtime = ctx.fs.get_runtime();
         let merged_engine = box_try!(MergedEngine::new(ctx.clone(), None));
         let keyspace_ids = merged_engine.get_keyspaces();
-        let mut keyspace_services = HashMap::default();
+        let mut keyspaces = HashMap::default();
         let cdc_addrs = Arc::new(dashmap::DashMap::new());
         let kube_api = if config.is_kube_mode() {
             info!("init k8s api");
@@ -213,7 +214,7 @@ impl ReplicationWorker {
                 continue;
             }
             cdc_addrs.insert(keyspace_id, cdc_addr);
-            keyspace_services.insert(keyspace_id, task_service);
+            keyspaces.insert(keyspace_id, Keyspace::from(task_service));
         }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -221,13 +222,13 @@ impl ReplicationWorker {
             .unwrap();
         let interval = config.report_region_interval.0;
         let update_stores_wal_size_limit = config.update_stores_wal_size_limit.as_memory_size();
-        for (&keyspace_id, ks_svc) in &keyspace_services {
+        for (&keyspace_id, ks) in keyspaces.iter_mut() {
             let raft = merged_engine.get_raft();
             let kv = merged_engine.get_kv();
-            let rep_pd_cli = ks_svc.get_pd_client();
-            runtime.spawn(async move {
+            let rep_pd_cli = ks.get_pd_client();
+            ks.report_loop = Some(runtime.spawn(async move {
                 Self::report_regions_loop(keyspace_id, raft, kv, rep_pd_cli, interval).await;
-            });
+            }));
         }
         let mut apply_ctx =
             ApplyContext::new(merged_engine.get_kv(), Some(merged_engine.get_router()));
@@ -244,7 +245,7 @@ impl ReplicationWorker {
             grpc_server: None,
             health_service: None,
             kube_api,
-            keyspaces: keyspace_services,
+            keyspaces,
             cdc_addrs,
             conns: Default::default(),
             tx: tx.clone(),
@@ -533,15 +534,15 @@ impl ReplicationWorker {
             return;
         }
         let merged_store_id = self.merged_store_id();
-        let task_svc = self.keyspaces.get_mut(&keyspace_id).unwrap();
-        let pd_client = task_svc.get_pd_client();
+        let ks = self.keyspaces.get_mut(&keyspace_id).unwrap();
+        let pd_client = ks.get_pd_client();
         Self::report_store_to_pd(&pd_client, merged_store_id);
         let keyspace_region_ids = self.merged_engine.get_keyspace_regions(keyspace_id);
         let raft = self.merged_engine.get_raft();
         for region_id in keyspace_region_ids {
             Self::report_region_to_rep_pd_by_id(&raft, &pd_client, region_id);
         }
-        let states = task_svc.get_states_mut();
+        let states = ks.get_states_mut();
         let req_body = match states.feeds.entry(changefeed_id) {
             Entry::Vacant(e) => {
                 // Consider as a retry request.
@@ -1697,7 +1698,7 @@ impl ReplicationWorker {
         let raft = self.merged_engine.get_raft();
         let kv = self.merged_engine.get_kv();
         let interval = self.config.report_region_interval.0;
-        self.runtime.spawn(async move {
+        let report_loop = self.runtime.spawn(async move {
             Self::report_regions_loop(
                 keyspace_id,
                 raft.clone(),
@@ -1707,7 +1708,11 @@ impl ReplicationWorker {
             )
             .await
         });
-        self.keyspaces.insert(keyspace_id, task_service);
+        let ks = Keyspace {
+            service: task_service,
+            report_loop: Some(report_loop),
+        };
+        self.keyspaces.insert(keyspace_id, ks);
         self.merged_engine
             .set_keyspace_states(keyspace_id, states)?;
         Ok(())
@@ -1728,11 +1733,21 @@ impl ReplicationWorker {
         cb: Box<dyn FnOnce(Result<()>) + Send>,
     ) {
         info!("remove_keyspace"; "keyspace" => keyspace_id);
-        self.cdc_addrs.remove(&keyspace_id);
-        let Some(mut svc) = self.keyspaces.remove(&keyspace_id) else {
-            cb(Err(Error::OtherError("keyspace not found".into())));
-            return;
+        let ks = match self.keyspaces.entry(keyspace_id) {
+            HashMapEntry::Vacant(_) => {
+                cb(Err(Error::OtherError("keyspace not found".into())));
+                return;
+            }
+            HashMapEntry::Occupied(e) => {
+                let svc = &e.get().service;
+                if !svc.get_states().feeds.is_empty() {
+                    cb(Err(Error::OtherError("changefeeds not empty".into())));
+                    return;
+                }
+                e.remove()
+            }
         };
+        self.cdc_addrs.remove(&keyspace_id);
         let keyspace_regions = self.merged_engine.get_keyspace_regions(keyspace_id);
         let kv = self.merged_engine.get_kv();
         keyspace_regions.iter().for_each(|&region_id| {
@@ -1741,24 +1756,19 @@ impl ReplicationWorker {
         });
         self.merged_engine.remove_keyspace(keyspace_id);
         self.ctx.fs.get_runtime().spawn(async move {
-            let res = svc.destroy().await;
+            let res = ks.destroy().await;
             cb(res);
         });
     }
 
     fn handle_remove_task(&mut self, keyspace_id: u32, changefeed_id: String) -> Result<()> {
         info!("remove_task"; "keyspace" => keyspace_id, "changefeed" => &changefeed_id);
-        let Some(task_ctx) = self.keyspaces.get_mut(&keyspace_id) else {
+        let Some(ks) = self.keyspaces.get_mut(&keyspace_id) else {
             return Err(Error::OtherError("keyspace service not found".into()));
         };
-        if task_ctx
-            .get_states_mut()
-            .feeds
-            .remove(&changefeed_id)
-            .is_some()
-        {
+        if ks.get_states_mut().feeds.remove(&changefeed_id).is_some() {
             self.merged_engine
-                .set_keyspace_states(keyspace_id, task_ctx.get_states().marshal())?
+                .set_keyspace_states(keyspace_id, ks.get_states().marshal())?
         };
         Ok(())
     }
@@ -2133,6 +2143,56 @@ impl ScanLocksHandler {
 // Ref: ObjectStorageWorker::near_overwritten_epoch
 fn near_overwritten_epoch(current_epoch: u32, epoch_rotate_len: usize) -> u32 {
     current_epoch.saturating_sub(epoch_rotate_len as u32 - 2)
+}
+
+struct Keyspace {
+    service: Box<dyn KeyspaceService>,
+    report_loop: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl From<Box<dyn KeyspaceService>> for Keyspace {
+    fn from(service: Box<dyn KeyspaceService>) -> Self {
+        Self {
+            service,
+            report_loop: None,
+        }
+    }
+}
+
+impl ops::Deref for Keyspace {
+    type Target = Box<dyn KeyspaceService>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.service
+    }
+}
+
+impl ops::DerefMut for Keyspace {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.service
+    }
+}
+
+impl Keyspace {
+    async fn destroy(self) -> Result<()> {
+        let Self {
+            mut service,
+            report_loop,
+        } = self;
+        let stop_report_loop = async {
+            if let Some(report_loop) = report_loop {
+                report_loop.abort();
+                if let Err(e) = report_loop.await
+                    && e.is_panic()
+                {
+                    warn!("report loop panic: {:?}", e);
+                    debug_assert!(false);
+                }
+            }
+        };
+        let (res_svc, _) = tokio::join!(service.destroy(), stop_report_loop);
+        res_svc
+    }
 }
 
 #[cfg(test)]
