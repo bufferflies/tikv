@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut, Bytes};
 use chrono::NaiveDate;
 use collections::{HashMap, HashSet};
 use engine_traits::GetObjectOptions;
-use kvengine::dfs::{self, DFSConfig, Dfs, FileType, Options, S3Fs};
+use kvengine::dfs::{self, DFSConfig, Dfs, FileType, Options, S3Fs, StorageClass};
 use pd_client::PdClient;
 use protobuf::Message;
 use rfenginepb::ClusterBackupMeta;
@@ -1388,14 +1388,19 @@ impl ArchiveWriter {
         let key = archive_package_key(self.s3fs.get_prefix(), self.date.clone(), self.package_id);
         let data = Bytes::from(self.buf.to_vec());
         runtime
-            .block_on(self.s3fs.put_object_with_options(
-                key.clone(),
-                data,
-                key.clone(),
-                None,
-                Some(self.s3fs.storage_class_glacier_ir()),
-                None,
-            ))
+            .block_on(
+                self.s3fs.put_object_with_options(
+                    key.clone(),
+                    data,
+                    key.clone(),
+                    None,
+                    Some(
+                        self.s3fs
+                            .storage_class_str(StorageClass::GlacierInstantRetrieval),
+                    ),
+                    None,
+                ),
+            )
             .unwrap();
         info!("cluster archive package {} on {}", key, self.date.clone());
         self.package_id += 1;

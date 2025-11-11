@@ -8,6 +8,7 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     net::SocketAddr,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering},
@@ -300,9 +301,13 @@ impl ObjectStorageService {
             file_path.to_str().unwrap()
         );
         let res = match fs::metadata(file_path.to_str().unwrap()) {
-            Ok(_) => Response::new(Body::empty()),
+            Ok(meta) => {
+                let mut resp = Response::builder();
+                resp = resp.header("Content-Length", format!("{}", meta.size()));
+                resp.status(StatusCode::OK).body(Body::empty()).unwrap()
+            }
             Err(_) => {
-                info!("handle_get_object: path not found: {}", parts.uri.path());
+                info!("handle_head_object: path not found: {}", parts.uri.path());
                 Self::not_found()
             }
         };
@@ -875,6 +880,12 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(write_data.slice(range.0..), read_data);
+
+                let object_size = fs
+                    .object_size(key.clone(), file_id.to_string())
+                    .await
+                    .unwrap();
+                assert_eq!(object_size as usize, TEST_DATA_SIZE);
 
                 if idx % 7 == 0 {
                     fs.remove(file_id, None, options).await;

@@ -4,7 +4,10 @@ use std::{
     convert::TryFrom,
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -59,6 +62,27 @@ const AWS_DOMAIN_STRING: &str = "amazonaws.com";
 
 const SMALL_FILE_THRESHOLD_BYTES: u64 = 1024 * 1024; // 1MB
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageClass {
+    Standard,
+    InfrequentAccess,
+    GlacierInstantRetrieval,
+    IntelligentTiering,
+    Default,
+}
+
+impl StorageClass {
+    fn from_str(s: &str) -> Self {
+        match s.to_ascii_uppercase().as_str() {
+            "STANDARD" => Self::Standard,
+            "STANDARD_IA" | "IA" => Self::InfrequentAccess,
+            "GLACIER_IR" | "ARCHIVE" => Self::GlacierInstantRetrieval,
+            "INTELLIGENT_TIERING" => Self::IntelligentTiering,
+            _ => Self::Default,
+        }
+    }
+}
+
 /// Supported S3-compatible or cloud object storage providers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloudProvider {
@@ -92,6 +116,53 @@ impl CloudProvider {
     /// Builds a full header key name given a suffix.
     pub fn build_header_key(&self, key: &str) -> String {
         format!("{}{}", self.header_prefix(), key)
+    }
+
+    /// Always set AWS headers, and for non-AWS providers, additionally set the
+    /// corresponding cloud-specific headers.
+    pub fn add_provider_header(&self, req: &mut SignedRequest, key: &str, value: &str) {
+        assert!(key.starts_with(CloudProvider::Aws.header_prefix()));
+        let value = if key.ends_with("storage-class") {
+            CloudProvider::Aws.storage_class_str(StorageClass::from_str(value))
+        } else {
+            value
+        };
+        req.add_header(key, value);
+        if *self != CloudProvider::Aws {
+            let value = if key.ends_with("storage-class") {
+                self.storage_class_str(StorageClass::from_str(value))
+            } else {
+                value
+            };
+            let key_suffix = key
+                .strip_prefix(CloudProvider::Aws.header_prefix())
+                .unwrap_or(key);
+            req.add_header(self.build_header_key(key_suffix), value);
+        }
+    }
+
+    /// Convert to the provider-specific storage class string.
+    /// Alibaba cloud only support "Standard", "IA" and "Archive",
+    /// Unknown storage class will be treated as "Standard".
+    /// ref: https://www.alibabacloud.com/help/en/oss/developer-reference/compatibility-with-amazon-s3
+    pub fn storage_class_str(&self, storage_class: StorageClass) -> &'static str {
+        match self {
+            CloudProvider::Aliyun => match storage_class {
+                StorageClass::Standard | StorageClass::IntelligentTiering => {
+                    OSS_STORAGE_CLASS_STANDARD
+                }
+                StorageClass::InfrequentAccess => OSS_STORAGE_CLASS_IA,
+                StorageClass::GlacierInstantRetrieval => OSS_STORAGE_CLASS_ARCHIVE,
+                StorageClass::Default => OSS_STORAGE_CLASS_DEFAULT,
+            },
+            _ => match storage_class {
+                StorageClass::Standard => STORAGE_CLASS_STANDARD,
+                StorageClass::InfrequentAccess => STORAGE_CLASS_STANDARD_IA,
+                StorageClass::GlacierInstantRetrieval => STORAGE_CLASS_GLACIER_IR,
+                StorageClass::IntelligentTiering => STORAGE_CLASS_INTELLIGENT_TIERING,
+                StorageClass::Default => STORAGE_CLASS_DEFAULT,
+            },
+        }
     }
 }
 
@@ -165,6 +236,7 @@ pub struct S3FsCore {
     virtual_host: bool,
     opts: ConnOptions,
     read_only: bool, // For safety when used for recovery.
+    verifier: OperationVerifier,
 }
 
 impl S3FsCore {
@@ -268,6 +340,7 @@ impl S3FsCore {
             virtual_host,
             opts: options,
             read_only,
+            verifier: OperationVerifier::new(1000),
         }
     }
 
@@ -307,47 +380,8 @@ impl S3FsCore {
         self.provider == CloudProvider::Aliyun
     }
 
-    // alibaba cloud only support "Standard", "IA" and "Archive"
-    // unknown storage class will be treated as "Standard"
-    // ref: https://www.alibabacloud.com/help/en/oss/developer-reference/compatibility-with-amazon-s3
-    pub fn storage_class_default(&self) -> &'static str {
-        if self.is_on_aliyun() {
-            OSS_STORAGE_CLASS_DEFAULT
-        } else {
-            STORAGE_CLASS_DEFAULT
-        }
-    }
-
-    pub fn storage_class_intelligent_tiering(&self) -> &'static str {
-        if self.is_on_aliyun() {
-            OSS_STORAGE_CLASS_DEFAULT
-        } else {
-            STORAGE_CLASS_INTELLIGENT_TIERING
-        }
-    }
-
-    pub fn storage_class_standard(&self) -> &'static str {
-        if self.is_on_aliyun() {
-            OSS_STORAGE_CLASS_STANDARD
-        } else {
-            STORAGE_CLASS_STANDARD
-        }
-    }
-
-    pub fn storage_class_standard_ia(&self) -> &'static str {
-        if self.is_on_aliyun() {
-            OSS_STORAGE_CLASS_IA
-        } else {
-            STORAGE_CLASS_STANDARD_IA
-        }
-    }
-
-    pub fn storage_class_glacier_ir(&self) -> &'static str {
-        if self.is_on_aliyun() {
-            OSS_STORAGE_CLASS_ARCHIVE
-        } else {
-            STORAGE_CLASS_GLACIER_IR
-        }
+    pub fn storage_class_str(&self, storage_class: StorageClass) -> &'static str {
+        self.provider.storage_class_str(storage_class)
     }
 
     // parse the sst file's suffix with format {idx}/{file_id}.sst
@@ -594,21 +628,63 @@ impl S3FsCore {
     }
 
     pub async fn exist(&self, key: String, file_name: String) -> Result<bool, dfs::Error> {
+        match self.head_object(key, file_name).await {
+            Ok(_) => Ok(true),
+            Err(dfs::Error::NoSuchKey(_)) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn object_size(&self, key: String, file_name: String) -> Result<u64, dfs::Error> {
+        match self.head_object(key.clone(), file_name).await {
+            Ok(headers) => {
+                if let Some(content_length) = headers.get("Content-Length") {
+                    if let Ok(length) = content_length.parse::<u64>() {
+                        return Ok(length);
+                    }
+                    Err(dfs::Error::Other(format!(
+                        "failed to parse {} Content-Length {}",
+                        key, content_length
+                    )))
+                } else {
+                    Err(dfs::Error::Other(format!(
+                        "failed to get Content-Length from {}",
+                        key
+                    )))
+                }
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn head_object(
+        &self,
+        key: String,
+        file_name: String,
+    ) -> Result<http::HeaderMap<String>, dfs::Error> {
         let mut retry_cnt = 0;
+        let start_time = Instant::now_coarse();
         loop {
             let req = self.new_request("HEAD", &key);
             let result = self.dispatch(req, HeadObjectError::from_response).await;
             if result.is_ok() {
-                return Ok(true);
+                let resp = result.unwrap();
+                info!(
+                    "head object {}, takes {:?}, retry {}",
+                    &file_name,
+                    start_time.saturating_elapsed(),
+                    retry_cnt
+                );
+                return Ok(resp.headers.clone());
             }
             let err = result.unwrap_err();
             if let RusotoError::Service(HeadObjectError::NoSuchKey(err_msg)) = &err {
                 warn!("file {} not exist, err msg {}", &file_name, err_msg);
-                return Ok(false);
+                return Err(dfs::Error::NoSuchKey(err_msg.to_string()));
             }
             if self.is_err_not_found(&err) {
                 warn!("file {} not exist, err {}", &file_name, err.to_string());
-                return Ok(false);
+                return Err(dfs::Error::NoSuchKey(err.to_string()));
             }
             if self.is_err_retryable(&err) && self.sleep_for_retry(&mut retry_cnt, &file_name).await
             {
@@ -859,8 +935,9 @@ impl S3FsCore {
             }
             if let Some(storage_class) = storage_class.as_ref() {
                 if self.is_on_aws() || self.is_on_aliyun() {
-                    req.add_header(
-                        self.provider.build_header_key("storage-class"),
+                    self.provider.add_provider_header(
+                        &mut req,
+                        "x-amz-storage-class",
                         storage_class,
                     );
                 } else {
@@ -1002,6 +1079,7 @@ impl S3FsCore {
         }
 
         let mut retry_cnt = 0;
+        let start_time = Instant::now_coarse();
         let full_source_key = format!("/{}/{}", self.bucket, source_key);
         loop {
             let mut req = self.new_request("PUT", target_key);
@@ -1014,8 +1092,9 @@ impl S3FsCore {
             }
             if let Some(target_storage_class) = target_storage_class.as_ref() {
                 if self.is_on_aws() || self.is_on_aliyun() {
-                    req.add_header(
-                        self.provider.build_header_key("storage-class"),
+                    self.provider.add_provider_header(
+                        &mut req,
+                        "x-amz-storage-class",
                         target_storage_class,
                     );
                 } else {
@@ -1044,6 +1123,25 @@ impl S3FsCore {
                     return Err(dfs::Error::S3(err_msg));
                 }
             }
+            info!(
+                "copy object {} from {}, takes {:?}, retry {}",
+                target_key,
+                source_key,
+                start_time.saturating_elapsed(),
+                retry_cnt
+            );
+            if self.verifier.should_verify() {
+                let size = self
+                    .object_size(target_key.to_string(), target_key.to_string())
+                    .await
+                    .unwrap_or_default();
+                if size == 0 {
+                    return Err(dfs::Error::S3(format!(
+                        "failed to copy object from {} to {}",
+                        source_key, target_key
+                    )));
+                }
+            }
             return Ok(());
         }
     }
@@ -1055,7 +1153,7 @@ impl S3FsCore {
                 file_key,
                 file_key,
                 Some(&empty_tagging),
-                Some(self.storage_class_default()),
+                Some(self.storage_class_str(StorageClass::Default)),
             )
             .await?;
         }
@@ -1067,9 +1165,9 @@ impl S3FsCore {
         // STORAGE_CLASS_STANDARD_IA is more cost efficient than STORAGE_CLASS_STANDARD
         // for NOT small files.
         if file_len.is_some() && file_len.unwrap() > SMALL_FILE_THRESHOLD_BYTES {
-            self.storage_class_standard_ia()
+            self.storage_class_str(StorageClass::InfrequentAccess)
         } else {
-            self.storage_class_default()
+            self.storage_class_str(StorageClass::Default)
         }
     }
 }
@@ -1092,7 +1190,7 @@ impl ObjectStorage for S3Fs {
             } else {
                 None
             };
-            let storage_class_default = self.storage_class_default();
+            let storage_class_default = self.storage_class_str(StorageClass::Default);
             async move {
                 fs.put_object_with_options(
                     full_key,
@@ -1222,7 +1320,7 @@ impl Dfs for S3Fs {
             data,
             format!("{}.{}", file_id, opts.file_type.suffix()),
             None,
-            Some(self.storage_class_default()),
+            Some(self.storage_class_str(StorageClass::Default)),
             checksum,
         )
         .await
@@ -1235,7 +1333,8 @@ impl Dfs for S3Fs {
         // Only AWS supports storage class.
         let target_storage_class = if self.is_on_aws() || self.is_on_aliyun() {
             let new_storage_class = self.choose_storage_class_for_removed_files(file_len);
-            (new_storage_class != self.storage_class_default()).then_some(new_storage_class)
+            (new_storage_class != self.storage_class_str(StorageClass::Default))
+                .then_some(new_storage_class)
         } else {
             None
         };
@@ -1389,6 +1488,28 @@ impl DerefMut for Response {
 impl Debug for Response {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.resp.status)
+    }
+}
+
+pub struct OperationVerifier {
+    counter: AtomicUsize,
+    limit: usize,
+}
+
+impl OperationVerifier {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            counter: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    pub fn should_verify(&self) -> bool {
+        if self.counter.load(Ordering::Relaxed) > self.limit {
+            return false;
+        }
+        let count = self.counter.fetch_add(1, Ordering::Relaxed);
+        count <= self.limit
     }
 }
 
