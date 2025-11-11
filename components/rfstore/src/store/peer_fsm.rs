@@ -64,7 +64,6 @@ use crate::{
         PEER_TICK_SWITCH_MEM_TABLE_CHECK,
     },
     DiscardReason, Error, RaftStoreRouter, Result, MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
-    MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG,
 };
 
 /// Limits the maximum number of regions returned by error.
@@ -2451,17 +2450,16 @@ impl<'a> PeerMsgHandler<'a> {
                     ));
                 }
 
+                // If source region has unconverted l0s, wait for retry instead of returning
+                // error. These l0s may be compacted during merge. This avoids inconsistent
+                // rollback/commit decisions across peers.
                 if !source_meta.unconverted_l0s.is_empty() {
                     let tag = self.peer.tag();
-                    info!("{} fail to schedule merge: source region has unconverted l0s", tag;
+                    info!("{} fail to schedule merge: source region has unconverted l0s, retry", tag;
                         "target" => ?expect_region,
                         "unconverted_l0s" => ?source_meta.unconverted_l0s,
                     );
-                    return Err(box_err!(
-                        "{}: {}",
-                        tag,
-                        MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG
-                    ));
+                    return Ok(());
                 }
             }
 
