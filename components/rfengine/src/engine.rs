@@ -965,6 +965,10 @@ impl PeerMeta {
         self.states.get(key).map(|v| v.chunk())
     }
 
+    pub fn get_state_bytes(&self, key: &[u8]) -> Option<Bytes> {
+        self.states.get(key).cloned()
+    }
+
     pub fn get_latest_state(&self, key_prefix: &[u8]) -> Option<&[u8]> {
         self.states
             .iter()

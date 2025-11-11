@@ -135,7 +135,7 @@ fn test_merged_engine_once() {
     for (region_id, _) in region_peers {
         if let Some(progress) = merged_engine.get_region_progress(region_id) {
             let truncated_index = merged_raft.get_truncated_index(region_id).unwrap();
-            if progress.truncated_index != truncated_index {
+            if progress.truncated_index() != truncated_index {
                 if let Some(cs) = load_raft_engine_meta(&merged_raft, region_id) {
                     // When the shard is not initial flushed, the truncated index is not updated.
                     assert!(cs.has_parent());
@@ -180,7 +180,7 @@ fn test_merged_engine_once() {
     for (region_id, _) in region_peers {
         if let Some(progress) = merged_engine.get_region_progress(region_id) {
             let truncated_index = merged_raft.get_truncated_index(region_id).unwrap();
-            assert_eq!(progress.truncated_index, truncated_index);
+            assert_eq!(progress.truncated_index(), truncated_index);
         }
     }
     cluster.stop();

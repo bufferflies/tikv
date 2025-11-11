@@ -46,7 +46,9 @@ use native_br::{
 use pd_client::PdClient;
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
-use rfengine::{iterator::WalIterator, RaftLogOp, RfEngine, WriteBatch, TRUNCATE_ALL_INDEX};
+use rfengine::{
+    iterator::WalIterator, RaftLogOp, RfEngine, WriteBatch, KV_ENGINE_META_KEY, TRUNCATE_ALL_INDEX,
+};
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::{
     store::{
@@ -66,7 +68,7 @@ use tikv_util::{
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     debug, error, info, mpsc,
     time::Instant,
-    trace, warn,
+    trace, warn, Either,
 };
 
 use crate::{
@@ -134,6 +136,18 @@ impl Default for MergedEngineConfig {
     }
 }
 
+// When region has synced to `commit_index_for_truncated`, Raft logs can be
+// truncated to `truncated_index`.
+// Merged engine can not determine the truncated index when shard is not loaded
+// (see `Shard::data_all_persisted`). So we record the truncated index along
+// with the relevant commit index from upstream TiKV to know when the
+// `truncated_index` can be used.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TruncatedIndex {
+    pub truncated_index: u64,
+    pub commit_index_for_truncate: u64,
+}
+
 #[derive(Clone)]
 pub struct RegionProgress {
     pub keyspace_id: u32,
@@ -141,20 +155,23 @@ pub struct RegionProgress {
     pub entries: HashMap<u64 /* log_index */, RaftLogOpWithCounter>,
     pub synced_index: u64,
     pub commit_index: u64,
-    pub truncated_index: u64,
+
+    pub truncated_index: TruncatedIndex,
+    // The original commit index sync from upstream TiKV to associate with the truncated index. As
+    // these two may not be in the same write batch.
+    pub origin_commit_indexes: HashMap<u64 /* store_id */, u64 /* commit_index */>,
 }
 
 impl fmt::Debug for RegionProgress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut entries: Vec<_> = self.entries.keys().collect();
-        entries.sort_unstable();
         f.debug_struct("RegionProgress")
             .field("keyspace", &self.keyspace_id)
             .field("region", &self.region_id)
-            .field("entries", &entries)
+            .field("entries", &self.entries.len())
             .field("synced", &self.synced_index)
             .field("commit", &self.commit_index)
             .field("truncated", &self.truncated_index)
+            .field("origin_commits", &self.origin_commit_indexes)
             .finish()
     }
 }
@@ -167,7 +184,8 @@ impl RegionProgress {
             entries: HashMap::default(),
             synced_index: 0,
             commit_index: 0,
-            truncated_index: 0,
+            truncated_index: TruncatedIndex::default(),
+            origin_commit_indexes: HashMap::default(),
         }
     }
 
@@ -206,6 +224,15 @@ impl RegionProgress {
             self
         );
         self.synced_index >= self.commit_index
+    }
+
+    #[inline]
+    pub fn truncated_index(&self) -> u64 {
+        self.truncated_index.truncated_index
+    }
+
+    pub fn is_synced_for_truncate(&self) -> bool {
+        self.synced_index >= self.truncated_index.commit_index_for_truncate
     }
 }
 
@@ -625,7 +652,8 @@ impl MergedEngine {
 
                 // Committed entries will be replayed right away during the recovery process
                 // below.
-                let commit = raft_state.get_commit().max(region_progress.commit_index);
+                let origin_commit = raft_state.get_commit();
+                let commit = origin_commit.max(region_progress.commit_index);
                 if merged_commit_index >= commit {
                     continue;
                 }
@@ -665,14 +693,30 @@ impl MergedEngine {
 
                     region_progress.commit_index = commit;
                     region_progress.synced_index = preprocess_index;
-                    region_progress.truncated_index = origin_truncated_index;
+                    if !peer_is_restored_from_snapshot(
+                        tag,
+                        "recover_from_backup",
+                        Either::Right(&origin),
+                        peer_id,
+                        commit,
+                    ) {
+                        region_progress.truncated_index = TruncatedIndex {
+                            truncated_index: origin_truncated_index,
+                            commit_index_for_truncate: origin_commit,
+                        };
+                    } else {
+                        debug!(
+                            "{} recover_from_backup: ignore truncated index {}",
+                            tag, origin_truncated_index
+                        );
+                    }
                 }
 
                 // merge raft logs
                 let mut entry_buf = Vec::new();
                 let low_idx = merged_commit_index
                     .max(origin_truncated_index)
-                    .max(region_progress.truncated_index)
+                    .max(region_progress.truncated_index())
                     + 1;
                 let high_idx = commit + 1;
                 debug!(
@@ -690,7 +734,7 @@ impl MergedEngine {
                 for entry in entry_buf {
                     batch.append_raft_log(region_id, region_id, &entry);
                 }
-                batch.truncate_raft_log(region_id, region_id, region_progress.truncated_index);
+                batch.truncate_raft_log(region_id, region_id, region_progress.truncated_index());
                 box_try!(merged_raft.write(batch));
             }
         }
@@ -769,9 +813,12 @@ impl MergedEngine {
                 .or_insert(RegionProgress::new(keyspace_id, region_id));
             region_progress.commit_index = raft_state.get_commit();
             region_progress.synced_index = raft_state.get_last_preprocessed_index();
-            region_progress.truncated_index = merged_raft
-                .get_truncated_index(region_id)
-                .unwrap_or(RAFT_INIT_LOG_INDEX);
+            region_progress.truncated_index = TruncatedIndex {
+                truncated_index: merged_raft
+                    .get_truncated_index(region_id)
+                    .unwrap_or(RAFT_INIT_LOG_INDEX),
+                commit_index_for_truncate: raft_state.get_commit(),
+            };
             if let Some(entries) = uncommitted_entries.get_region_entries(region_id) {
                 region_progress.entries = entries.clone();
             }
@@ -1017,23 +1064,50 @@ impl MergedEngine {
                         e.insert(RegionProgress::new(keyspace_id, region_id))
                     }
                 };
-                if progress.truncated_index == TRUNCATE_ALL_INDEX {
+                if progress.truncated_index() == TRUNCATE_ALL_INDEX {
                     debug!("{} update_wal: truncate all", tag; "origin" => %origin_tag);
                     continue;
                 }
-                if let Some(truncated_idx) = origin_wb.get_truncated_idx(peer_id) {
-                    if progress.truncated_index < truncated_idx
-                        && truncated_idx != TRUNCATE_ALL_INDEX
-                    {
-                        progress.truncated_index = truncated_idx;
-                    }
-                }
-                if let Some(raft_state) = load_last_raft_state_from_wb(&origin_wb, peer_id) {
-                    if raft_state.get_commit() > progress.commit_index {
-                        progress.commit_index = raft_state.get_commit();
-                        debug!(
-                            "{} update_wal: advance commit index {}",
-                            tag, progress.commit_index; "origin" => %origin_tag);
+                let is_restored_snapshot =
+                    if let Some(raft_state) = load_last_raft_state_from_wb(&origin_wb, peer_id) {
+                        let origin_commit = raft_state.get_commit();
+                        progress
+                            .origin_commit_indexes
+                            .insert(store_id, origin_commit);
+                        if origin_commit > progress.commit_index {
+                            progress.commit_index = origin_commit;
+                            debug!(
+                                "{} update_wal: advance commit index {}",
+                                tag, progress.commit_index; "origin" => %origin_tag);
+                        }
+                        peer_is_restored_from_snapshot(
+                            tag,
+                            "update_wal",
+                            Either::Left(&origin_wb),
+                            peer_id,
+                            origin_commit,
+                        )
+                    } else {
+                        false
+                    };
+                if !is_restored_snapshot {
+                    if let Some(truncated_idx) = origin_wb.get_truncated_idx(peer_id) {
+                        if progress.truncated_index() < truncated_idx
+                            && truncated_idx != TRUNCATE_ALL_INDEX
+                        {
+                            if let Some(origin_commit) =
+                                progress.origin_commit_indexes.get(&store_id).cloned()
+                            {
+                                progress.truncated_index = TruncatedIndex {
+                                    truncated_index: truncated_idx,
+                                    commit_index_for_truncate: origin_commit,
+                                };
+                                debug!("{} update_wal: set truncated index {:?}", tag, progress.truncated_index; "origin" => %origin_tag);
+                            } else {
+                                debug!("{} update_wal: ignore truncated index {}, no origin commit index", tag, truncated_idx;
+                                    "origin" => %origin_tag, "origin_commits" => ?progress.origin_commit_indexes);
+                            }
+                        }
                     }
                 }
                 origin_wb.read_peer_logs(peer_id, |logs| {
@@ -1373,12 +1447,12 @@ impl MergedEngine {
             // We need to keep the not-synced logs for the next round.
             progress.entries.retain(|&index, _| index > synced_index);
 
-            // Skip truncating region with dependents. The parent region may need the old
-            // raft logs on recover.
-            let truncated_index = cmp::min(progress.truncated_index, synced_index);
-            let truncate_raft_log =
-                self.truncate_region_raft_log(region_id, truncated_index, raft_wb);
-
+            let truncate_raft_log = if progress.is_synced_for_truncate() {
+                let truncated_index = cmp::min(progress.truncated_index(), synced_index);
+                self.truncate_region_raft_log(tag, region_id, truncated_index, raft_wb)
+            } else {
+                None
+            };
             debug!(
                 "{} update_progress_and_truncate: truncate entries <= {}, raft log <= {:?}",
                 tag, synced_index, truncate_raft_log
@@ -1388,25 +1462,37 @@ impl MergedEngine {
 
     fn truncate_region_raft_log(
         &mut self,
+        tag: ShardTag,
         region_id: u64,
-        truncated_index: u64,
+        mut truncated_index: u64,
         raft_wb: &mut WriteBatch,
     ) -> Option<u64> {
-        // Skip truncate region with dependents and parent. The parent region may need
-        // the old raft logs on recover.
-        if self.raft.has_dependents(region_id)
-            || truncated_index <= self.raft.get_truncated_index(region_id).unwrap()
-        {
+        // Skip truncate region with dependents. The parent region may need the old raft
+        // logs on recover.
+        if self.raft.has_dependents(region_id) {
             return None;
         }
-        let shard_meta = self.preprocessors.get_mut(&region_id)?.mut_shard_meta()?;
-        if shard_meta.parent.is_some() {
+        let rf_truncated_index = self.raft.get_truncated_index(region_id)?;
+        if truncated_index <= rf_truncated_index {
             return None;
         }
 
+        let shard_meta = self.preprocessors.get_mut(&region_id)?.mut_shard_meta()?;
         if shard_meta.data_sequence < truncated_index {
+            // Advance `data_sequence` only when region is synced for truncate.
+            // Ref: https://github.com/tidbcloud/cloud-storage-engine/issues/3793
+            debug!(
+                "{} truncate_region_raft_log: advance data_sequence: {}",
+                tag, shard_meta.data_sequence
+            );
             shard_meta.data_sequence = truncated_index;
             write_engine_meta(raft_wb, region_id, shard_meta);
+        }
+
+        let persisted_index = shard_meta.data_persisted_log_index();
+        truncated_index = cmp::min(truncated_index, persisted_index);
+        if truncated_index <= rf_truncated_index {
+            return None;
         }
         raft_wb.truncate_raft_log(region_id, region_id, truncated_index);
         Some(truncated_index)
@@ -1436,7 +1522,10 @@ impl MergedEngine {
             self.kv.remove_shard(region_id);
             self.preprocessors.remove(&region_id);
             let progress = self.region_progresses.get_mut(&region_id).unwrap();
-            progress.truncated_index = TRUNCATE_ALL_INDEX;
+            progress.truncated_index = TruncatedIndex {
+                truncated_index: TRUNCATE_ALL_INDEX,
+                commit_index_for_truncate: 0,
+            };
         }
     }
 
@@ -1795,4 +1884,39 @@ pub fn peer_is_skippable(region_local_state: &RegionLocalState) -> bool {
     // keyspace.
     region_local_state.state == PeerState::Tombstone
         || !is_region_initialized(region_local_state.get_region())
+}
+
+// Used to ignore the truncated index of peers just restored from snapshot.
+// As we don't handle restore snapshot, the logs before this truncated index may
+// not be persisted.
+// Ref: `PeerStorage::restore_snapshot`.
+fn peer_is_restored_from_snapshot(
+    tag: ShardTag,
+    ctx: &str,
+    wb_or_rf: Either<&rfengine::WriteBatch, &rfengine::RfEngine>,
+    peer_id: u64,
+    commit_index: u64,
+) -> bool {
+    let shard_meta_bin_opt = match wb_or_rf {
+        Either::Left(wb) => wb.get_state_bytes(peer_id, KV_ENGINE_META_KEY),
+        Either::Right(rf) => rf.get_state(peer_id, KV_ENGINE_META_KEY),
+    };
+    if let Some(shard_meta_bin) = shard_meta_bin_opt {
+        // `KV_ENGINE_META_DIFF_KEY` & `KV_ENGINE_META_SNAP_DIFF_KEY` are not checked as
+        // there would be other writes in the batch.
+        let mut cs = kvenginepb::ChangeSet::default();
+        if let Err(err) = cs.merge_from_bytes(&shard_meta_bin) {
+            warn!("unmarshal shard meta failed: {:?}", err);
+            debug_assert!(false);
+            return false;
+        }
+        let origin_tag = ShardTag::new(tag.engine_id, IdVer::new(cs.shard_id, cs.shard_ver));
+        let ok = cs.sequence > commit_index;
+        if ok {
+            debug!("{} {}: restored from snapshot", tag, ctx;
+                "origin" => %origin_tag, "seq" => cs.sequence, "commit" => commit_index);
+        }
+        return ok;
+    }
+    false
 }

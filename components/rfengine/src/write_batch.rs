@@ -59,6 +59,10 @@ impl WriteBatch {
         self.get_peer(peer_id)?.get_state(key)
     }
 
+    pub fn get_state_bytes(&self, peer_id: u64, key: &[u8]) -> Option<Bytes> {
+        self.get_peer(peer_id)?.get_state_bytes(key)
+    }
+
     pub fn get_latest_state(&self, peer_id: u64, key_prefix: &[u8]) -> Option<&[u8]> {
         self.get_peer(peer_id)?.get_latest_state(key_prefix)
     }
