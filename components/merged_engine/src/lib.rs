@@ -1211,16 +1211,18 @@ impl MergedEngine {
         let mut merged_wb = rfengine::WriteBatch::new();
         let mut merged_wb_estimated_size = 0;
         let mut finished_regions = HashSet::default();
+        let mut continuous_postpone_count = 0;
         while let Some(updated_region) = update_queue.pop_front() {
             try_force_stop_err!(self);
             tikv_util::set_current_region(updated_region);
-            match self.sync_region(
+            let res = self.sync_region(
                 ctx,
                 updated_region,
                 &finished_regions,
                 &mut merged_wb,
                 &mut merged_wb_estimated_size,
-            )? {
+            )?;
+            match &res {
                 SyncRegionResult::Finished => {
                     finished_regions.insert(updated_region);
                 }
@@ -1230,9 +1232,25 @@ impl MergedEngine {
                 SyncRegionResult::Resume => {
                     update_queue.push_front(updated_region);
                 }
-                SyncRegionResult::Dropped => continue,
+                SyncRegionResult::Dropped => {}
+            }
+            if res.is_postponed() {
+                continuous_postpone_count += 1;
+                if continuous_postpone_count >= update_queue.len() * 2 {
+                    break;
+                }
+            } else {
+                continuous_postpone_count = 0;
             }
         }
+        for postponed_region in update_queue {
+            debug!(
+                "{}:{} sync_merged: region postponed to next round",
+                merged_store_id, postponed_region
+            );
+            self.updated_regions.insert(postponed_region);
+        }
+
         if !merged_wb.is_empty() {
             self.raft.persist(merged_wb)?;
         }
@@ -1596,6 +1614,12 @@ enum SyncRegionResult {
     Postponed,
     Resume,
     Dropped,
+}
+
+impl SyncRegionResult {
+    fn is_postponed(&self) -> bool {
+        matches!(self, Self::Postponed)
+    }
 }
 
 struct SyncRegionsContext<'a> {
