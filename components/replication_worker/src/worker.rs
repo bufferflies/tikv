@@ -1446,6 +1446,8 @@ impl ReplicationWorker {
             box_try!(fs::create_dir_all(&cache_dir));
         }
 
+        // Note: No retry for WAL chunk integrity error. Replication worker handle this
+        // error in other way.
         let collect_ctx = CollectWalChunksContext {
             pd_client: self.ctx.pd.clone(),
             dfs: self.ctx.fs.clone(),
@@ -1454,6 +1456,7 @@ impl ReplicationWorker {
             fetch_wal_timeout: FETCH_WAL_TIMEOUT,
             cache_dir: Some(cache_dir),
             wal_chunks_cache: None,
+            retry_for_wal_chunk_integrity_error: false,
         };
         let tag = format!("{}:{}", store_id, epoch_id);
         // there is no online chunk for this epoch.

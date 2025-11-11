@@ -450,6 +450,8 @@ pub struct CollectWalChunksContext {
     pub fetch_wal_timeout: Duration,
     pub cache_dir: Option<PathBuf>,
     pub wal_chunks_cache: Option<ObjectCacheWithHook>,
+    /// Whether to retry for `Error::WalChunkIntegrityError`.
+    pub retry_for_wal_chunk_integrity_error: bool,
 }
 
 impl From<&ReplayWalLogsContext<'_>> for CollectWalChunksContext {
@@ -462,6 +464,7 @@ impl From<&ReplayWalLogsContext<'_>> for CollectWalChunksContext {
             fetch_wal_timeout: ctx.fetch_wal_timeout,
             cache_dir: ctx.cache_dir.clone(),
             wal_chunks_cache: ctx.wal_chunks_cache.clone(),
+            retry_for_wal_chunk_integrity_error: true,
         }
     }
 }
@@ -621,8 +624,10 @@ fn collect_complete_wal_chunk_metas_with_retry(
         |err| -> bool {
             match err {
                 Error::WalChunkIntegrityError(msg) => {
-                    warn!("{} collect complete wal chunk keys: wal chunk integrity check failed", tag; "msg" => msg);
-                    true
+                    let retry = ctx.retry_for_wal_chunk_integrity_error;
+                    warn!("{} collect complete wal chunk keys: wal chunk integrity check failed", tag;
+                        "msg" => msg, "retry" => retry);
+                    retry
                 }
                 _ => {
                     error!("{} collect complete wal chunk keys: failed", tag; "err" => ?err);
@@ -1114,6 +1119,7 @@ pub fn collect_store_wal_rlog_files(
         fetch_wal_timeout: timeout,
         cache_dir: None, // TODO: cache_dir
         wal_chunks_cache: None,
+        retry_for_wal_chunk_integrity_error: true,
     };
     // `snap_epoch` is the latest snapshot manifest epoch. If no snapshot found, the
     // `snap_epoch` is 0. Replay wal logs from `snap_epoch` + 1 to backup point.
