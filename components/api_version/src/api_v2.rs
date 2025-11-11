@@ -395,12 +395,21 @@ pub fn is_whole_keyspace_range(mut start: &[u8], mut end: &[u8]) -> bool {
         && start.get_u32() + 1 == end.get_u32()
 }
 
+#[inline]
+pub fn is_one_or_multi_whole_keyspace_range(mut start: &[u8], mut end: &[u8]) -> bool {
+    start.len() == KEYSPACE_PREFIX_LEN
+        && end.len() == KEYSPACE_PREFIX_LEN
+        && start[0] == TXN_KEY_PREFIX
+        && end[0] == TXN_KEY_PREFIX
+        && start.get_u32() < end.get_u32()
+}
+
 #[cfg(test)]
 mod tests {
     use txn_types::{Key, TimeStamp};
 
     use crate::{
-        api_v2::{is_whole_keyspace_range, TXN_KEY_PREFIX},
+        api_v2::{is_one_or_multi_whole_keyspace_range, is_whole_keyspace_range, TXN_KEY_PREFIX},
         ApiV2, KvFormat, RawValue,
     };
 
@@ -641,6 +650,29 @@ mod tests {
             assert_eq!(
                 is_whole_keyspace_range(&start, &end),
                 is_whole,
+                "case {}",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_one_or_multi_whole_keyspace_range() {
+        let test_cases = vec![
+            (vec![b'x', 0, 0, 0x0A], vec![b'x', 0, 0, 0x0B], true),
+            (vec![b'x', 0, 0, 0x0A], vec![b'x', 0, 0, 0x0C], true),
+            (vec![b'x', 0, 0, 0x0A], vec![b'x', 0, 0, 0x0A], false),
+            (vec![b'x', 0, 0, 0x0A], vec![b'x', 0, 0, 0x09], false),
+            (vec![b'x', 0, 0, 0x0A, 0], vec![b'x', 0, 0, 0x0B], false),
+            (vec![b'x', 0, 0, 0x0A], vec![b'x', 0, 0, 0x0B, 0], false),
+            (vec![b'x', 0, 0, 0x0A, 0], vec![b'x', 0, 0, 0x0B, 0], false),
+            (vec![b'r', 0, 0, 0x0A], vec![b'r', 0, 0, 0x0A], false),
+        ];
+
+        for (i, (start, end, cover_whole)) in test_cases.into_iter().enumerate() {
+            assert_eq!(
+                is_one_or_multi_whole_keyspace_range(&start, &end),
+                cover_whole,
                 "case {}",
                 i
             );

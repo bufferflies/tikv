@@ -9,7 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use api_version::{api_v2::is_whole_keyspace_range, ApiV2};
+use api_version::{
+    api_v2::{is_one_or_multi_whole_keyspace_range, is_whole_keyspace_range},
+    ApiV2,
+};
 use cloud_encryption::MasterKey;
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::{CfNamesExt, MiscExt};
@@ -1578,7 +1581,7 @@ impl Runnable for PdRunner {
                             .unwrap_or_default();
                         let raw_end = decode_bytes(&mut hb_task.region.get_end_key(), false)
                             .unwrap_or_default();
-                        is_whole_keyspace_range(&raw_start, &raw_end)
+                        is_one_or_multi_whole_keyspace_range(&raw_start, &raw_end)
                     } else {
                         false
                     };
