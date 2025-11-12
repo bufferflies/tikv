@@ -67,6 +67,11 @@ const META_FILE_NAME: &str = "schemas.meta";
 
 const TIKV_STORE_LABEL_TIER_KEY: &str = "serverless.tidbcloud.com/tier";
 
+// Default number of historical schema file versions to keep per keyspace
+const DEFAULT_SCHEMA_FILE_HISTORY_VERSIONS: usize = 3;
+// GC interval for schema files (once per day)
+const SCHEMA_FILE_GC_INTERVAL: ReadableDuration = ReadableDuration::hours(24);
+
 #[derive(Clone, Default)]
 pub struct ApiV2NoPrefixCodec {}
 
@@ -312,6 +317,53 @@ impl MetaFile {
         self.core.write_sequences.remove(&keyspace_id);
         self.core.files.remove(&keyspace_id)
     }
+
+    /// GC old schema file versions for a specific keyspace.
+    /// Returns the list of file_ids that should be removed from disk.
+    /// keep_versions: number of recent versions to keep (0 means keep all)
+    fn gc_old_files(&self, keyspace_id: u32, keep_versions: usize) -> Vec<u64> {
+        if keep_versions == 0 {
+            return vec![];
+        }
+
+        let mut to_remove = vec![];
+        self.core.files.alter(&keyspace_id, |_, mut files| {
+            if files.len() > keep_versions {
+                // Split off the files to remove (older versions)
+                let remove_count = files.len() - keep_versions;
+                let removed: Vec<(u64, i64)> = files.drain(..remove_count).collect();
+                to_remove = removed
+                    .into_iter()
+                    .map(|(file_id, _)| file_id)
+                    .filter(|&id| id > 0) // Skip default files (file_id = 0)
+                    .collect();
+            }
+            files
+        });
+        to_remove
+    }
+
+    /// GC old schema file versions for all keyspaces.
+    /// Returns a map of keyspace_id -> file_ids to remove.
+    fn gc_all_old_files(&self, keep_versions: usize) -> HashMap<u32, Vec<u64>> {
+        if keep_versions == 0 {
+            return HashMap::new();
+        }
+
+        // First, collect all keyspace_ids to avoid holding the iterator
+        // while calling gc_old_files (which would cause deadlock)
+        let keyspace_ids: Vec<u32> = self.core.files.iter().map(|entry| *entry.key()).collect();
+
+        // Then process each keyspace
+        let mut result = HashMap::new();
+        for keyspace_id in keyspace_ids {
+            let to_remove = self.gc_old_files(keyspace_id, keep_versions);
+            if !to_remove.is_empty() {
+                result.insert(keyspace_id, to_remove);
+            }
+        }
+        result
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -328,6 +380,8 @@ pub struct SchemaManagerConfig {
     pub tikv_stores_tier: String,
     // Maximum concurrent schema upload tasks
     pub schema_upload_concurrency: usize,
+    // Number of historical schema file versions to keep per keyspace (0 means keep all)
+    pub schema_file_history_versions: usize,
 }
 
 impl Default for SchemaManagerConfig {
@@ -340,6 +394,7 @@ impl Default for SchemaManagerConfig {
             blacklist_file: PathBuf::new(), // Empty means no blacklist filtering.
             tikv_stores_tier: "".to_string(), // Empty means match all stores.
             schema_upload_concurrency: DEFAULT_SCHEMA_UPLOAD_CONCURRENCY,
+            schema_file_history_versions: DEFAULT_SCHEMA_FILE_HISTORY_VERSIONS,
         }
     }
 }
@@ -421,6 +476,8 @@ impl SchemaManager {
 
         let self_clone = self.clone();
         runtime.spawn(async move {
+            let mut last_gc_time = tokio::time::Instant::now();
+
             loop {
                 // Get all keyspaces stats from store.
                 let (stores, _) = self_clone.get_tikv_stores();
@@ -450,6 +507,24 @@ impl SchemaManager {
                     error!("refresh schema version error: {:?}", e);
                 }
                 SCHEMA_MANAGER_SYNC_LOOP_COUNT.inc();
+
+                if last_gc_time.elapsed() >= SCHEMA_FILE_GC_INTERVAL.0 {
+                    let gc_start_time = tokio::time::Instant::now();
+                    info!("starting periodic schema file GC");
+                    if let Err(e) = self_clone.gc_schema_files() {
+                        warn!("gc_schema_files failed: {:?}", e);
+                        SCHEMA_MANAGER_SYNC_LOOP_ERROR_COUNT
+                            .with_label_values(&["gc_schema_files"])
+                            .inc();
+                    } else {
+                        info!(
+                            "periodic schema file GC completed in {:?}",
+                            gc_start_time.elapsed()
+                        );
+                    }
+                    last_gc_time = tokio::time::Instant::now();
+                }
+
                 tokio::time::sleep(self_clone.config.keyspace_refresh_interval.0).await;
             }
         });
@@ -950,6 +1025,58 @@ impl SchemaManager {
         let meta = self.meta_file.write();
         write_meta_file_to_local(&self.config.dir, Bytes::from(meta))
             .map_err(|err| -> Error { box_err!("write_meta_file_to_local failed: {:?}", err) })?;
+        Ok(())
+    }
+
+    /// GC old schema file versions for all keyspaces.
+    /// This should be called periodically to avoid accumulating too many
+    /// historical versions.
+    fn gc_schema_files(&self) -> Result<()> {
+        let keep_versions = self.config.schema_file_history_versions;
+        if keep_versions == 0 {
+            // 0 means keep all versions, no GC needed
+            return Ok(());
+        }
+
+        let to_remove_map = self.meta_file.gc_all_old_files(keep_versions);
+        if to_remove_map.is_empty() {
+            return Ok(());
+        }
+
+        let mut total_removed = 0;
+        for (keyspace_id, file_ids) in to_remove_map {
+            match remove_schema_file_from_local(&self.config.dir, keyspace_id, &file_ids) {
+                Ok(()) => {
+                    total_removed += file_ids.len();
+                    info!(
+                        "{}: GC removed {} old schema file versions",
+                        keyspace_id,
+                        file_ids.len();
+                        "file_ids" => ?file_ids
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        "{}: failed to remove old schema files during GC",
+                        keyspace_id;
+                        "err" => ?err, "file_ids" => ?file_ids
+                    );
+                }
+            }
+        }
+
+        if total_removed > 0 {
+            // Save updated meta_file after GC
+            let meta = self.meta_file.write();
+            write_meta_file_to_local(&self.config.dir, Bytes::from(meta)).map_err(
+                |err| -> Error { box_err!("write_meta_file_to_local failed after GC: {:?}", err) },
+            )?;
+            info!(
+                "GC completed: removed {} schema file versions in total",
+                total_removed
+            );
+        }
+
         Ok(())
     }
 
@@ -1979,5 +2106,99 @@ mod tests {
         let shard_stats = make_shard_stats(3, vec![120, 0, 0, 3, 3], vec![120, 0, 0, 4]);
         SchemaManager::update_keyspace_stats(&mut keyspace_stats, shard_stats);
         assert_eq!(keyspace_stats.len(), 3);
+    }
+
+    #[test]
+    fn test_schema_file_gc() {
+        ::test_util::init_log_for_test();
+
+        let dir = tempfile::tempdir().unwrap();
+        let meta = MetaFile::new();
+
+        // Create schema files on disk
+        let schemas = vec![
+            SchemaBuf::new(
+                1,
+                new_int_handle_column_info(),
+                new_version_column_info(),
+                vec![new_int_handle_column_info()],
+                vec![],
+                0,
+                vec![],
+                StorageClassSpec::default(),
+                None,
+            )
+            .into(),
+        ];
+
+        let keyspace_id = 100;
+        // Add default file to keyspace
+        meta.add_default_file(keyspace_id, 0);
+        meta.add_default_file(keyspace_id, 10);
+        for i in 1..=5i64 {
+            let file_id = (i * 1000) as u64;
+            let schema_version = i * 10;
+            let schema_file_data =
+                build_schema_file(keyspace_id, schema_version, schemas.clone(), 0);
+            write_schema_file_to_local(
+                dir.path(),
+                keyspace_id,
+                file_id,
+                Bytes::from(schema_file_data),
+            )
+            .unwrap();
+            meta.add_file(keyspace_id, file_id, schema_version);
+        }
+
+        // Verify all files exist
+        for i in 1..=5 {
+            let file_id = i * 1000u64;
+            let file_path = dir
+                .path()
+                .join(keyspace_id.to_string())
+                .join(format!("{:016x}.schema", file_id));
+            assert!(file_path.exists(), "File should exist: {:?}", file_path);
+        }
+
+        // Run GC to keep only last 2 versions
+        let to_remove = meta.gc_old_files(keyspace_id, 2);
+        assert_eq!(to_remove.len(), 3);
+        assert_eq!(to_remove, vec![1000, 2000, 3000]);
+
+        info!("to_remove: {:?}", to_remove);
+        // Remove old files from disk
+        remove_schema_file_from_local(dir.path(), keyspace_id, &to_remove).unwrap();
+
+        // Verify old files are removed
+        for &file_id in &to_remove {
+            let file_path = dir
+                .path()
+                .join(keyspace_id.to_string())
+                .join(format!("{:016x}.schema", file_id));
+            assert!(
+                !file_path.exists(),
+                "File should be removed: {:?}",
+                file_path
+            );
+        }
+
+        // Verify latest files still exist
+        for file_id in &[4000u64, 5000u64] {
+            let file_path = dir
+                .path()
+                .join(keyspace_id.to_string())
+                .join(format!("{:016x}.schema", file_id));
+            assert!(
+                file_path.exists(),
+                "File should still exist: {:?}",
+                file_path
+            );
+        }
+
+        // Verify meta file reflects the changes
+        let remaining = meta.get_files(keyspace_id).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0], (4000, 40));
+        assert_eq!(remaining[1], (5000, 50));
     }
 }
