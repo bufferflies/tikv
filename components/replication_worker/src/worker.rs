@@ -1752,10 +1752,9 @@ impl ReplicationWorker {
         };
         self.cdc_addrs.remove(&keyspace_id);
         let keyspace_regions = self.merged_engine.get_keyspace_regions(keyspace_id);
-        let kv = self.merged_engine.get_kv();
         keyspace_regions.iter().for_each(|&region_id| {
             self.remove_region(region_id);
-            kv.remove_shard(region_id);
+            self.merged_engine.remove_shard(region_id);
         });
         self.merged_engine.remove_keyspace(keyspace_id);
         self.ctx.fs.get_runtime().spawn(async move {

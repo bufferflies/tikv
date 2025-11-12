@@ -1547,6 +1547,11 @@ impl MergedEngine {
         }
     }
 
+    pub fn remove_shard(&mut self, region_id: u64) {
+        self.appliers.remove(&region_id);
+        self.kv.remove_shard(region_id);
+    }
+
     fn destroy_regions_on_startup(
         raft: &RfEngine,
         tombstone_regions: HashSet<u64>,

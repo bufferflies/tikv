@@ -144,6 +144,11 @@ fn test_random_replication() {
 
     // Start replication worker.
     info!("start replication worker");
+    let rfengine_wal_target_size = cluster
+        .get_any_node_config()
+        .unwrap()
+        .rfengine
+        .target_file_size;
     let mut worker_conf = cloud_worker::Config::default();
     worker_conf.data_dir = rep_dir.to_str().unwrap().to_string();
     worker_conf.addr = "127.0.0.1:5998".to_string();
@@ -153,6 +158,8 @@ fn test_random_replication() {
     let rep_config = &mut worker_conf.replication_worker;
     rep_config.override_from_env();
     rep_config.enabled = true;
+    rep_config.update_stores_wal_size_limit =
+        (rfengine_wal_target_size * NODES_COUNT as u64).into();
     rep_config.grpc_addr = "127.0.0.1:5999".to_string();
     rep_config.advertise_addr = "127.0.0.1:5999".to_string();
     rep_config.report_region_interval = ReadableDuration::secs(3);
@@ -173,7 +180,7 @@ fn test_random_replication() {
     let worker_base_url = format!("http://{}/cdc", worker_addr);
     let cdc_addr = local_provider.cdc_server_addr();
     // add keyspace before add task.
-    let add_keyspace_url = format!("{}/keyspace?keyspace_id=1", worker_base_url);
+    let add_keyspace_url = format!("{worker_base_url}/keyspace?keyspace_id={KEYSPACE_ID}");
     let add_keyspace_body = format!(r#"{{"pd_url":"{pd_url}","cdc_addr":"{cdc_addr}"}}"#);
     dispatch_http(&worker_client, add_keyspace_url, "POST", add_keyspace_body).unwrap();
 
@@ -181,7 +188,7 @@ fn test_random_replication() {
     let get_keyspace_url = format!("{}/keyspace", worker_base_url);
     let res = dispatch_http(&worker_client, get_keyspace_url, "GET", "".to_string()).unwrap();
     let keyspaces: KeyspacesResp = serde_json::from_slice(res.as_bytes()).unwrap();
-    assert_eq!(keyspaces.keyspace_ids.len(), 1);
+    assert_eq!(keyspaces.keyspace_ids, vec![KEYSPACE_ID]);
 
     // Prepare downstream TiDB.
     let opts_downstream = sqlx::mysql::MySqlConnectOptions::new()
@@ -208,7 +215,7 @@ fn test_random_replication() {
     let sink_uri = "mysql://root@127.0.0.1:9001".to_string();
     let start_ts = backup_ts;
     let changefeed_id = "rep-task";
-    let add_task_url = format!("{}/api/v2/changefeeds?keyspace_id=1", worker_base_url);
+    let add_task_url = format!("{worker_base_url}/api/v2/changefeeds?keyspace_id={KEYSPACE_ID}");
     let task_params = ChangefeedParams {
         changefeed_id: changefeed_id.into(),
         sink_uri,
@@ -240,8 +247,15 @@ fn test_random_replication() {
     info!("add task resp: {}", resp);
 
     // Get task list has rep-task.
-    let get_task_list_url = format!("{}/api/v2/changefeeds?keyspace_id=1", worker_base_url);
-    let resp = dispatch_http(&worker_client, get_task_list_url, "GET", "".to_string()).unwrap();
+    let get_task_list_url =
+        format!("{worker_base_url}/api/v2/changefeeds?keyspace_id={KEYSPACE_ID}");
+    let resp = dispatch_http(
+        &worker_client,
+        get_task_list_url.clone(),
+        "GET",
+        "".to_string(),
+    )
+    .unwrap();
     info!("get task resp: {}", resp);
     assert!(resp.contains(changefeed_id));
 
@@ -289,53 +303,99 @@ fn test_random_replication() {
         thread::sleep(Duration::from_millis(500));
     }
 
-    // Pause the changefeed.
-    info!("pause changefeed");
-    let pause_task_url =
-        format!("{worker_base_url}/api/v2/changefeeds/{changefeed_id}/pause?keyspace_id=1");
-    dispatch_http(&worker_client, pause_task_url, "POST", "".to_string()).unwrap();
+    let pause = rng.gen_bool(0.5); // Pause or remove keyspace.
+    if pause {
+        // Pause the changefeed.
+        info!("pause changefeed");
+        let pause_task_url = format!(
+            "{worker_base_url}/api/v2/changefeeds/{changefeed_id}/pause?keyspace_id={KEYSPACE_ID}"
+        );
+        dispatch_http(&worker_client, pause_task_url, "POST", "".to_string()).unwrap();
+    } else {
+        info!("remove task");
+        let remove_task_url = format!(
+            "{}/api/v2/changefeeds/{changefeed_id}?keyspace_id={KEYSPACE_ID}",
+            worker_base_url
+        );
+        dispatch_http(&worker_client, remove_task_url, "DELETE", "".to_string()).unwrap();
+
+        // Remove keyspace.
+        info!("remove keyspace");
+        let remove_keyspace_url = format!("{worker_base_url}/keyspace?keyspace_id={KEYSPACE_ID}");
+        dispatch_http(
+            &worker_client,
+            remove_keyspace_url,
+            "DELETE",
+            "".to_string(),
+        )
+        .unwrap();
+    }
 
     // Restart the rep-pd and wait for the rep-pd region has leader.
     info!("restart rep-pd");
     local_provider.restart_local_pd().unwrap();
-    let rep_pd_cli = new_rep_pd_client(local_provider.pd_client_url());
-    must_wait(
-        || {
-            let region = match rep_pd_cli.get_region_info(&[]) {
-                Ok(region) => region,
-                Err(e) => {
-                    // Should be caused by region role during split.
-                    warn!("rep-pd get region failed: {:?}", e);
-                    return false;
-                }
-            };
-            info!("rep-pd region: {:?}", region);
-            region.leader.is_some()
-        },
-        30,
-        || "wait for rep-pd region leader".into(),
-    );
+    if pause {
+        let rep_pd_cli = new_rep_pd_client(local_provider.pd_client_url());
+        must_wait(
+            || {
+                let region = match rep_pd_cli.get_region_info(&[]) {
+                    Ok(region) => region,
+                    Err(e) => {
+                        // Should be caused by region role during split.
+                        warn!("rep-pd get region failed: {:?}", e);
+                        return false;
+                    }
+                };
+                info!("rep-pd region: {:?}", region);
+                region.leader.is_some()
+            },
+            30,
+            || "wait for rep-pd region leader".into(),
+        );
+    }
 
-    // Resume the changefeed.
-    info!("resume changefeed");
     let resume_ts = client.get_ts().into_inner();
     runtime.block_on(sync_differ.skip_until(resume_ts));
-    let resume_task_url =
-        format!("{worker_base_url}/api/v2/changefeeds/{changefeed_id}/resume?keyspace_id=1");
-    must_wait_result(
-        || {
-            // TiCDC may return error when PD is just up.
-            dispatch_http(
-                &worker_client,
-                &resume_task_url,
-                "POST",
-                // r#"{"overwrite_checkpoint_ts": 0}"#.to_string(),
-                r#"{}"#.to_string(),
-            )
-        },
-        30,
-        || "wait for resume changefeed".into(),
-    );
+    if pause {
+        // Resume the changefeed.
+        info!("resume changefeed");
+        let resume_task_url = format!(
+            "{worker_base_url}/api/v2/changefeeds/{changefeed_id}/resume?keyspace_id={KEYSPACE_ID}"
+        );
+        must_wait_result(
+            || {
+                // TiCDC may return error when PD is just up.
+                dispatch_http(
+                    &worker_client,
+                    &resume_task_url,
+                    "POST",
+                    // r#"{"overwrite_checkpoint_ts": 0}"#.to_string(),
+                    r#"{}"#.to_string(),
+                )
+            },
+            30,
+            || "wait for resume changefeed".into(),
+        );
+    } else {
+        info!("add keyspace");
+        let add_keyspace_url = format!("{worker_base_url}/keyspace?keyspace_id={KEYSPACE_ID}");
+        let add_keyspace_body = format!(r#"{{"pd_url":"{pd_url}","cdc_addr":"{cdc_addr}"}}"#);
+        dispatch_http(&worker_client, add_keyspace_url, "POST", add_keyspace_body).unwrap();
+
+        // Verify keyspace is added.
+        let get_keyspace_url = format!("{worker_base_url}/keyspace");
+        let res = dispatch_http(&worker_client, get_keyspace_url, "GET", "".to_string()).unwrap();
+        let keyspaces: KeyspacesResp = serde_json::from_slice(res.as_bytes()).unwrap();
+        assert_eq!(keyspaces.keyspace_ids, vec![KEYSPACE_ID]);
+
+        info!("add task");
+        let resp = dispatch_http(&worker_client, add_task_url, "POST", add_task_body).unwrap();
+        info!("add task resp: {}", resp);
+
+        let resp = dispatch_http(&worker_client, get_task_list_url, "GET", "".to_string()).unwrap();
+        info!("get task resp: {}", resp);
+        assert!(resp.contains(changefeed_id));
+    }
 
     let pd_client = cluster.get_pd_client_ext();
     let pd_ctl = Arc::new(cluster.get_pd_control().unwrap());
@@ -442,19 +502,19 @@ fn test_random_replication() {
     // Remove task.
     info!("remove task");
     let remove_task_url = format!(
-        "{}/api/v2/changefeeds/{changefeed_id}?keyspace_id=1",
+        "{}/api/v2/changefeeds/{changefeed_id}?keyspace_id={KEYSPACE_ID}",
         worker_base_url
     );
     dispatch_http(&worker_client, remove_task_url, "DELETE", "".to_string()).unwrap();
 
     // Get task list doesn't have rep-task.
-    let get_task_list_rul = format!("{}/keyspace?keyspace_id=1", worker_base_url);
+    let get_task_list_rul = format!("{worker_base_url}/keyspace?keyspace_id={KEYSPACE_ID}",);
     let resp = dispatch_http(&worker_client, get_task_list_rul, "GET", "".to_string()).unwrap();
     assert!(!resp.contains(changefeed_id));
 
     // Remove keyspace.
     info!("remove keyspace");
-    let remove_keyspace_url = format!("{worker_base_url}/keyspace?keyspace_id=1");
+    let remove_keyspace_url = format!("{worker_base_url}/keyspace?keyspace_id={KEYSPACE_ID}");
     dispatch_http(
         &worker_client,
         remove_keyspace_url,
