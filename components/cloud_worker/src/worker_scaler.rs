@@ -52,7 +52,7 @@ const K8S_LABEL_COMPONENT: &str = "app.kubernetes.io/component";
 const K8S_NAMESPACE_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
 const K8S_NODE_SELECTOR_NODE_NAME_KEY: &str = "serverless.tidbcloud.com/node";
 
-const LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_NAME: &str = "load-data-worker";
+const LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_NAME: &str = "dedicated";
 const LARGE_DATA_LOAD_DATA_WORKER_NODE_GROUP_CPU_NUM: f64 = 48.0;
 
 const NETWORK_PROTOCOL: &str = "TCP";
