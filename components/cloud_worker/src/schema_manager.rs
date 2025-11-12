@@ -250,7 +250,13 @@ impl MetaFile {
 
     fn add_file(&self, keyspace_id: u32, file_id: u64, schema_version: i64) {
         if let Some((_, version)) = self.get_latest_file(keyspace_id) {
-            assert!(version <= schema_version, "schema version must be in order");
+            assert!(
+                version <= schema_version,
+                "schema version must be in order, keyspace_id: {}, version: {}, schema_version: {}",
+                keyspace_id,
+                version,
+                schema_version
+            );
         }
 
         self.core
@@ -809,12 +815,12 @@ impl SchemaManager {
         }
 
         // No tables need to build.
-        if checked_version == Some(0) && schemas.as_ref().unwrap().is_empty() {
+        if local_schema_file.is_none() && schemas.as_ref().unwrap().is_empty() {
             self.meta_file
                 .add_checked_version(keyspace_id, schema_version);
             // Add default file to indicate the keyspace is already synced. There is no
             // valid schema file in local.
-            self.meta_file.add_default_file(keyspace_id, 0);
+            self.meta_file.add_default_file(keyspace_id, schema_version);
             if let Some(write_sequence) = update_write_sequence {
                 self.meta_file
                     .add_write_sequence(keyspace_id, write_sequence);
