@@ -200,12 +200,15 @@ pub fn archive_with_cfg(config: ArchiveConfig) -> Result<()> {
     )
     .unwrap();
     let start_archive_duration = chrono::Duration::from_std(config.start_archive_duration).unwrap();
-    let end_archive_date = (chrono::Utc::now() - start_archive_duration).date_naive();
+    let now = chrono::Utc::now();
+    let end_archive_date = (now - start_archive_duration).date_naive();
     if expiration_date >= end_archive_date {
-        return Err(Error::ArchiveError(format!(
-            "start archive duration is invalid. expiration_date {}, start_archive_duration {}",
-            expiration_date, start_archive_duration
-        )));
+        warn!("expiration_date + start_archive_duration >= current_date, today nothing to do.";
+            "expiration_date" => %expiration_date,
+            "start_archive_duration" => ?config.start_archive_duration,
+            "current_date" => %now.date_naive(),
+        );
+        return Ok(());
     }
     let begin_archive_date = expiration_date
         .checked_add_days(chrono::Days::new(1))
