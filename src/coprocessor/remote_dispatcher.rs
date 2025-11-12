@@ -161,6 +161,7 @@ pub struct RemoteContextCore {
     pub remote_worker_url: String,
     pub cop_worker_provider: Arc<dyn CopWorkerProvider>,
     pub cop_min_blocks_size: usize,
+    pub cop_num_ranges: usize,
     pub runtime: tokio::runtime::Handle,
     pub client: security::HttpClient,
     status_addr: String,
@@ -188,6 +189,7 @@ impl RemoteContext {
         remote_worker_url: String,
         cop_worker_url: String,
         cop_min_blocks_size: usize,
+        cop_num_ranges: usize,
         security_mgr: Arc<SecurityManager>,
         runtime: tokio::runtime::Handle,
         status_addr: String,
@@ -205,6 +207,7 @@ impl RemoteContext {
             core: Arc::new(RemoteContextCore {
                 remote_worker_url,
                 cop_min_blocks_size,
+                cop_num_ranges,
                 cop_worker_provider,
                 runtime,
                 client,
@@ -242,7 +245,12 @@ pub(crate) fn try_remote_dag_handler(
         let end = Bytes::copy_from_slice(&ran.end);
         ranges.push((start, end))
     }
-    let blocks_size = snap.estimated_range_blocks_size(&ranges);
+    let blocks_size = if ranges.len() < remote_ctx.cop_num_ranges {
+        snap.estimated_range_blocks_size(&ranges)
+    } else {
+        // skip calculate blocks size if the number of ranges is too large.
+        remote_ctx.cop_min_blocks_size
+    };
     let min_blocks_size =
         calc_min_blocks_size(req_ctx.txn_start_ts, remote_ctx.cop_min_blocks_size);
     if blocks_size < min_blocks_size {
@@ -257,8 +265,10 @@ pub(crate) fn try_remote_dag_handler(
         req_ctx.txn_start_ts.into_inner()
     );
     info!(
-        "{} send remote coprocessor blocks_size:{}",
-        tag, blocks_size
+        "{} send remote coprocessor blocks_size:{} ranges:{}",
+        tag,
+        blocks_size,
+        ranges.len(),
     );
     // reassemble a coprocessor request.
     let mut cop_req = kvproto::coprocessor::Request::default();
