@@ -305,6 +305,43 @@ impl RecordingClient {
         let e = self.expected.entry(k).or_default();
         e.commit_vals.push(Vec::new());
     }
+
+    /// Acquire a pessimistic lock on a single key.
+    /// Note: These locks should be filtered out by CloudDeltaScanner, so we
+    /// don't record them in expected.
+    fn acquire_pessimistic_lock(&mut self, key: Vec<u8>) {
+        let start_ts = self.inner.get_ts();
+        let for_update_ts = self.inner.get_ts();
+        let lock_ttl = 3000; // 3 seconds
+        self.inner
+            .kv_pessimistic_lock(
+                key.clone().into(),
+                vec![key.into()],
+                start_ts,
+                lock_ttl,
+                for_update_ts,
+                None,
+            )
+            .expect("pessimistic lock");
+        // DO NOT record in expected - these locks should be filtered out
+    }
+
+    /// Prewrite a Lock-type mutation (optimistic lock without value).
+    /// Note: These locks should be filtered out by CloudDeltaScanner, so we
+    /// don't record them in expected.
+    fn prewrite_lock(&mut self, key: Vec<u8>) {
+        let start_ts = self.inner.get_ts();
+        let muts = vec![Mutation {
+            key: key.clone().into(),
+            value: vec![].into(),
+            op: kvproto::kvrpcpb::Op::Lock,
+            assertion: Assertion::None,
+        }];
+        self.inner
+            .kv_prewrite_with_retry(key.into(), None, TxnMutations::from_normal(muts), start_ts)
+            .expect("prewrite lock");
+        // DO NOT record in expected - these locks should be filtered out
+    }
 }
 
 impl std::ops::Deref for RecordingClient {
@@ -644,4 +681,113 @@ fn delta_scanner_randomized_writes_1000() {
 #[test]
 fn delta_scanner_randomized_writes_100000() {
     randomized_writes_and_verify(100000);
+}
+
+#[test]
+fn delta_scanner_filter_pessimistic_locks() {
+    test_util::init_log_for_test();
+    let cluster = ServerCluster::new(alloc_node_id_vec(1), |_, conf| {
+        conf.raft_store.enable_inner_key_offset = false;
+        conf.coprocessor.region_split_size = ReadableSize::gb(1);
+    });
+    let client = cluster.new_client();
+    let mut client = RecordingClient::new(client);
+    let node_id = cluster.get_nodes()[0];
+
+    let k1 = i_to_key(500);
+    let k2 = i_to_key(501);
+
+    // k1: committed value + pessimistic lock (lock should be filtered)
+    client.put_commit(k1.clone(), i_to_val(1));
+    client.acquire_pessimistic_lock(k1.clone());
+
+    // k2: only pessimistic lock (should be completely filtered out)
+    client.acquire_pessimistic_lock(k2.clone());
+
+    let region_id = client.get_region_id(b"xkey");
+    wait_region_ready(&cluster, node_id, region_id);
+
+    let snap = cluster
+        .get_kvengine(node_id)
+        .get_snap_access(region_id)
+        .unwrap();
+    // Scan the range covering all keys
+    let mut upper_raw = k2.clone();
+    tidb_query_common::util::convert_to_prefix_next(&mut upper_raw);
+
+    for filter_ts in [true, false] {
+        let lower = Key::from_raw(&k1);
+        let upper = Key::from_raw(&upper_raw);
+        let mut scanner =
+            CloudDeltaScanner::new(snap.clone(), 0, Some(lower), Some(upper), filter_ts);
+        scanner.init().unwrap();
+
+        let mut actual_seqs: HashMap<Vec<u8>, SeqAgg> = HashMap::new();
+        while let Some(entry) = scanner.next_entry().unwrap() {
+            add_entry_seq(&mut actual_seqs, &entry);
+        }
+
+        // Verify that pessimistic locks are filtered out
+        // k1 should have only the committed value, no lock
+        // k2 should not appear at all (only had pessimistic lock)
+        verify_scan(&actual_seqs, &client.expected, false);
+    }
+}
+
+#[test]
+fn delta_scanner_filter_lock_type_locks() {
+    test_util::init_log_for_test();
+    let cluster = ServerCluster::new(alloc_node_id_vec(1), |_, conf| {
+        conf.raft_store.enable_inner_key_offset = false;
+        conf.coprocessor.region_split_size = ReadableSize::gb(1);
+    });
+    let client = cluster.new_client();
+    let mut client = RecordingClient::new(client);
+    let node_id = cluster.get_nodes()[0];
+
+    let k1 = i_to_key(600);
+    let k2 = i_to_key(601);
+    let k3 = i_to_key(602);
+
+    // k1: committed value + Lock-type prewrite (lock should be filtered)
+    client.put_commit(k1.clone(), i_to_val(1));
+    client.prewrite_lock(k1.clone());
+
+    // k2: only Lock-type prewrite (should be completely filtered out)
+    client.prewrite_lock(k2.clone());
+
+    // k3: Lock-type prewrite + committed value (commit should appear, lock
+    // filtered)
+    client.prewrite_lock(k3.clone());
+    client.put_commit(k3.clone(), i_to_val(30));
+
+    let region_id = client.get_region_id(b"xkey");
+    wait_region_ready(&cluster, node_id, region_id);
+
+    let snap = cluster
+        .get_kvengine(node_id)
+        .get_snap_access(region_id)
+        .unwrap();
+    // Scan the range covering all keys
+    let mut upper_raw = k3.clone();
+    tidb_query_common::util::convert_to_prefix_next(&mut upper_raw);
+
+    for filter_ts in [true, false] {
+        let lower = Key::from_raw(&k1);
+        let upper = Key::from_raw(&upper_raw);
+        let mut scanner =
+            CloudDeltaScanner::new(snap.clone(), 0, Some(lower), Some(upper), filter_ts);
+        scanner.init().unwrap();
+
+        let mut actual_seqs: HashMap<Vec<u8>, SeqAgg> = HashMap::new();
+        while let Some(entry) = scanner.next_entry().unwrap() {
+            add_entry_seq(&mut actual_seqs, &entry);
+        }
+
+        // Verify that Lock-type locks are filtered out
+        // k1: only committed value
+        // k2: should not appear (only Lock-type lock)
+        // k3: only committed value
+        verify_scan(&actual_seqs, &client.expected, false);
+    }
 }

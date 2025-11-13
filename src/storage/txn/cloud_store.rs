@@ -580,8 +580,8 @@ impl CloudDeltaScanner {
                     || self.lock_iter.key() <= self.current_raw_key.as_slice()
                 {
                     let lock = Lock::parse(self.lock_iter.val()).map_err(Error::from_mvcc)?;
-                    // ignore pessimistic lock.
-                    if lock.lock_type == LockType::Pessimistic {
+                    // ignore pessimistic or SELECT FOR UPDATE lock.
+                    if lock.lock_type == LockType::Pessimistic || lock.lock_type == LockType::Lock {
                         self.lock_iter.next().await;
                         continue;
                     }
