@@ -14,7 +14,7 @@ use std::{
 
 use api_version::ApiV2;
 use bytes::{Buf, Bytes};
-use cdc::{CdcEvent, Conn, ConnId};
+use cdc::{metrics::*, CdcEvent, Conn, ConnId};
 use collections::{HashMap, HashMapEntry, HashSet};
 use futures::executor::block_on;
 use grpcio::{ChannelBuilder, EnvBuilder, ServerBuilder};
@@ -68,7 +68,7 @@ use crate::{
     ticdc_util::TiCdcError,
     util::{
         build_request_range_for_keyspace, keyspace_prefix_len, post_to_ticdc,
-        send_request_to_store, DISPATCH_CDC_TIMEOUT,
+        send_request_to_store, ResolvedTsStats, DISPATCH_CDC_TIMEOUT,
     },
     wal::{
         StoreTargetAndLag, StoreWalProgresses, UpdateWalResult, WalCache, WalProgressFetcher,
@@ -136,6 +136,8 @@ pub struct ReplicationWorker {
     working_dir: PathBuf,
     stop: bool,
     force_stop: ForceStop,
+
+    resolved_ts_stats: Option<ResolvedTsStats>,
 }
 
 impl Drop for ReplicationWorker {
@@ -262,6 +264,7 @@ impl ReplicationWorker {
             working_dir: worker_dir,
             stop: false,
             force_stop,
+            resolved_ts_stats: Default::default(),
         };
         let env = Arc::new(
             EnvBuilder::new()
@@ -377,6 +380,8 @@ impl ReplicationWorker {
                 if let Err(err) = self.maybe_update_merged_engine() {
                     error!("update merged engine error"; "err" => ?err);
                 }
+
+                self.report_metrics();
             }
         }
     }
@@ -1010,6 +1015,7 @@ impl ReplicationWorker {
         let merged_store_id = self.merged_store_id();
         info!("send_resolved_ts"; "last_update_time" => self.last_update_ts, "store" => merged_store_id);
         self.resolved_regions.clear();
+        let mut stats = ResolvedTsStats::default();
         for (&region_id, delegate) in &mut self.region_delegates {
             try_force_stop_err!(self);
             tikv_util::set_current_region(region_id);
@@ -1021,11 +1027,17 @@ impl ReplicationWorker {
                     "{} send_resolved_ts: region not in merged_engine, skip",
                     tag
                 );
+                stats.record_unresolved_region(region_id);
                 continue;
             };
             if !region_is_synced {
                 info!("{} send_resolved_ts: region is not synced, skip", tag;
                     "progress" => ?self.merged_engine.get_region_progress(region_id));
+                if let Some(ts) = delegate.resolved_ts() {
+                    stats.record_resolved_region(region_id, ts);
+                } else {
+                    stats.record_unresolved_region(region_id);
+                }
                 continue;
             }
 
@@ -1034,9 +1046,12 @@ impl ReplicationWorker {
                 .as_mut()
                 .and_then(|r| r.resolve(self.last_update_ts))
             else {
+                stats.record_unresolved_region(region_id);
                 continue;
             };
-            debug!("{}:{} send_resolved_ts: {}", merged_store_id, region_id, ts);
+            stats.record_resolved_region(region_id, ts);
+
+            debug!("{} send_resolved_ts: {}", tag, ts);
             for (req_key, req_info) in delegate.requests.iter_mut() {
                 if req_info.resolved_ts != ts && req_info.state.is_initialized() {
                     debug_assert!(req_info.resolved_ts < ts);
@@ -1072,6 +1087,8 @@ impl ReplicationWorker {
                     "conn" => ?req_key.conn_id, "request" => %req_key.request_id);
             }
         }
+
+        self.resolved_ts_stats = Some(stats);
         Ok(())
     }
 
@@ -1957,6 +1974,37 @@ impl ReplicationWorker {
     fn store_working_dir(&self, store_id: u64) -> PathBuf {
         self.working_dir.join(store_id.to_string())
     }
+
+    fn report_metrics(&self) {
+        CDC_ENDPOINT_PENDING_TASKS.set(self.rx.len() as i64);
+        CDC_CAPTURED_REGION_COUNT.set(self.region_delegates.len() as i64);
+
+        if let Some(stats) = &self.resolved_ts_stats {
+            CDC_REGION_RESOLVE_STATUS_GAUGE_VEC
+                .with_label_values(&["resolved"])
+                .set(stats.resolved_regions as i64);
+            CDC_REGION_RESOLVE_STATUS_GAUGE_VEC
+                .with_label_values(&["unresolved"])
+                .set(stats.unresolved_regions as i64);
+            if !stats.min_ts.is_zero() {
+                CDC_MIN_RESOLVED_TS_REGION.set(stats.min_ts_region_id as i64);
+                CDC_MIN_RESOLVED_TS.set(stats.min_ts.physical() as i64);
+                let lag = self
+                    .last_update_ts
+                    .physical()
+                    .saturating_sub(stats.min_ts.physical());
+                CDC_MIN_RESOLVED_TS_LAG.set(lag as i64);
+                let lag_in_secs = lag as f64 / 1000.0;
+                CDC_RESOLVED_TS_GAP_HISTOGRAM.observe(lag_in_secs);
+            }
+        }
+
+        REP_SYNC_WAL_TS.set(self.last_update_ts.physical() as i64);
+        let lag = TimeStamp::physical_now().saturating_sub(self.last_update_ts.physical());
+        REP_SYNC_WAL_TS_LAG.set(lag as i64);
+        let lag_in_secs = lag as f64 / 1000.0;
+        REP_SYNC_WAL_TS_LAG_HISTOGRAM.observe(lag_in_secs);
+    }
 }
 
 struct RegisterHandler {
@@ -2094,8 +2142,16 @@ impl ScanLocksHandler {
     }
 
     fn scan_locks(&mut self) {
+        REP_SCAN_LOCKS_TASKS.with_label_values(&["total"]).inc();
+        REP_SCAN_LOCKS_TASKS.with_label_values(&["ongoing"]).inc();
+        tikv_util::defer!({
+            REP_SCAN_LOCKS_TASKS.with_label_values(&["ongoing"]).dec();
+        });
+
         let region_id = self.snap_access.get_id();
         let res = self.scan_locks_impl();
+        let label = if res.is_ok() { "finished" } else { "abort" };
+        REP_SCAN_LOCKS_TASKS.with_label_values(&[label]).inc();
         let locks = res.map(|_| mem::take(&mut self.locks));
         let snap_version = self.snap_access.get_mem_table_snap_version();
         if let Err(e) = self.sender.send(CdcMsg::ScanLocksResult {
@@ -2112,6 +2168,8 @@ impl ScanLocksHandler {
         let tag = self.snap_access.get_tag();
         info!("{} cdc scan locks", tag; "keyspace" => keyspace_id);
 
+        let start_time = Instant::now_coarse();
+        let mut bytes = 0;
         let keyspace_prefix_len = keyspace_prefix_len(keyspace_id);
         let mut lock_iter = self
             .snap_access
@@ -2132,12 +2190,17 @@ impl ScanLocksHandler {
                 lock_iter.next();
                 continue;
             }
-            self.locks
-                .push((lock_iter.key()[keyspace_prefix_len..].to_vec(), lock.ts));
+            let key = lock_iter.key()[keyspace_prefix_len..].to_vec();
+            bytes += key.len() as u64 + mem::size_of::<TimeStamp>() as u64;
+            self.locks.push((key, lock.ts));
             lock_iter.next();
         }
 
-        info!("{} cdc scan locks", tag; "keyspace" => keyspace_id, "locks" => self.locks.len());
+        let takes = start_time.saturating_elapsed();
+        info!("{} cdc scan locks", tag; "keyspace" => keyspace_id,
+            "locks" => self.locks.len(), "bytes" => bytes, "takes" => ?takes);
+        REP_SCAN_LOCKS_BYTES.inc_by(bytes);
+        REP_SCAN_LOCKS_DURATION_HISTOGRAM.observe(takes.as_secs_f64());
         Ok(())
     }
 }

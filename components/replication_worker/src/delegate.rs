@@ -6,7 +6,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use cdc::{CdcEvent, Conn, ConnId, Sink};
+use cdc::{
+    metrics::{CDC_PENDING_BYTES_GAUGE, CDC_PENDING_LOCKS_BYTES_GAUGE},
+    CdcEvent, Conn, ConnId, Sink,
+};
 use collections::HashMap;
 use kvengine::{table::SnapVersion, IdVer, ShardTag};
 use kvproto::cdcpb;
@@ -125,7 +128,9 @@ impl RequestState {
     pub(crate) fn must_push_pending(&mut self, event: cdcpb::Event) {
         match self {
             Self::Initializing { events, bytes, .. } => {
-                *bytes = bytes.saturating_add(event.compute_size() as u64);
+                let event_size = event.compute_size();
+                CDC_PENDING_BYTES_GAUGE.add(event_size as i64);
+                *bytes = bytes.saturating_add(event_size as u64);
                 events.push(event);
             }
             Self::Initialized => unreachable!(),
@@ -134,8 +139,20 @@ impl RequestState {
 
     pub(crate) fn must_finish_initialize(&mut self) -> (Vec<cdcpb::Event>, u64 /* bytes */) {
         match mem::replace(self, RequestState::Initialized) {
-            RequestState::Initializing { events, bytes, .. } => (events, bytes),
+            RequestState::Initializing {
+                ref mut events,
+                bytes,
+                ..
+            } => (mem::take(events), bytes),
             RequestState::Initialized => unreachable!(),
+        }
+    }
+}
+
+impl Drop for RequestState {
+    fn drop(&mut self) {
+        if let RequestState::Initializing { bytes, .. } = self {
+            CDC_PENDING_BYTES_GAUGE.sub(*bytes as i64);
         }
     }
 }
@@ -262,8 +279,9 @@ impl RegionResolver {
             RegionResolver::Resolver(resolver) => resolver.track_lock(start_ts, key, None),
             RegionResolver::Pending { locks, bytes, .. } => {
                 // TODO: handle OOM.
-                *bytes =
-                    bytes.saturating_add(key.len() as u64 + mem::size_of::<TimeStamp>() as u64);
+                let lock_size = key.len() as u64 + mem::size_of::<TimeStamp>() as u64;
+                CDC_PENDING_LOCKS_BYTES_GAUGE.add(lock_size as i64);
+                *bytes = bytes.saturating_add(lock_size);
                 locks.push(PendingLock::Track { key, start_ts });
             }
         }
@@ -274,7 +292,9 @@ impl RegionResolver {
         match self {
             RegionResolver::Resolver(resolver) => resolver.untrack_lock(key, None),
             RegionResolver::Pending { locks, bytes, .. } => {
-                *bytes = bytes.saturating_add(key.len() as u64);
+                let lock_size = key.len() as u64;
+                CDC_PENDING_LOCKS_BYTES_GAUGE.add(lock_size as i64);
+                *bytes = bytes.saturating_add(lock_size);
                 locks.push(PendingLock::Untrack { key: key.to_vec() });
             }
         }
@@ -296,10 +316,11 @@ impl RegionResolver {
         }
     }
 
-    pub fn to_resolver(self, region_id: u64, tracked_locks: Vec<(Vec<u8>, TimeStamp)>) -> Self {
-        let Self::Pending { locks, .. } = self else {
+    pub fn to_resolver(mut self, region_id: u64, tracked_locks: Vec<(Vec<u8>, TimeStamp)>) -> Self {
+        let Self::Pending { locks, .. } = &mut self else {
             unreachable!();
         };
+        let locks = mem::take(locks);
 
         let mut resolver = Resolver::new(region_id);
         for (key, ts) in tracked_locks {
@@ -321,6 +342,14 @@ impl RegionResolver {
         }
 
         Self::Resolver(resolver)
+    }
+}
+
+impl Drop for RegionResolver {
+    fn drop(&mut self) {
+        if let Self::Pending { bytes, .. } = self {
+            CDC_PENDING_LOCKS_BYTES_GAUGE.sub(*bytes as i64);
+        }
     }
 }
 
@@ -446,5 +475,13 @@ impl RegionDelegate {
                 warn!("{} unsubscribe: send event failed", self.tag(); "request" => %request_id, "err" => ?e);
             }
         }
+    }
+
+    pub(crate) fn resolved_ts(&self) -> Option<TimeStamp> {
+        // Initialized requests should have the same resolved_ts.
+        self.requests
+            .values()
+            .filter_map(|x| (!x.resolved_ts.is_zero()).then_some(x.resolved_ts))
+            .next()
     }
 }

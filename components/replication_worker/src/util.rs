@@ -11,6 +11,7 @@ use kvproto::cdcpb::ChangeDataRequest;
 use pd_client::RpcClient;
 use security::{HttpClient, SecurityConfig, SecurityManager};
 use tikv_util::{codec::bytes::decode_bytes, error, info, time::Instant, warn};
+use txn_types::TimeStamp;
 
 use crate::{ticdc_util, ticdc_util::TiCdcError, Error};
 
@@ -147,5 +148,29 @@ pub(crate) fn keyspace_prefix_len(keyspace_id: u32) -> usize {
         KEYSPACE_PREFIX_LEN
     } else {
         0
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ResolvedTsStats {
+    pub(crate) resolved_regions: usize,
+    /// Count of regions are still scanning locks.
+    pub(crate) unresolved_regions: usize,
+
+    pub(crate) min_ts: TimeStamp,
+    pub(crate) min_ts_region_id: u64,
+}
+
+impl ResolvedTsStats {
+    pub(crate) fn record_resolved_region(&mut self, region_id: u64, resolved_ts: TimeStamp) {
+        self.resolved_regions += 1;
+        if self.min_ts.is_zero() || self.min_ts > resolved_ts {
+            self.min_ts = resolved_ts;
+            self.min_ts_region_id = region_id;
+        }
+    }
+
+    pub(crate) fn record_unresolved_region(&mut self, _region_id: u64) {
+        self.unresolved_regions += 1;
     }
 }

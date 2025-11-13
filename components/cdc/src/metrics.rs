@@ -110,16 +110,21 @@ lazy_static! {
     .unwrap();
     pub static ref CDC_MIN_RESOLVED_TS_LAG: IntGauge = register_int_gauge!(
         "tikv_cdc_min_resolved_ts_lag",
-        "The lag between the minimal resolved ts and the current ts"
+        "The lag between the minimal resolved ts and the current ts (milliseconds)"
     ).unwrap();
     pub static ref CDC_MIN_RESOLVED_TS: IntGauge = register_int_gauge!(
         "tikv_cdc_min_resolved_ts",
-        "The minimal resolved ts for current regions"
+        "The minimal resolved ts for current regions (milliseconds)"
     )
     .unwrap();
     pub static ref CDC_PENDING_BYTES_GAUGE: IntGauge = register_int_gauge!(
         "tikv_cdc_pending_bytes",
-        "Bytes in memory of a pending region"
+        "Bytes in memory of a pending register",
+    )
+    .unwrap();
+    pub static ref CDC_PENDING_LOCKS_BYTES_GAUGE: IntGauge = register_int_gauge!(
+        "tikv_cdc_pending_locks_bytes",
+        "Bytes of locks in memory of a pending region",
     )
     .unwrap();
     pub static ref CDC_CAPTURED_REGION_COUNT: IntGauge = register_int_gauge!(
