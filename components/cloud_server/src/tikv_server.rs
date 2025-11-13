@@ -78,7 +78,7 @@ use tikv::{
     read_pool::{build_tokio_pool, build_yatp_read_pool},
     server::{
         config::Config as ServerConfig, lock_manager::LockManager, raftkv::ReplicaReadLockChecker,
-        CPU_CORES_QUOTA_GAUGE, DEFAULT_CLUSTER_ID, GRPC_THREAD_PREFIX,
+        CPU_CORES_QUOTA_GAUGE, DEFAULT_CLUSTER_ID, GRPC_THREAD_PREFIX, MEMORY_LIMIT_GAUGE,
     },
     storage::{
         mvcc::MvccConsistencyCheckObserver,
@@ -125,6 +125,7 @@ use crate::{
 const RESERVED_OPEN_FDS: u64 = 1000;
 
 const DEFAULT_METRICS_FLUSH_INTERVAL: Duration = Duration::from_millis(10_000);
+const DEFAULT_CGROUP_MONITOR_INTERVAL: Duration = Duration::from_secs(10);
 
 const ZSTD_COMPRESSION_LEVEL_FOR_LOCAL: &str = "3";
 
@@ -462,6 +463,7 @@ impl TikvServer {
         self.register_services();
         let fetcher = self.init_io_utility();
         self.init_metrics_flusher(fetcher);
+        self.init_cgroup_monitor();
         self.run_server(server_config);
         self.run_status_server();
         if !self.config.server.push_metrics_addr.is_empty()
@@ -1096,6 +1098,26 @@ impl TikvServer {
                 RaftEngine::flush_metrics(&raft, "raft");
                 io_metrics.flush(now);
                 mem_trace_metrics.flush(now);
+            });
+    }
+
+    fn init_cgroup_monitor(&mut self) {
+        let mut last_cpu_quota: f64 = 0.0;
+        let mut last_memory_limit: u64 = 0;
+        self.background_worker
+            .spawn_interval_task(DEFAULT_CGROUP_MONITOR_INTERVAL, move || {
+                let cpu_quota = SysQuota::cpu_cores_quota_current();
+                if cpu_quota != last_cpu_quota {
+                    info!("cpu quota set to {:?}", cpu_quota);
+                    CPU_CORES_QUOTA_GAUGE.set(cpu_quota);
+                    last_cpu_quota = cpu_quota;
+                }
+                let memory_limit = SysQuota::memory_limit_in_bytes_current();
+                if memory_limit != last_memory_limit {
+                    info!("memory limit set to {:?}", memory_limit);
+                    MEMORY_LIMIT_GAUGE.set(memory_limit as f64);
+                    last_memory_limit = memory_limit;
+                }
             });
     }
 

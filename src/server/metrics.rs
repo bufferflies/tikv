@@ -458,6 +458,11 @@ lazy_static! {
         &["type"],
     )
     .unwrap();
+    pub static ref MEMORY_LIMIT_GAUGE: Gauge = register_gauge!(
+        "tikv_server_memory_quota_bytes",
+        "Total memory bytes quota for TiKV server"
+    )
+    .unwrap();
 }
 
 lazy_static! {
