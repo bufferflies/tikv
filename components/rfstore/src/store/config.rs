@@ -330,6 +330,12 @@ pub struct Config {
     /// less than the threshold, can the raftstore supply service.
     #[online_config(hidden)]
     pub min_pending_apply_region_count: u64,
+
+    /// Time window after startup to check if the store is still busy
+    /// applying raft logs before being marked as ready.
+    #[online_config(hidden)]
+    pub store_busy_apply_check_window: ReadableDuration,
+
     // =====================================================================
     // Extra configs for Next-gen
     // ---------------------------------------------------------------------
@@ -530,6 +536,7 @@ impl Default for Config {
             update_gc_safe_point_interval: ReadableDuration::secs(60),
             raft_log_gc_no_kv_count: 4,
             min_pending_apply_region_count: 10,
+            store_busy_apply_check_window: ReadableDuration::hours(3),
         }
     }
 }

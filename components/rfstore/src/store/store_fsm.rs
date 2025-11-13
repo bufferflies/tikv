@@ -69,10 +69,6 @@ use crate::{
 
 pub const PENDING_MSG_CAP: usize = 100;
 const UNREACHABLE_BACKOFF: Duration = Duration::from_secs(10);
-// When the store is started, it will take some time for applying pending
-// snapshots and delayed raft logs. Before the store is ready, it will report
-// `is_busy` to PD, so PD will not schedule operators to the store.
-const STORE_CHECK_PENDING_APPLY_DURATION: Duration = Duration::from_secs(5 * 60);
 // The minimal percent of region finishing applying pending logs.
 // Only when the count of regions which finish applying logs exceed
 // the threshold, can the raftstore supply service.
@@ -1017,17 +1013,16 @@ impl<'a> StoreMsgHandler<'a> {
         if completed_apply_peers_count.is_none() || region_count == 0 {
             return false;
         }
-
         let completed_apply_peers_count = completed_apply_peers_count.unwrap();
-        let during_starting_stage = {
+        let during_check_window = {
             (time::get_time().sec as u32).saturating_sub(start_ts_sec)
-                <= STORE_CHECK_PENDING_APPLY_DURATION.as_secs() as u32
+                <= self.ctx.cfg.store_busy_apply_check_window.as_secs() as u32
         };
         // If the store is busy in handling applying logs when starting, it should not
         // be treated as a normal store for balance. Only when the store is
         // almost idle (no more pending regions on applying logs), it can be
         // regarded as the candidate for balancing leaders.
-        if during_starting_stage {
+        if during_check_window {
             let completed_target_count = (|| {
                 fail_point!("on_mock_store_completed_target_count", |_| 0);
                 std::cmp::max(
