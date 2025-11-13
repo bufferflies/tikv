@@ -117,4 +117,8 @@ impl Preprocessor {
     pub(crate) fn mut_shard_meta(&mut self) -> Option<&mut ShardMeta> {
         self.shard_meta.as_mut()
     }
+
+    pub(crate) fn pending_merge_state(&self) -> Option<&MergeState> {
+        self.pending_merge_state.as_ref()
+    }
 }

@@ -33,7 +33,7 @@ use kvproto::{
     metapb,
     metapb::Peer,
     raft_cmdpb::AdminRequest,
-    raft_serverpb::{PeerState, RegionLocalState, StoreIdent},
+    raft_serverpb::{MergeState, PeerState, RegionLocalState, StoreIdent},
 };
 use log_wrappers::Value as LogValue;
 use native_br::{
@@ -321,6 +321,7 @@ pub struct MergedEngine {
     preprocessors: HashMap<u64, Preprocessor>,
     appliers: HashMap<u64, Applier>,
     delay_destroy_regions: HashSet<u64 /* region_id */>,
+    pending_merge_states: HashMap<u64 /* source_region_id */, MergeState>,
     peer_receiver: mpsc::Receiver<(u64, Box<PeerMsg>)>,
     _store_receiver: mpsc::Receiver<StoreMsg>, // applier never send store message.
     router: RaftRouter,
@@ -367,6 +368,7 @@ impl MergedEngine {
                 &manifest.uncommitted_entries
             ))
         };
+        let mut pending_merge_states = HashMap::default();
         let mut preprocessors = HashMap::default();
         for (region_id, _) in raft.get_region_peer_map() {
             if region_id == 0 || tombstone_regions.contains(&region_id) {
@@ -383,6 +385,9 @@ impl MergedEngine {
                 debug_assert!(false);
                 continue;
             };
+            if let Some(merge_state) = processor.pending_merge_state() {
+                pending_merge_states.insert(region_id, merge_state.clone());
+            }
             preprocessors.insert(region_id, processor);
         }
         let io_rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
@@ -425,6 +430,7 @@ impl MergedEngine {
             preprocessors,
             appliers: HashMap::default(),
             delay_destroy_regions,
+            pending_merge_states,
             _store_receiver: store_receiver,
             peer_receiver,
             router,
@@ -1210,7 +1216,6 @@ impl MergedEngine {
         let mut update_queue = VecDeque::from(updated_regions.to_vec());
         let mut merged_wb = rfengine::WriteBatch::new();
         let mut merged_wb_estimated_size = 0;
-        let mut finished_regions = HashSet::default();
         let mut continuous_postpone_count = 0;
         while let Some(updated_region) = update_queue.pop_front() {
             try_force_stop_err!(self);
@@ -1218,14 +1223,11 @@ impl MergedEngine {
             let res = self.sync_region(
                 ctx,
                 updated_region,
-                &finished_regions,
                 &mut merged_wb,
                 &mut merged_wb_estimated_size,
             )?;
             match &res {
-                SyncRegionResult::Finished => {
-                    finished_regions.insert(updated_region);
-                }
+                SyncRegionResult::Finished => {}
                 SyncRegionResult::Postponed => {
                     update_queue.push_back(updated_region);
                 }
@@ -1261,7 +1263,6 @@ impl MergedEngine {
         &mut self,
         ctx: &mut SyncRegionsContext<'_>,
         updated_region: u64,
-        finished_regions: &HashSet<u64>,
         merged_wb: &mut rfengine::WriteBatch,
         merged_wb_estimated_size: &mut usize,
     ) -> Result<SyncRegionResult> {
@@ -1313,17 +1314,19 @@ impl MergedEngine {
             let mut entry = raft_log.to_entry();
             let mut admin_req = update_entry(&mut entry, merged_store_id);
             if let Some(admin) = admin_req.as_ref() {
-                if admin.has_commit_merge() {
-                    let commit_merge = admin.get_commit_merge();
-                    if !finished_regions.contains(&commit_merge.get_source().get_id()) {
-                        // need to process source region first.
+                match Self::sync_region_admin_req(
+                    tag,
+                    updated_region,
+                    admin,
+                    log_index,
+                    &mut self.pending_merge_states,
+                ) {
+                    SyncRegionResult::Finished => {}
+                    SyncRegionResult::Postponed => {
                         res = SyncRegionResult::Postponed;
-                        info!(
-                            "{} commit merge postponed at {}, low {}, high {}",
-                            tag, log_index, low, high
-                        );
                         break;
                     }
+                    _ => unreachable!(),
                 }
             }
             let err = preprocessor_ref.preprocess_committed_entry(ctx, &entry);
@@ -1332,6 +1335,15 @@ impl MergedEngine {
                 // clear failed command.
                 admin_req = None;
                 entry.set_data(Bytes::new());
+            } else if let Some(admin) = admin_req.as_ref() {
+                Self::sync_region_admin_req_post_preprocess(
+                    tag,
+                    updated_region,
+                    admin,
+                    log_index,
+                    &preprocessor_ref,
+                    &mut self.pending_merge_states,
+                );
             }
             preprocessor_ref
                 .raft_state
@@ -1426,6 +1438,74 @@ impl MergedEngine {
         preprocessor.sync_region();
 
         Ok(res)
+    }
+
+    fn sync_region_admin_req(
+        tag: PeerTag,
+        updated_region: u64,
+        admin: &AdminRequest,
+        log_index: u64,
+        pending_merge_states: &mut HashMap<u64 /* source_region_id */, MergeState>,
+    ) -> SyncRegionResult {
+        if admin.has_commit_merge() {
+            let commit_merge = admin.get_commit_merge();
+            let source = commit_merge.get_source();
+            let source_ready = if let HashMapEntry::Occupied(e) =
+                pending_merge_states.entry(source.id)
+            {
+                let merge_state = e.get();
+                let matched = merge_state.get_target().id == updated_region
+                    && merge_state.commit == commit_merge.commit;
+                if matched {
+                    debug!("{} sync_region: commit merge at {}", tag, log_index;
+                        "source" => source.id, "commit" => commit_merge.commit);
+                    e.remove();
+                } else {
+                    debug!("{} sync_region: commit merge not match", tag;
+                        "source" => source.id, "commit" => commit_merge.commit, "merge_state" => ?merge_state);
+                }
+                matched
+            } else {
+                false
+            };
+            if !source_ready {
+                // need to process source region first.
+                info!("{} sync_region: commit merge postponed at {}", tag, log_index;
+                    "source" => source.id, "commit" => commit_merge.commit);
+                return SyncRegionResult::Postponed;
+            }
+        }
+        SyncRegionResult::Finished
+    }
+
+    fn sync_region_admin_req_post_preprocess(
+        tag: PeerTag,
+        updated_region: u64,
+        admin: &AdminRequest,
+        log_index: u64,
+        preprocessor_ref: &PreprocessRef<'_>,
+        pending_merge_states: &mut HashMap<u64 /* source_region_id */, MergeState>,
+    ) {
+        if admin.has_prepare_merge() {
+            if let Some(merge_state) = preprocessor_ref.pending_merge_state.as_ref() {
+                debug!("{} sync_region: prepare merge at {}", tag, log_index; "merge_state" => ?merge_state);
+                pending_merge_states.insert(updated_region, merge_state.clone());
+            } else {
+                // Prepare merge is denied. Ref: `preprocess_prepare_merge`.
+                debug!("{} sync_region: skip prepare merge at {}", tag, log_index);
+            }
+        } else if admin.has_rollback_merge() {
+            if let Some(merge_state) = preprocessor_ref.pending_merge_state.as_ref() {
+                // Should not happen. Rollback merge must succeed.
+                // Ref: `preprocess_rollback_merge`.
+                warn!("{} sync_region: skip rollback merge at {}", tag, log_index; "merge_state" => ?merge_state);
+                debug_assert!(false);
+            } else {
+                let origin = pending_merge_states.remove(&updated_region);
+                debug!("{} sync_region: rollback merge at {}", tag, log_index; "merge_state" => ?origin);
+                debug_assert!(origin.is_some());
+            }
+        }
     }
 
     fn handle_prepared_msgs(&mut self, ctx: &mut SyncRegionsContext<'_>) {
@@ -1539,6 +1619,7 @@ impl MergedEngine {
             self.appliers.remove(&region_id);
             self.kv.remove_shard(region_id);
             self.preprocessors.remove(&region_id);
+            self.pending_merge_states.remove(&region_id);
             let progress = self.region_progresses.get_mut(&region_id).unwrap();
             progress.truncated_index = TruncatedIndex {
                 truncated_index: TRUNCATE_ALL_INDEX,
