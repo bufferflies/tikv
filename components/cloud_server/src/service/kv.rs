@@ -211,12 +211,57 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         TxnHeartBeatRequest,
         TxnHeartBeatResponse
     );
-    handle_request!(
-        kv_check_txn_status,
-        future_check_txn_status,
-        CheckTxnStatusRequest,
-        CheckTxnStatusResponse
-    );
+    fn kv_check_txn_status(
+        &mut self,
+        ctx: RpcContext<'_>,
+        req: CheckTxnStatusRequest,
+        sink: UnarySink<CheckTxnStatusResponse>,
+    ) {
+        forward_unary!(self.proxy, kv_check_txn_status, ctx, req, sink);
+        let begin_instant = Instant::now_coarse();
+
+        let peer = ctx.peer();
+        let resp = future_check_txn_status(&self.storage, req.clone());
+        let task = async move {
+            let resp = resp.await?;
+            if resp.region_error.is_none() {
+                info!("execution of check_txn_status";
+                    "req_peer" => %peer,
+                    "lock_ts" => req.lock_ts,
+                    "req_caller_start_ts" => req.caller_start_ts,
+                    "req_primary" => &log_wrappers::Value::key(&req.primary_key),
+                    "req_current_ts" => req.current_ts,
+                    "req_rollback_if_not_exist" => req.rollback_if_not_exist,
+                    "req_force_sync_commit" => req.force_sync_commit,
+                    "req_resolving_pessimistic_lock" => req.resolving_pessimistic_lock,
+                    "req_verify_is_primary" => req.verify_is_primary,
+                    "req_is_txn_file" => req.is_txn_file,
+                    "resp_region_error" => ?resp.region_error,
+                    "resp_error" => ?resp.error,
+                    "resp_lock_ttl" => resp.lock_ttl,
+                    "resp_commit_version" => resp.commit_version,
+                    "resp_action" => ?resp.action,
+                    "resp_lock_info" => ?resp.lock_info,
+                );
+            }
+            sink.success(resp).await?;
+            GRPC_MSG_HISTOGRAM_STATIC
+                .kv_check_txn_status
+                .observe(begin_instant.saturating_elapsed().as_secs_f64());
+            ServerResult::Ok(())
+        }
+        .map_err(|e| {
+            debug!( "kv rpc failed" ;
+                "request" => stringify ! ( kv_check_txn_status ) ,
+                "err" => ? e
+            );
+            GRPC_MSG_FAIL_COUNTER.kv_check_txn_status.inc();
+        })
+        .map(|_| ());
+
+        ctx.spawn(task);
+    }
+
     handle_request!(
         kv_check_secondary_locks,
         future_check_secondary_locks,
