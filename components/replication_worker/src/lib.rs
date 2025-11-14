@@ -90,8 +90,9 @@ pub struct ReplicationWorkerConfig {
 
     /// The interval to sync changes from WAL.
     pub sync_interval: ReadableDuration,
-
     pub report_region_interval: ReadableDuration,
+    pub local_file_gc_timeout: ReadableDuration,
+
     pub merged_engine: MergedEngineConfig,
 }
 
@@ -109,6 +110,7 @@ impl Default for ReplicationWorkerConfig {
             incr_scan_concurrency_limit: 1024,
             sync_interval: ReadableDuration::secs(3),
             report_region_interval: ReadableDuration::secs(60),
+            local_file_gc_timeout: ReadableDuration::secs(600), // 10m
             merged_engine: Default::default(),
         }
     }

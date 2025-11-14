@@ -126,7 +126,7 @@ impl RaftBatchSystem {
         let mut gc_worker = LazyWorker::new("gc-worker");
         let gc_runner = GcRunner::new(
             engines.kv.clone(),
-            importer.clone(),
+            Some(importer.clone()),
             cfg.value().local_file_gc_timeout.0,
         );
         gc_worker.start(gc_runner);

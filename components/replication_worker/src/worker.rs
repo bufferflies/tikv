@@ -46,7 +46,7 @@ use native_br::{
 };
 use pd_client::{util::get_all_stores_except_tiflash, PdClient, RegionStat};
 use rfengine::{RfEngine, MIN_EPOCH_ROTATE_LEN, TRUNCATE_ALL_INDEX};
-use rfstore::store::ApplyContext;
+use rfstore::store::{ApplyContext, GcRunner};
 use security::{HttpClient, SecurityConfig};
 use serde_json::{json, Value};
 use tikv_util::{
@@ -56,7 +56,7 @@ use tikv_util::{
     mpsc::{Receiver, SendError, Sender},
     thd_name,
     time::Instant,
-    trace, warn,
+    trace, warn, worker,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use txn_types::{LockType, TimeStamp};
@@ -116,6 +116,7 @@ pub struct ReplicationWorker {
     health_service: Option<HealthService>,
     kube_api: Option<Arc<KubeApi>>,
     runtime: tokio::runtime::Runtime,
+    gc_worker: Option<worker::Worker>,
 
     keyspaces: HashMap<u32, Keyspace>,
     cdc_addrs: Arc<dashmap::DashMap<u32, String>>,
@@ -228,6 +229,10 @@ impl ReplicationWorker {
             .enable_all()
             .build()
             .unwrap();
+        let gc_runner = GcRunner::new(merged_engine.get_kv(), None, config.local_file_gc_timeout.0);
+        let gc_worker = worker::Builder::new("rep-gc-worker").create();
+        gc_worker.start_with_timer("rep-gc-worker", gc_runner);
+
         let interval = config.report_region_interval.0;
         let update_stores_wal_size_limit = config.update_stores_wal_size_limit.as_memory_size();
         let incr_scan_concurrency_limit =
@@ -255,6 +260,7 @@ impl ReplicationWorker {
             grpc_server: None,
             health_service: None,
             kube_api,
+            gc_worker: Some(gc_worker),
             keyspaces,
             cdc_addrs,
             conns: Default::default(),
@@ -314,6 +320,9 @@ impl ReplicationWorker {
         let _ = self.grpc_server.take();
         if let Some(health_service) = self.health_service.take() {
             health_service.shutdown();
+        }
+        if let Some(gc_worker) = self.gc_worker.take() {
+            gc_worker.stop()
         }
     }
 

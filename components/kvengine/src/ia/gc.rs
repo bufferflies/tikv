@@ -96,6 +96,7 @@ pub struct IaGcRunner {
 
 impl IaGcRunner {
     pub fn new(config: IaGcConfig, ia_mgr: IaManager, meta_paths: Arc<Vec<PathBuf>>) -> Self {
+        info!("create IaGcRunner"; "config" => ?config);
         let segment_paths = ia_mgr.main_store_paths().to_vec();
         Self {
             config,

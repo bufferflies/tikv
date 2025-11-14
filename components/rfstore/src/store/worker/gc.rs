@@ -19,7 +19,10 @@ use kvengine::{
 };
 use kvproto::import_sstpb::SwitchMode;
 use sst_importer::SstImporter;
-use tikv_util::{error, info, warn, worker::Runnable};
+use tikv_util::{
+    error, info, warn,
+    worker::{Runnable, RunnableWithTimer},
+};
 
 const SCHEMA_FILE_SUFFIX: &str = ".schema";
 const VECTOR_INDEX_FILE_SUFFIX: &str = ".vec";
@@ -49,7 +52,7 @@ pub struct CollectFileIds {
 pub struct GcRunner {
     kv: kvengine::Engine,
     ia_gc_runner: Option<IaGcRunner>,
-    importer: Arc<SstImporter>,
+    importer: Option<Arc<SstImporter>>,
     timeout: Duration,
 }
 
@@ -66,8 +69,24 @@ impl Runnable for GcRunner {
     }
 }
 
+impl RunnableWithTimer for GcRunner {
+    fn on_timeout(&mut self) {
+        self.run(GcTask {});
+    }
+
+    fn get_interval(&self) -> Duration {
+        // Use `timeout / 2` for easier.
+        self.timeout / 2
+    }
+}
+
 impl GcRunner {
-    pub fn new(kv: kvengine::Engine, importer: Arc<SstImporter>, timeout: Duration) -> Self {
+    // The GC interval is `timeout / 2` if run with timer.
+    pub fn new(
+        kv: kvengine::Engine,
+        importer: Option<Arc<SstImporter>>,
+        timeout: Duration,
+    ) -> Self {
         let ia_gc_runner = match kv.ia_ctx() {
             IaCtx::Enabled(ia_mgr, meta_paths) => {
                 #[cfg_attr(not(feature = "textexport"), allow(unused_mut))]
@@ -254,16 +273,19 @@ impl GcRunner {
     }
 
     fn gc_importer_files(&self) -> sst_importer::Result<()> {
-        if self.importer.get_mode() == SwitchMode::Import {
+        let Some(importer) = &self.importer else {
+            return Ok(());
+        };
+        if importer.get_mode() == SwitchMode::Import {
             return Ok(());
         }
         let store_id = self.kv.get_engine_id();
-        let ssts = self.importer.list_ssts()?;
+        let ssts = importer.list_ssts()?;
         for sst_meta in &ssts {
-            let path = self.importer.get_path(sst_meta);
+            let path = importer.get_path(sst_meta);
             let meta = fs::metadata(&path)?;
             if self.is_old_file(meta) {
-                self.importer.delete(sst_meta)?;
+                importer.delete(sst_meta)?;
                 let mut uuid = String::new();
                 for &b in sst_meta.get_uuid() {
                     write!(uuid, "{:X}", b).expect("Unable to write");
