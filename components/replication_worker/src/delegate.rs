@@ -3,7 +3,10 @@
 use std::{
     fmt, mem,
     result::Result as StdResult,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use cdc::{
@@ -80,17 +83,53 @@ impl fmt::Debug for RequestKey {
     }
 }
 
+/// The unique ID to identify an initialization.
+///
+/// Other fields (e.g., snap_version + checkpoint_ts) is not safe enough
+/// when the sink is failed and the initialization is retried, and
+/// previous initialization is still running.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitId(u64);
+
+lazy_static::lazy_static! {
+    static ref INIT_ID_ALLOC: AtomicU64 = AtomicU64::new(1);
+}
+
+fn alloc_init_id() -> InitId {
+    InitId(INIT_ID_ALLOC.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Used to cancel register task when delegate is dropped.
+#[derive(Clone)]
+pub(crate) struct InitAlive(Arc<AtomicBool>);
+
+impl Default for InitAlive {
+    fn default() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+}
+
+impl InitAlive {
+    #[allow(dead_code)]
+    pub(crate) fn ok(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn drop(&self) {
+        self.0.store(false, Ordering::Relaxed)
+    }
+}
+
 pub(crate) enum RequestState {
+    Blocked {
+        request: cdcpb::ChangeDataRequest,
+        init_id: InitId,
+    },
     Initializing {
         events: Vec<cdcpb::Event>,
         bytes: u64,
-
-        /// The unique ID to identify an initialization.
-        ///
-        /// Other fields (e.g., snap_version + checkpoint_ts) is not safe enough
-        /// when the sink is failed and the initialization is retried, and
-        /// previous initialization is still running.
-        init_id: u64,
+        init_id: InitId,
+        alive: InitAlive,
     },
     Initialized,
 }
@@ -98,10 +137,16 @@ pub(crate) enum RequestState {
 impl fmt::Debug for RequestState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            RequestState::Blocked { request, init_id } => f
+                .debug_struct("Blocked")
+                .field("request", &request)
+                .field("init_id", init_id)
+                .finish(),
             RequestState::Initializing {
                 events,
                 bytes,
                 init_id,
+                ..
             } => f
                 .debug_struct("Initializing")
                 .field("events", &events.len())
@@ -114,10 +159,38 @@ impl fmt::Debug for RequestState {
 }
 
 impl RequestState {
-    pub(crate) fn is_initializing_with_id(&self, req_init_id: u64) -> bool {
+    pub(crate) fn new_initializing() -> Self {
+        RequestState::Initializing {
+            events: vec![],
+            bytes: 0,
+            init_id: alloc_init_id(),
+            alive: InitAlive::default(),
+        }
+    }
+
+    pub(crate) fn is_initializing(&self) -> bool {
+        matches!(self, RequestState::Initializing { .. })
+    }
+
+    pub(crate) fn is_initializing_with_id(&self, req_init_id: InitId) -> bool {
         match self {
             RequestState::Initializing { init_id, .. } => *init_id == req_init_id,
             _ => false,
+        }
+    }
+
+    pub(crate) fn get_init_id(&self) -> Option<InitId> {
+        match self {
+            RequestState::Blocked { init_id, .. } => Some(*init_id),
+            RequestState::Initializing { init_id, .. } => Some(*init_id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn get_initializing_alive(&self) -> Option<InitAlive> {
+        match self {
+            RequestState::Initializing { alive, .. } => Some(alive.clone()),
+            _ => None,
         }
     }
 
@@ -133,7 +206,7 @@ impl RequestState {
                 *bytes = bytes.saturating_add(event_size as u64);
                 events.push(event);
             }
-            Self::Initialized => unreachable!(),
+            _ => unreachable!(),
         }
     }
 
@@ -144,14 +217,55 @@ impl RequestState {
                 bytes,
                 ..
             } => (mem::take(events), bytes),
-            RequestState::Initialized => unreachable!(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn new_blocked(request: cdcpb::ChangeDataRequest) -> Self {
+        RequestState::Blocked {
+            request,
+            init_id: alloc_init_id(),
+        }
+    }
+
+    pub(crate) fn can_resume_by_resolved_ts(&self, resolved_ts: TimeStamp) -> Option<InitId> {
+        match self {
+            RequestState::Blocked { request, init_id } => {
+                (request.checkpoint_ts <= resolved_ts.into_inner()).then_some(*init_id)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_blocked_with_id(&self, req_init_id: InitId) -> bool {
+        match self {
+            RequestState::Blocked { init_id, .. } => *init_id == req_init_id,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn must_resume(&mut self) -> (cdcpb::ChangeDataRequest, InitId, InitAlive) {
+        let init_id = self.get_init_id().unwrap();
+        let alive = InitAlive::default();
+        let new_state = RequestState::Initializing {
+            events: vec![],
+            bytes: 0,
+            init_id,
+            alive: alive.clone(),
+        };
+        match mem::replace(self, new_state) {
+            RequestState::Blocked {
+                ref mut request, ..
+            } => (mem::take(request), init_id, alive),
+            _ => unreachable!(),
         }
     }
 }
 
 impl Drop for RequestState {
     fn drop(&mut self) {
-        if let RequestState::Initializing { bytes, .. } = self {
+        if let RequestState::Initializing { bytes, alive, .. } = self {
+            alive.drop();
             CDC_PENDING_BYTES_GAUGE.sub(*bytes as i64);
         }
     }
@@ -195,11 +309,8 @@ impl RegionRequests {
         &mut self,
         request: &cdcpb::ChangeDataRequest,
         conn_id: ConnId,
-    ) -> StdResult<u64 /* init_id */, String /* current_state */> {
-        lazy_static::lazy_static! {
-            static ref INIT_ID_ALLOC: AtomicU64 = AtomicU64::new(1);
-        }
-
+        checkpoint_resolved: bool,
+    ) -> StdResult<(InitId, Option<InitAlive>), String /* current_state */> {
         let request_id: RequestId = request.get_request_id().into();
         let request_key = RequestKey::new(conn_id, request_id);
         if let Some(request_info) = self.inner.get(&request_key) {
@@ -208,20 +319,23 @@ impl RegionRequests {
         }
 
         let (start_key, end_key) = build_request_range(request);
-        let init_id = INIT_ID_ALLOC.fetch_add(1, Ordering::Relaxed);
+
+        let state = if checkpoint_resolved {
+            RequestState::new_initializing()
+        } else {
+            RequestState::new_blocked(request.clone())
+        };
+        let init_id = state.get_init_id().unwrap();
+        let init_alive_opt = state.get_initializing_alive();
         let request_info = RequestInfo {
             start_key,
             end_key,
             resolved_ts: TimeStamp::zero(),
-            state: RequestState::Initializing {
-                events: vec![],
-                bytes: 0,
-                init_id,
-            },
+            state,
         };
         let old = self.inner.insert(request_key, request_info);
         debug_assert!(old.is_none());
-        Ok(init_id)
+        Ok((init_id, init_alive_opt))
     }
 
     pub(crate) fn check_duplicated(
@@ -483,5 +597,20 @@ impl RegionDelegate {
             .values()
             .filter_map(|x| (!x.resolved_ts.is_zero()).then_some(x.resolved_ts))
             .next()
+    }
+
+    pub(crate) fn mut_blocked_request(
+        &mut self,
+        conn_id: ConnId,
+        request_id: RequestId,
+        init_id: InitId,
+    ) -> Option<&mut RequestInfo> {
+        let req_info = self
+            .requests
+            .get_mut(&RequestKey::new(conn_id, request_id))?;
+        req_info
+            .state
+            .is_blocked_with_id(init_id)
+            .then_some(req_info)
     }
 }

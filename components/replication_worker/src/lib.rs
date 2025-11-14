@@ -57,7 +57,7 @@ use tikv_util::{
 use txn_types::TimeStamp;
 pub use worker::ReplicationWorker;
 
-use crate::delegate::RequestId;
+use crate::delegate::{InitId, RequestId};
 
 pub(crate) const K8S_SERVICE_HOST: &str = "KUBERNETES_SERVICE_HOST";
 
@@ -194,11 +194,17 @@ pub enum CdcMsg {
         conn_id: ConnId,
         snap_access: SnapAccess,
     },
+    ResumeRegister {
+        conn_id: ConnId,
+        request_id: RequestId,
+        snap_access: SnapAccess,
+        init_id: InitId,
+    },
     RegisterResult {
         event: cdcpb::Event,
         conn_id: ConnId,
         initialized: bool,
-        init_id: u64,
+        init_id: InitId,
     },
     SpawnScanLocks {
         snap_access: SnapAccess,

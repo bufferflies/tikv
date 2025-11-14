@@ -60,7 +60,9 @@ use txn_types::{LockType, TimeStamp};
 
 use crate::{
     apply_observer::{is_index_key, CdcApplyObserver, RegionEvents},
-    delegate::{RegionDelegate, RegionResolver, RequestId, RequestKey},
+    delegate::{
+        InitAlive, InitId, RegionDelegate, RegionResolver, RequestId, RequestInfo, RequestKey,
+    },
     kube::{KeyspaceKubeService, KubeApi},
     metrics::*,
     provisioned::KeyspaceProvisionedService,
@@ -439,6 +441,15 @@ impl ReplicationWorker {
                 let res = self.handler_spawn_register_handler(request, conn_id, snap_access);
                 self.handle_result(res, "spawn_register_handler");
             }
+            CdcMsg::ResumeRegister {
+                conn_id,
+                request_id,
+                snap_access,
+                init_id,
+            } => {
+                tikv_util::set_current_region(snap_access.get_id());
+                self.handle_resume_register(conn_id, request_id, snap_access, init_id);
+            }
             CdcMsg::RegisterResult {
                 event,
                 conn_id,
@@ -619,6 +630,13 @@ impl ReplicationWorker {
         self.conn_regions.insert(conn_id, HashSet::default());
     }
 
+    // The process of register:
+    // 1. Check region existence and epoch.
+    // 2. Flush observer for region.
+    // 3. Get snap access.
+    // 4. Send message to spawn register handler.
+    // 5. In message handler, set state to Initializing.
+    // 6. Spawn register handler.
     fn handle_register(&mut self, request: ChangeDataRequest, conn_id: ConnId) -> Result<()> {
         let region_id = request.region_id;
         let Some(shard) = self.merged_engine.get_kv().get_shard(request.region_id) else {
@@ -729,7 +747,17 @@ impl ReplicationWorker {
             return Ok(());
         }
 
-        let init_id = match delegate.requests.add(&request, conn_id) {
+        // Check if all transactions with `start_ts <= checkpoint_ts` have been
+        // committed.
+        let resolved_ts = delegate.resolver.as_ref().and_then(|x| x.resolved_ts());
+        let checkpoint_resolved = resolved_ts
+            .is_some_and(|resolved_ts| request.checkpoint_ts <= resolved_ts.into_inner());
+
+        let (init_id, init_alive_opt) = match delegate.requests.add(
+            &request,
+            conn_id,
+            checkpoint_resolved,
+        ) {
             Ok(init_id) => init_id,
             Err(current_state) => {
                 info!("{} cdc register: ignore duplicate request", tag;
@@ -737,12 +765,66 @@ impl ReplicationWorker {
                 return Ok(());
             }
         };
-        let mut register_handler =
-            RegisterHandler::new(conn_id, &request, snap_access, init_id, self.tx.clone());
-        debug!("{} cdc register: spawn handler", tag; "req" => ?request, "conn" => ?conn_id);
+
+        // `init_alive_opt` is `Some` when state is `Initializing`.
+        if let Some(init_alive) = init_alive_opt {
+            debug_assert!(checkpoint_resolved);
+            let mut register_handler = RegisterHandler::new(
+                conn_id,
+                &request,
+                snap_access,
+                init_id,
+                init_alive,
+                self.tx.clone(),
+            );
+            debug!("{} cdc register: spawn handler", tag; "req" => ?request, "conn" => ?conn_id);
+            self.runtime
+                .spawn(async move { register_handler.handle_register().await });
+        } else {
+            info!("{} cdc register: blocked", tag;
+                "req" => ?request, "conn" => ?conn_id, "resolved_ts" => ?resolved_ts);
+        }
+        Ok(())
+    }
+
+    fn handle_resume_register(
+        &mut self,
+        conn_id: ConnId,
+        request_id: RequestId,
+        snap_access: SnapAccess,
+        init_id: InitId,
+    ) {
+        let tag = snap_access.get_tag();
+        let region_id = snap_access.get_id();
+
+        let Some(request_info) =
+            self.mut_blocked_request_info(region_id, conn_id, request_id, init_id)
+        else {
+            info!("{} handle_resume_register: ignore stale resume", tag;
+                "conn" => ?conn_id, "request" => %request_id, "init_id" => ?init_id);
+            return;
+        };
+
+        let (request, init_id_, init_alive) = request_info.state.must_resume();
+        debug_assert_eq!(init_id, init_id_);
+        debug_assert_eq!(request.region_id, region_id);
+        // Version has been checked in `send_resolved_ts`.
+        debug_assert_eq!(
+            request.get_region_epoch().get_version(),
+            snap_access.get_version()
+        );
+
+        let mut register_handler = RegisterHandler::new(
+            conn_id,
+            &request,
+            snap_access,
+            init_id,
+            init_alive,
+            self.tx.clone(),
+        );
+        debug!("{} cdc register: resume register spawn handler", tag; "req" => ?request, "conn" => ?conn_id);
         self.runtime
             .spawn(async move { register_handler.handle_register().await });
-        Ok(())
     }
 
     fn handle_register_result(
@@ -750,7 +832,7 @@ impl ReplicationWorker {
         event: Event,
         conn_id: ConnId,
         initialized: bool,
-        init_id: u64,
+        init_id: InitId,
     ) -> cdc::Result<()> {
         let request_id: RequestId = event.get_request_id().into();
         let region_id = event.get_region_id();
@@ -769,7 +851,7 @@ impl ReplicationWorker {
         if !request_info.state.is_initializing_with_id(init_id) {
             info!("{} handle_register_result: ignore stale result", tag;
                 "conn" => ?conn_id, "request" => %request_id,
-                "init_id" => init_id, "current" => ?request_info.state);
+                "init_id" => ?init_id, "current" => ?request_info.state);
             return Ok(());
         }
         let Some(conn) = self.conns.get(&conn_id) else {
@@ -1052,15 +1134,53 @@ impl ReplicationWorker {
             stats.record_resolved_region(region_id, ts);
 
             debug!("{} send_resolved_ts: {}", tag, ts);
+            let mut resume_reqs = vec![];
             for (req_key, req_info) in delegate.requests.iter_mut() {
-                if req_info.resolved_ts != ts && req_info.state.is_initialized() {
-                    debug_assert!(req_info.resolved_ts < ts);
-                    self.resolved_regions
-                        .entry((ts, *req_key))
-                        .or_default()
-                        .push(region_id);
-                    req_info.resolved_ts = ts;
+                if req_info.resolved_ts != ts {
+                    if req_info.state.is_initialized() {
+                        debug!("{} send_resolved_ts: advance request resolved_ts: {} -> {}",
+                            tag, req_info.resolved_ts, ts; "req" => ?req_key);
+                        debug_assert!(req_info.resolved_ts < ts);
+                        self.resolved_regions
+                            .entry((ts, *req_key))
+                            .or_default()
+                            .push(region_id);
+                        req_info.resolved_ts = ts;
+                    } else if let Some(init_id) = req_info.state.can_resume_by_resolved_ts(ts) {
+                        resume_reqs.push((*req_key, init_id));
+                    }
                 }
+            }
+
+            // Resume blocked requests.
+            if !resume_reqs.is_empty() {
+                let kv = self.merged_engine.get_kv();
+                // If region not found / version not match, the delegate will be removed later.
+                if let Ok(shard) = kv.get_shard_with_ver(region_id, delegate.region_ver) {
+                    // Flush pending events in observer. Ref `handle_register`.
+                    self.apply_ctx.flush_observer_region(region_id);
+
+                    let snap_access = shard.new_snap_access();
+                    for (req_key, init_id) in resume_reqs {
+                        let conn_id = req_key.conn_id;
+                        let request_id = req_key.request_id;
+                        if self
+                            .tx
+                            .send(CdcMsg::ResumeRegister {
+                                conn_id,
+                                request_id,
+                                snap_access: snap_access.clone(),
+                                init_id,
+                            })
+                            .is_err()
+                        {
+                            // Just warning. The resume will be triggered again in next
+                            // `send_resolved_ts`.
+                            warn!("{} send_resolved_ts: send resume_register message failed", snap_access.get_tag();
+                                "conn" => ?conn_id, "request" => %request_id);
+                        }
+                    }
+                };
             }
         }
 
@@ -1857,7 +1977,7 @@ impl ReplicationWorker {
                         sink_err_requests.push((*req_key, cdc::Error::from(err)));
                         break 'EVENTS_LOOP;
                     }
-                } else {
+                } else if req_info.state.is_initializing() {
                     req_info.state.must_push_pending(event_to_send);
                 }
             }
@@ -2007,6 +2127,21 @@ impl ReplicationWorker {
     }
 }
 
+// Misc helper functions.
+// TODO: move to individual file.
+impl ReplicationWorker {
+    fn mut_blocked_request_info(
+        &mut self,
+        region_id: u64,
+        conn_id: ConnId,
+        request_id: RequestId,
+        init_id: InitId,
+    ) -> Option<&mut RequestInfo> {
+        let delegate = self.region_delegates.get_mut(&region_id)?;
+        delegate.mut_blocked_request(conn_id, request_id, init_id)
+    }
+}
+
 struct RegisterHandler {
     conn_id: ConnId,
     request_id: RequestId,
@@ -2017,7 +2152,7 @@ struct RegisterHandler {
     checkpoint_ts: u64,
     event_rows: Vec<EventRow>,
     initialized: bool,
-    init_id: u64,
+    init_id: InitId,
 }
 
 impl RegisterHandler {
@@ -2025,7 +2160,8 @@ impl RegisterHandler {
         conn_id: ConnId,
         request: &ChangeDataRequest,
         snap_access: SnapAccess,
-        init_id: u64,
+        init_id: InitId,
+        _init_alive: InitAlive,
         sender: Sender<CdcMsg>,
     ) -> Self {
         let keyspace_id = snap_access.get_keyspace_id();
