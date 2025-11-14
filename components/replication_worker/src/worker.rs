@@ -58,6 +58,7 @@ use tikv_util::{
     time::Instant,
     trace, warn,
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use txn_types::{LockType, TimeStamp};
 
 use crate::{
@@ -136,6 +137,7 @@ pub struct ReplicationWorker {
     wal_progress_targets: WalProgressTargets,
     wal_cache: WalCache,
     update_stores_wal_size_limit: u64,
+    incr_scan_concurrency_limit: Arc<Semaphore>,
 
     working_dir: PathBuf,
     stop: bool,
@@ -228,6 +230,8 @@ impl ReplicationWorker {
             .unwrap();
         let interval = config.report_region_interval.0;
         let update_stores_wal_size_limit = config.update_stores_wal_size_limit.as_memory_size();
+        let incr_scan_concurrency_limit =
+            Arc::new(Semaphore::new(config.incr_scan_concurrency_limit));
         for (&keyspace_id, ks) in keyspaces.iter_mut() {
             let raft = merged_engine.get_raft();
             let kv = merged_engine.get_kv();
@@ -265,6 +269,7 @@ impl ReplicationWorker {
             wal_progress_targets: WalProgressTargets::default(),
             wal_cache: WalCache::default(),
             update_stores_wal_size_limit,
+            incr_scan_concurrency_limit,
             working_dir: worker_dir,
             stop: false,
             force_stop,
@@ -783,6 +788,7 @@ impl ReplicationWorker {
                 snap_access,
                 init_id,
                 init_alive,
+                self.incr_scan_concurrency_limit.clone(),
                 self.tx.clone(),
                 sink,
             );
@@ -836,6 +842,7 @@ impl ReplicationWorker {
             snap_access,
             init_id,
             init_alive,
+            self.incr_scan_concurrency_limit.clone(),
             self.tx.clone(),
             sink,
         );
@@ -2164,6 +2171,7 @@ struct RegisterHandler {
     initialized: bool,
     init_id: InitId,
     init_alive: InitAlive,
+    concurrency_limit: Arc<Semaphore>,
 }
 
 impl RegisterHandler {
@@ -2173,6 +2181,7 @@ impl RegisterHandler {
         snap_access: SnapAccess,
         init_id: InitId,
         init_alive: InitAlive,
+        concurrency_limit: Arc<Semaphore>,
         sender: Sender<CdcMsg>,
         sink: cdc::Sink,
     ) -> Self {
@@ -2193,6 +2202,7 @@ impl RegisterHandler {
             initialized: false,
             init_id,
             init_alive,
+            concurrency_limit,
         }
     }
 
@@ -2228,6 +2238,7 @@ impl RegisterHandler {
     async fn handle_register_impl(&mut self) -> Result<()> {
         CDC_SCAN_TASKS.with_label_values(&["total"]).inc();
 
+        let _permit: OwnedSemaphorePermit = self.acquire_permit().await?;
         self.check_alive()?;
 
         CDC_SCAN_TASKS.with_label_values(&["ongoing"]).inc();
@@ -2369,6 +2380,17 @@ impl RegisterHandler {
                 err_opt,
             })
             .is_ok()
+    }
+
+    async fn acquire_permit(&self) -> Result<OwnedSemaphorePermit> {
+        self.concurrency_limit
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                // Semaphore closed, replication worker should be dropped.
+                Error::RegisterCancelled("semaphore closed".into())
+            })
     }
 
     fn check_alive(&self) -> Result<()> {

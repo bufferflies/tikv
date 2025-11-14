@@ -80,6 +80,14 @@ pub struct ReplicationWorkerConfig {
     pub tolerate_store_err: bool,
     pub update_stores_wal_size_limit: AbsoluteOrPercentSize,
 
+    /// The maximum concurrency for incremental scan.
+    ///
+    /// For default value 1024, the maximum memory usage of incremental scan is
+    /// about:
+    ///
+    /// 1152(MB) = 128 * 1MB (in channel) + 1024 * 1MB (waiting for channel).
+    pub incr_scan_concurrency_limit: usize,
+
     /// The interval to sync changes from WAL.
     pub sync_interval: ReadableDuration,
 
@@ -98,6 +106,7 @@ impl Default for ReplicationWorkerConfig {
             namespace: "".to_string(),
             tolerate_store_err: false,
             update_stores_wal_size_limit: AbsoluteOrPercentSize::Percent(20.0),
+            incr_scan_concurrency_limit: 1024,
             sync_interval: ReadableDuration::secs(3),
             report_region_interval: ReadableDuration::secs(60),
             merged_engine: Default::default(),
