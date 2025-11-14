@@ -12,31 +12,22 @@ use crate::{
 
 impl RfEngineCore {
     pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<u64> {
+        let timer = tikv_util::time::Instant::now_coarse();
         let mut current_epoch = manifest.epoch_id + 1;
         while wal_exists(self.wal_dir(), current_epoch + 1) {
             current_epoch += 1;
         }
         self.current_epoch_id.store(current_epoch, Ordering::SeqCst);
-        let offload_epoch = calc_offload_epoch(
-            self.in_mem_rlog_epoch_count,
-            &self.current_epoch_id,
-            &self.compacted_epoch,
-        );
+        // NOTE: we do not load peer rlogs file into memory here anymore since
+        // raft log read them from disk on demand.
         for (&peer_id, peer_meta) in &manifest.peers {
-            info!("load peer {}: {:?}", peer_id, peer_meta.files);
+            info!(
+                "load peer {}, truncated_idex: {}, files: {:?}",
+                peer_id, peer_meta.truncated_idx, peer_meta.files
+            );
             let peer_ref = self.get_or_init_peer_data(peer_id, peer_meta.region_id);
             let mut peer_data = peer_ref.write().unwrap();
             peer_data.meta.merge(peer_meta, false);
-            drop(peer_data);
-            drop(peer_ref);
-            for file in rlog_files_to_load(&peer_meta.files, offload_epoch) {
-                self.load_raft_log_file(
-                    peer_id,
-                    peer_meta.region_id,
-                    file.first_index,
-                    file.last_index,
-                )?;
-            }
         }
         let mut epoch_id = manifest.epoch_id + 1;
         let mut wal_offset = 0;
@@ -58,6 +49,7 @@ impl RfEngineCore {
             let (offset, _) = self.load_wal_file(epoch_id, false)?;
             wal_offset = offset;
         }
+        info!("rfengine loads peers and wal finished"; "duration" => ?timer.saturating_elapsed(), "peers" => manifest.peers.len());
         let mut writer = self.writer.lock().unwrap();
         writer.open_file(epoch_id, wal_offset)?;
         Ok(async_offset)
@@ -176,6 +168,7 @@ impl RfEngineCore {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn load_raft_log_file(
         &mut self,
         peer_id: u64,
@@ -216,6 +209,7 @@ pub(crate) fn is_last_wal(dir: &Path, epoch_id: u32) -> bool {
 /// compatibility, files without an epoch should also be loaded, unless they
 /// appear before a file that is definitively offloadable (i.e., with `epoch_id
 /// > 0 && epoch_id <= offload_epoch`).
+#[allow(dead_code)]
 pub(crate) fn rlog_files_to_load(
     rlog_files: &VecDeque<PeerFile>,
     offload_epoch: u32,

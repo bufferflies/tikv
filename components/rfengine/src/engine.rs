@@ -679,6 +679,7 @@ impl RfEngineCore {
         let mut total_mem_size = 0;
         let mut total_mem_entries = 0;
         let mut total_offloaded_entries = 0;
+        let mut total_num_logs = 0;
         let mut peers_stats = self
             .peers
             .iter()
@@ -687,6 +688,18 @@ impl RfEngineCore {
                 total_mem_size += peer_stats.size;
                 total_mem_entries += peer_stats.num_logs;
                 total_offloaded_entries += peer_stats.num_logs_offloaded;
+                // peer_stats.num_logs is the log number in memory, so we use
+                // first_index and last_index to calculate the real log count.
+                let truncated_index = self.get_truncated_index(*data.key());
+                let last_index = self.get_last_index(*data.key());
+                let num_logs = match (truncated_index, last_index) {
+                    // trancated_index is inited with 0, but the min raft truncated index should be
+                    // `RAFT_INIT_LOG_INDEX`,
+                    (Some(t), Some(l)) => l - t.max(RAFT_INIT_LOG_INDEX),
+                    // last_index is 0 means there is no raft logs,
+                    _ => 0,
+                };
+                total_num_logs += num_logs;
                 peer_stats
             })
             .collect::<Vec<PeerStats>>();
@@ -721,6 +734,7 @@ impl RfEngineCore {
             num_files,
             pending_compaction_wals,
             top_10_size_peers: peers_stats,
+            total_num_logs,
         }
     }
 
@@ -1660,6 +1674,7 @@ pub struct EngineStats {
     pub disk_size: u64,
     pub pending_compaction_wals: u8,
     pub top_10_size_peers: Vec<PeerStats>,
+    pub total_num_logs: u64,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -1750,10 +1765,14 @@ mod tests {
         for idx in 1..=1050_u64 {
             let mut wb = WriteBatch::new();
             for peer_id in 1..=10_u64 {
-                if peer_id == 1 && (idx > 100 && idx < 900) {
-                    continue;
-                }
                 let region_id = peer_id + 1;
+                if peer_id == 1 {
+                    if idx > 100 && idx < 900 {
+                        continue;
+                    } else if idx == 900 {
+                        wb.truncate_raft_log(peer_id, region_id, 899);
+                    }
+                }
                 wb.append_raft_log(peer_id, region_id, &make_log_data(idx, 128));
                 let (key, val) = make_state_kv(1, idx);
                 wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
@@ -1828,11 +1847,13 @@ mod tests {
                 let old_data = old_entries_map.get(new_data_ref.key()).unwrap();
                 assert_eq!(
                     old_data.raft_logs.first_index(),
-                    new_data.raft_logs.first_index()
+                    engine.get_truncated_index(*new_data_ref.key()).unwrap() + 1,
+                    "peer: {}",
+                    *new_data_ref.key(),
                 );
                 assert_eq!(
                     old_data.raft_logs.last_index(),
-                    new_data.raft_logs.last_index()
+                    engine.get_last_index(*new_data_ref.key()).unwrap(),
                 );
                 for i in new_data.raft_logs.first_index()..=new_data.raft_logs.last_index() {
                     let entry = new_data.raft_logs.get(i).unwrap();

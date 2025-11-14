@@ -927,7 +927,7 @@ mod tests {
             assert_eq!(new_epoch, epoch);
             assert_eq!(new_file_off, file_off);
             let new_stats = engine.get_engine_stats();
-            assert_eq!(new_stats.total_mem_entries, engine_stats.total_mem_entries);
+            assert_eq!(new_stats.total_num_logs, engine_stats.total_num_logs);
         }
     }
 }
