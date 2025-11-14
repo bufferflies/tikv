@@ -2214,9 +2214,10 @@ impl Default for CoprReadPoolConfig {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Debug, OnlineConfig)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, OnlineConfig)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub struct ReadPoolConfig {
     #[online_config(submodule)]
     pub unified: UnifiedReadPoolConfig,

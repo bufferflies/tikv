@@ -66,7 +66,7 @@ use txn_types::TimeStamp;
 
 use crate::{
     command_process_read, command_process_write,
-    read_pool::ReadPoolHandle,
+    read_pool::{ReadPoolError, ReadPoolHandle},
     server::lock_manager::waiter_manager,
     storage::{
         config::Config,
@@ -92,7 +92,7 @@ use crate::{
             flow_controller::{FlowControlHelper, FlowController},
             latch::Lock,
             region_latch::GlobalLatches,
-            sched_pool::{tls_collect_query, tls_collect_scan_details},
+            sched_pool::{tls_collect_query, tls_collect_scan_details, SchedPool},
             txn_status_cache::TxnStatusCache,
             Error, ErrorInner, ProcessResult,
         },
@@ -112,6 +112,33 @@ const IN_MEMORY_PESSIMISTIC_LOCK: Feature = Feature::require(6, 0, 0);
 pub const LAST_CHANGE_TS: Feature = Feature::require(6, 5, 0);
 
 type SVec<T> = SmallVec<[T; 4]>;
+
+/// Scheduler pool that can be either merged (using ReadPoolHandle)
+/// or separated (using dedicated SchedPool).
+#[derive(Clone)]
+pub enum SchedulerPool {
+    /// Merged mode: scheduler uses the unified read pool.
+    Merged(ReadPoolHandle),
+    /// Separated mode: scheduler uses its own dedicated pool.
+    Separated(SchedPool),
+}
+
+impl SchedulerPool {
+    /// Spawn a future on the scheduler pool.
+    /// Returns an error if the pool is too busy.
+    pub fn spawn<F>(&self, future: F, priority: CommandPri, cid: u64) -> Result<(), ReadPoolError>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        match self {
+            SchedulerPool::Merged(handle) => handle.spawn(future, priority, cid),
+            SchedulerPool::Separated(pool) => {
+                // Propagate spawn errors (e.g., pool queue full)
+                pool.spawn(future).map_err(ReadPoolError::from)
+            }
+        }
+    }
+}
 
 /// Task is a running command.
 pub(super) struct Task {
@@ -270,7 +297,7 @@ struct SchedulerInner<L: LockManager> {
     sched_pending_write_threshold: usize,
 
     // worker pool
-    worker_pool: ReadPoolHandle,
+    worker_pool: SchedulerPool,
 
     // background pool, introduced for deadline check tasks
     background_pool: Option<Arc<tokio::runtime::Runtime>>,
@@ -480,7 +507,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         resource_tag_factory: ResourceTagFactory,
         quota_limiter: Arc<QuotaLimiter>,
         feature_gate: FeatureGate,
-        read_pool_handle: ReadPoolHandle,
+        scheduler_pool: SchedulerPool,
     ) -> Self {
         let t = Instant::now_coarse();
         let mut task_slots = Vec::with_capacity(TASKS_SLOTS_NUM);
@@ -518,7 +545,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             engine: engine.get_kvengine(),
             running_write_bytes: AtomicUsize::new(0).into(),
             sched_pending_write_threshold: config.scheduler_pending_write_threshold.0 as usize,
-            worker_pool: read_pool_handle,
+            worker_pool: scheduler_pool,
             background_pool,
             lock_mgr,
             concurrency_manager,
@@ -749,7 +776,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     }
 
     // pub for test
-    pub fn get_sched_pool(&self) -> &ReadPoolHandle {
+    pub fn get_sched_pool(&self) -> &SchedulerPool {
         &self.inner.worker_pool
     }
 
@@ -2153,7 +2180,7 @@ mod tests {
                 ResourceTagFactory::new_for_test(),
                 Arc::new(QuotaLimiter::default()),
                 latest_feature_gate(),
-                new_read_pool_handle(engine.clone()),
+                SchedulerPool::Merged(new_read_pool_handle(engine.clone())),
             ),
             engine,
         )
@@ -2193,7 +2220,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
-            read_pool,
+            SchedulerPool::Merged(read_pool),
         );
 
         // Spawn a long-running task in the background pool to verify it gets shut down
@@ -2262,7 +2289,7 @@ mod tests {
                 ResourceTagFactory::new_for_test(),
                 Arc::new(QuotaLimiter::default()),
                 latest_feature_gate(),
-                read_pool,
+                SchedulerPool::Merged(read_pool),
             );
 
             // Spawn a background task
@@ -2441,7 +2468,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
-            read_pool,
+            SchedulerPool::Merged(read_pool),
         );
 
         let mut lock = Lock::new(0, &[Key::from_raw(b"b")]);
@@ -2549,7 +2576,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
-            read_pool,
+            SchedulerPool::Merged(read_pool),
         );
 
         // Spawn a task that sleeps for 500ms to occupy the pool. The next request
@@ -2615,7 +2642,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
-            read_pool,
+            SchedulerPool::Merged(read_pool),
         );
 
         let mut req = CheckTxnStatusRequest::default();
@@ -2685,7 +2712,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             latest_feature_gate(),
-            read_pool,
+            SchedulerPool::Merged(read_pool),
         );
 
         let mut lock = Lock::new(0, &[Key::from_raw(b"b")]);
@@ -2750,7 +2777,7 @@ mod tests {
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             feature_gate.clone(),
-            read_pool,
+            SchedulerPool::Merged(read_pool),
         );
         // Use sync mode if pipelined_pessimistic_lock is false.
         assert_eq!(scheduler.pessimistic_lock_mode(), PessimisticLockMode::Sync);

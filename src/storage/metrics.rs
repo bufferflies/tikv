@@ -487,6 +487,31 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
+    pub static ref SCHED_TOKIO_POOL_MEAN_FIRST_POLL_DELAY: Gauge = register_gauge!(
+        "tikv_scheduler_tokio_pool_mean_first_poll_delay_seconds",
+        "Mean time from task spawn to first poll (schedule wait time) for scheduler tokio pool"
+    )
+    .unwrap();
+    pub static ref SCHED_TOKIO_POOL_FIRST_POLL_COUNT: IntCounter = register_int_counter!(
+        "tikv_scheduler_tokio_pool_first_poll_total",
+        "Total number of tasks polled for first time in scheduler tokio pool"
+    )
+    .unwrap();
+    pub static ref SCHED_TOKIO_POOL_MEAN_IDLE_DURATION: Gauge = register_gauge!(
+        "tikv_scheduler_tokio_pool_mean_idle_duration_seconds",
+        "Mean time tasks spent idle waiting on external events (I/O) for scheduler tokio pool"
+    )
+    .unwrap();
+    pub static ref SCHED_TOKIO_POOL_MEAN_SCHEDULED_DURATION: Gauge = register_gauge!(
+        "tikv_scheduler_tokio_pool_mean_scheduled_duration_seconds",
+        "Mean time tasks spent waiting to be polled after being woken for scheduler tokio pool"
+    )
+    .unwrap();
+    pub static ref SCHED_TOKIO_POOL_MEAN_POLL_DURATION: Gauge = register_gauge!(
+        "tikv_scheduler_tokio_pool_mean_poll_duration_seconds",
+        "Mean time tasks spent executing (being polled) for scheduler tokio pool"
+    )
+    .unwrap();
     pub static ref SCHED_THROTTLE_TIME: Histogram =
         register_histogram!(
             "tikv_scheduler_throttle_duration_seconds",

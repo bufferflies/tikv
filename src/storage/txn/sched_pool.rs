@@ -3,7 +3,10 @@
 use std::{
     cell::RefCell,
     mem,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use collections::HashMap;
@@ -13,8 +16,8 @@ use pd_client::{Feature, FeatureGate};
 use prometheus::local::*;
 use raftstore::store::WriteStats;
 use tikv_util::{
-    sys::SysQuota,
-    yatp_pool::{FuturePool, PoolTicker, YatpPoolBuilder},
+    sys::{thread::ThreadBuildWrapper, SysQuota},
+    yatp_pool::{self, FuturePool, PoolTicker, YatpPoolBuilder},
 };
 
 use crate::storage::{
@@ -42,8 +45,14 @@ thread_local! {
 }
 
 #[derive(Clone)]
-pub struct SchedPool {
-    pub pool: FuturePool,
+pub enum SchedPool {
+    Yatp {
+        pool: FuturePool,
+    },
+    Tokio {
+        runtime: Arc<tokio::runtime::Runtime>,
+        task_monitor: tokio_metrics::TaskMonitor,
+    },
 }
 
 #[derive(Clone)]
@@ -58,7 +67,7 @@ impl<R: FlowStatsReporter> PoolTicker for SchedTicker<R> {
 }
 
 impl SchedPool {
-    pub fn new<E: Engine, R: FlowStatsReporter>(
+    pub fn new_yatp<E: Engine, R: FlowStatsReporter>(
         engine: E,
         pool_size: usize,
         reporter: R,
@@ -88,7 +97,89 @@ impl SchedPool {
                 tls_flush(&reporter);
             })
             .build_future_pool();
-        SchedPool { pool }
+        SchedPool::Yatp { pool }
+    }
+
+    pub fn new_tokio<E: Engine>(
+        engine: E,
+        pool_size: usize,
+        feature_gate: FeatureGate,
+        name_prefix: &str,
+    ) -> Self {
+        let engine = Arc::new(Mutex::new(engine));
+        let thread_name_prefix = name_prefix.to_string();
+        let props = tikv_util::thread_group::current_properties();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .thread_name_fn(move || {
+                static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+                let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+                format!("{}-{}", thread_name_prefix, id)
+            })
+            .worker_threads(pool_size)
+            .after_start_wrapper(move || {
+                let engine = engine.lock().unwrap().clone();
+                set_tls_engine(engine);
+                set_io_type(IoType::ForegroundWrite);
+                TLS_FEATURE_GATE.with(|c| *c.borrow_mut() = feature_gate.clone());
+                tikv_util::thread_group::set_properties(props.clone());
+            })
+            .before_stop_wrapper(|| unsafe {
+                destroy_tls_engine::<E>();
+            })
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // Create TaskMonitor for schedule wait time metrics
+        let task_monitor = tokio_metrics::TaskMonitor::new();
+
+        // Spawn background task to collect and export metrics
+        let metrics_task_monitor = task_monitor.clone();
+        runtime.spawn(async move {
+            use std::time::Duration;
+            let mut intervals = metrics_task_monitor.intervals();
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if let Some(metrics) = intervals.next() {
+                    SCHED_TOKIO_POOL_MEAN_FIRST_POLL_DELAY
+                        .set(metrics.mean_first_poll_delay().as_secs_f64());
+                    SCHED_TOKIO_POOL_FIRST_POLL_COUNT.inc_by(metrics.first_poll_count);
+                    SCHED_TOKIO_POOL_MEAN_IDLE_DURATION
+                        .set(metrics.mean_idle_duration().as_secs_f64());
+                    SCHED_TOKIO_POOL_MEAN_SCHEDULED_DURATION
+                        .set(metrics.mean_scheduled_duration().as_secs_f64());
+                    SCHED_TOKIO_POOL_MEAN_POLL_DURATION
+                        .set(metrics.mean_poll_duration().as_secs_f64());
+                }
+            }
+        });
+
+        SchedPool::Tokio {
+            runtime: Arc::new(runtime),
+            task_monitor,
+        }
+    }
+
+    pub fn spawn<F>(&self, future: F) -> Result<(), yatp_pool::Full>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        // TODO: queue depth based backpressure
+        // We want consistent behavior as the merged pool.
+        // We rely solely on the running_write_bytes based backpressure.
+        match self {
+            SchedPool::Yatp { pool } => pool.spawn(future),
+            SchedPool::Tokio {
+                runtime,
+                task_monitor,
+            } => {
+                let future = async move { tikv_util::init_task_local(future).await };
+                // Instrument with tokio-metrics to track schedule wait time
+                let instrumented = task_monitor.instrument(future);
+                runtime.spawn(instrumented);
+                Ok(())
+            }
+        }
     }
 }
 

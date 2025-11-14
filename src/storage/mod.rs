@@ -262,6 +262,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         engine: E,
         config: &Config,
         read_pool: ReadPoolHandle,
+        scheduler_pool: txn::SchedulerPool,
         lock_mgr: L,
         concurrency_manager: ConcurrencyManager,
         dynamic_switches: DynamicConfigs,
@@ -286,7 +287,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
             resource_tag_factory.clone(),
             Arc::clone(&quota_limiter),
             feature_gate,
-            read_pool.clone(),
+            scheduler_pool,
         );
 
         info!("Storage started.");
@@ -3337,10 +3338,12 @@ impl<E: Engine, L: LockManager, F: KvFormat> TestStorageBuilder<E, L, F> {
             None
         };
 
+        let read_pool_handle = ReadPool::from(read_pool).handle();
         Storage::from_engine(
             self.engine,
             &self.config,
-            ReadPool::from(read_pool).handle(),
+            read_pool_handle.clone(),
+            txn::SchedulerPool::Merged(read_pool_handle),
             self.lock_mgr,
             ConcurrencyManager::new(1.into()),
             DynamicConfigs {
@@ -3367,10 +3370,12 @@ impl<E: Engine, L: LockManager, F: KvFormat> TestStorageBuilder<E, L, F> {
             engine.clone(),
         );
 
+        let read_pool_handle = ReadPool::from(read_pool).handle();
         Storage::from_engine(
             engine,
             &self.config,
-            ReadPool::from(read_pool).handle(),
+            read_pool_handle.clone(),
+            txn::SchedulerPool::Merged(read_pool_handle),
             self.lock_mgr,
             ConcurrencyManager::new(1.into()),
             DynamicConfigs {

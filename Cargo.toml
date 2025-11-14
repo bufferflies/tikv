@@ -165,7 +165,8 @@ tikv_kv = { workspace = true }
 tikv_util = { workspace = true }
 time = "0.1"
 tipb = { workspace = true }
-tokio = "=1.25.2"
+tokio = "=1.26.0"
+tokio-metrics = "0.2"
 tokio-openssl = "0.6"
 tokio-timer = { workspace = true }
 toml = "0.5"

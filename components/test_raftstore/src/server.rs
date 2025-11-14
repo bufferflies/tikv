@@ -407,6 +407,7 @@ impl ServerCluster {
             engine,
             &cfg.storage,
             storage_read_pool.handle(),
+            tikv::storage::txn::SchedulerPool::Merged(storage_read_pool.handle()),
             lock_mgr.clone(),
             concurrency_manager.clone(),
             lock_mgr.get_storage_dynamic_configs(),

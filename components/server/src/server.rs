@@ -807,7 +807,8 @@ where
         let storage = create_raft_storage::<_, _, _, F, _>(
             engines.engine.clone(),
             &self.config.storage,
-            storage_read_pool_handle,
+            storage_read_pool_handle.clone(),
+            tikv::storage::txn::SchedulerPool::Merged(storage_read_pool_handle),
             lock_mgr.clone(),
             self.concurrency_manager.clone(),
             lock_mgr.get_storage_dynamic_configs(),

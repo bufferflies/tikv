@@ -64,6 +64,8 @@ pub enum ReadPool {
         running_tasks: IntGauge,
         max_tasks: usize,
         pool_size: usize,
+        task_monitor: tokio_metrics::TaskMonitor,
+        pool_name: String,
     },
 }
 
@@ -97,11 +99,15 @@ impl ReadPool {
                 running_tasks,
                 max_tasks,
                 pool_size,
+                task_monitor,
+                pool_name,
             } => ReadPoolHandle::Tokio {
                 runtime: runtime.handle().clone(),
                 running_tasks: running_tasks.clone(),
                 max_tasks: *max_tasks,
                 pool_size: *pool_size,
+                task_monitor: task_monitor.clone(),
+                pool_name: pool_name.clone(),
             },
         }
     }
@@ -132,6 +138,8 @@ pub enum ReadPoolHandle {
         running_tasks: IntGauge,
         max_tasks: usize,
         pool_size: usize,
+        task_monitor: tokio_metrics::TaskMonitor,
+        pool_name: String,
     },
 }
 
@@ -189,6 +197,7 @@ impl ReadPoolHandle {
                 runtime,
                 running_tasks,
                 max_tasks,
+                task_monitor,
                 ..
             } => {
                 let running_tasks = running_tasks.clone();
@@ -205,7 +214,9 @@ impl ReadPoolHandle {
                     tikv_util::init_task_local(f).await;
                     running_tasks.dec();
                 });
-                runtime.spawn(tracked);
+                // Instrument with tokio-metrics to track schedule wait time
+                let instrumented = task_monitor.instrument(tracked);
+                runtime.spawn(instrumented);
             }
         }
         Ok(())
@@ -396,6 +407,40 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
         .enable_all()
         .build()
         .unwrap();
+
+    // Create TaskMonitor for schedule wait time metrics
+    // TODO: Consider using separate TaskMonitors for different task types
+    // (e.g., storage read, coprocessor, write cmds) for finer-grained debugging.
+    // See tokio-metrics best practices: distinct monitors per task kind.
+    let task_monitor = tokio_metrics::TaskMonitor::new();
+
+    // Spawn background task to collect and export metrics
+    let metrics_task_monitor = task_monitor.clone();
+    let metrics_pool_name = unified_read_pool_name.clone();
+    runtime.spawn(async move {
+        let mut intervals = metrics_task_monitor.intervals();
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if let Some(metrics) = intervals.next() {
+                TOKIO_POOL_MEAN_FIRST_POLL_DELAY
+                    .with_label_values(&[&metrics_pool_name])
+                    .set(metrics.mean_first_poll_delay().as_secs_f64());
+                TOKIO_POOL_FIRST_POLL_COUNT
+                    .with_label_values(&[&metrics_pool_name])
+                    .inc_by(metrics.first_poll_count);
+                TOKIO_POOL_MEAN_IDLE_DURATION
+                    .with_label_values(&[&metrics_pool_name])
+                    .set(metrics.mean_idle_duration().as_secs_f64());
+                TOKIO_POOL_MEAN_SCHEDULED_DURATION
+                    .with_label_values(&[&metrics_pool_name])
+                    .set(metrics.mean_scheduled_duration().as_secs_f64());
+                TOKIO_POOL_MEAN_POLL_DURATION
+                    .with_label_values(&[&metrics_pool_name])
+                    .set(metrics.mean_poll_duration().as_secs_f64());
+            }
+        }
+    });
+
     ReadPool::Tokio {
         runtime,
         running_tasks: UNIFIED_READ_POOL_RUNNING_TASKS
@@ -404,6 +449,8 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
             .max_tasks_per_worker
             .saturating_mul(config.max_thread_count),
         pool_size: config.max_thread_count,
+        task_monitor,
+        pool_name: unified_read_pool_name,
     }
 }
 
@@ -673,6 +720,36 @@ mod metrics {
         pub static ref UNIFIED_READ_POOL_RUNNING_THREADS: IntGaugeVec = register_int_gauge_vec!(
             "tikv_unified_read_pool_thread_count",
             "The number of running threads in the unified read pool",
+            &["name"]
+        )
+        .unwrap();
+        pub static ref TOKIO_POOL_MEAN_FIRST_POLL_DELAY: GaugeVec = register_gauge_vec!(
+            "tikv_tokio_pool_mean_first_poll_delay_seconds",
+            "Mean time from task spawn to first poll (schedule wait time) for tokio pools",
+            &["name"]
+        )
+        .unwrap();
+        pub static ref TOKIO_POOL_FIRST_POLL_COUNT: IntCounterVec = register_int_counter_vec!(
+            "tikv_tokio_pool_first_poll_total",
+            "Total number of tasks polled for first time in tokio pools",
+            &["name"]
+        )
+        .unwrap();
+        pub static ref TOKIO_POOL_MEAN_IDLE_DURATION: GaugeVec = register_gauge_vec!(
+            "tikv_tokio_pool_mean_idle_duration_seconds",
+            "Mean time tasks spent idle waiting on external events (I/O) for tokio pools",
+            &["name"]
+        )
+        .unwrap();
+        pub static ref TOKIO_POOL_MEAN_SCHEDULED_DURATION: GaugeVec = register_gauge_vec!(
+            "tikv_tokio_pool_mean_scheduled_duration_seconds",
+            "Mean time tasks spent waiting to be polled after being woken for tokio pools",
+            &["name"]
+        )
+        .unwrap();
+        pub static ref TOKIO_POOL_MEAN_POLL_DURATION: GaugeVec = register_gauge_vec!(
+            "tikv_tokio_pool_mean_poll_duration_seconds",
+            "Mean time tasks spent executing (being polled) for tokio pools",
             &["name"]
         )
         .unwrap();

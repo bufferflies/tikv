@@ -698,6 +698,8 @@ impl TikvServer {
         let pd_worker = LazyWorker::new("pd-worker");
         let pd_sender = pd_worker.scheduler();
         let flow_reporter = rfstore::store::worker::FlowStatsReporter::new(pd_sender.clone());
+        let flow_reporter_for_scheduler =
+            rfstore::store::worker::FlowStatsReporter::new(pd_sender.clone());
 
         let unified_pool_cfg = &self.config.readpool.unified;
         let unified_read_pool = if unified_pool_cfg.use_tokio {
@@ -768,11 +770,38 @@ impl TikvServer {
         );
 
         let storage_read_pool_handle = unified_read_pool.handle();
+
+        // Build scheduler pool based on configuration
+        let scheduler_pool = if self.config.storage.use_separated_scheduler_pool {
+            // Separated mode: build dedicated scheduler pool
+            let pool = if self.config.storage.scheduler_use_tokio {
+                tikv::storage::txn::sched_pool::SchedPool::new_tokio(
+                    engines.engine.clone(),
+                    self.config.storage.scheduler_worker_pool_size,
+                    self.pd_client.feature_gate().clone(),
+                    "sched-tokio-pool",
+                )
+            } else {
+                tikv::storage::txn::sched_pool::SchedPool::new_yatp(
+                    engines.engine.clone(),
+                    self.config.storage.scheduler_worker_pool_size,
+                    flow_reporter_for_scheduler,
+                    self.pd_client.feature_gate().clone(),
+                    "sched-yatp-pool",
+                )
+            };
+            tikv::storage::txn::SchedulerPool::Separated(pool)
+        } else {
+            // Merged mode: reuse unified read pool
+            tikv::storage::txn::SchedulerPool::Merged(unified_read_pool.handle())
+        };
+
         let reporter = rfstore::store::FlowStatsReporter::new(pd_sender);
         let storage = create_raft_storage::<_, F>(
             engines.engine.clone(),
             &self.config.storage,
             storage_read_pool_handle,
+            scheduler_pool,
             lock_mgr.clone(),
             self.concurrency_manager.clone(),
             lock_mgr.get_storage_dynamic_configs(),

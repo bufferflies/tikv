@@ -40,7 +40,7 @@ pub use self::{
     commands::{Command, RESOLVE_LOCK_BATCH_SIZE},
     latch::{Latches, Lock},
     region_latch::GlobalLatches,
-    scheduler::Scheduler,
+    scheduler::{Scheduler, SchedulerPool},
     store::{
         EntryBatch, FixtureStore, FixtureStoreScanner, Scanner, SnapshotStore, Store, TxnEntry,
         TxnEntryScanner, TxnEntryStore,

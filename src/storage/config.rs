@@ -68,6 +68,10 @@ pub struct Config {
     #[online_config(skip)]
     pub scheduler_pending_write_threshold: ReadableSize,
     #[online_config(skip)]
+    pub use_separated_scheduler_pool: bool,
+    #[online_config(skip)]
+    pub scheduler_use_tokio: bool,
+    #[online_config(skip)]
     // Reserve disk space to make tikv would have enough space to compact when disk is full.
     pub reserve_space: ReadableSize,
     #[online_config(skip)]
@@ -110,6 +114,8 @@ impl Default for Config {
             scheduler_low_priority_worker_pool_size: None,
             scheduler_background_worker_pool_size: 1,
             scheduler_pending_write_threshold: ReadableSize::mb(DEFAULT_SCHED_PENDING_WRITE_MB),
+            use_separated_scheduler_pool: true,
+            scheduler_use_tokio: true,
             reserve_space: ReadableSize::gb(DEFAULT_RESERVED_SPACE_GB),
             reserve_raft_space: ReadableSize::gb(DEFAULT_RESERVED_RAFT_SPACE_GB),
             low_space_threshold: AbsoluteOrPercentSize::Percent(20.),
