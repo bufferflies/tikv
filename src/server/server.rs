@@ -535,6 +535,7 @@ mod tests {
             &cfg.value().clone(),
             cop_read_pool.handle(),
             storage.get_concurrency_manager(),
+            None,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),
             None,

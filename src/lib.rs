@@ -28,20 +28,21 @@
 #![feature(let_chains)]
 #![feature(type_alias_impl_trait)]
 #![feature(impl_trait_in_assoc_type)]
+#![feature(associated_type_bounds)]
+#![feature(assert_matches)]
 
 #[macro_use(fail_point)]
 extern crate fail;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
-extern crate serde_derive;
-#[macro_use]
 extern crate more_asserts;
 #[macro_use]
-extern crate tikv_util;
-
+extern crate serde_derive;
 #[cfg(test)]
 extern crate test;
+#[macro_use]
+extern crate tikv_util;
 
 pub mod config;
 pub mod coprocessor;

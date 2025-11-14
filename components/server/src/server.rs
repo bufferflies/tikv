@@ -903,6 +903,11 @@ where
 
         self.snap_mgr = Some(snap_mgr.clone());
         // Create server
+        let region_info_accessor = if self.config.server.enable_index_lookup_pushdown {
+            Some(self.region_info_accessor.clone())
+        } else {
+            None
+        };
         let server = Server::new(
             node.id(),
             &server_config,
@@ -912,6 +917,7 @@ where
                 &server_config.value(),
                 cop_read_pool_handle,
                 self.concurrency_manager.clone(),
+                region_info_accessor,
                 resource_tag_factory,
                 Arc::clone(&self.quota_limiter),
                 None,

@@ -12,12 +12,13 @@
 #![feature(proc_macro_hygiene)]
 #![feature(specialization)]
 #![feature(const_mut_refs)]
-
-#[macro_use(box_try, warn)]
-extern crate tikv_util;
+#![feature(associated_type_bounds)]
+#![feature(is_sorted)]
 
 #[macro_use(other_err)]
 extern crate tidb_query_common;
+#[macro_use(box_try, warn)]
+extern crate tikv_util;
 
 #[cfg(test)]
 pub use tidb_query_aggr::*;

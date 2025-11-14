@@ -48,6 +48,7 @@ use kvenginepb::TxnFileRef;
 use kvproto::{
     errorpb::Error as ErrorHeader,
     kvrpcpb::{Context, DiskFullOpt, ExtraOp as TxnExtraOp, KeyRange},
+    metapb::{Peer, RegionEpoch},
     raft_cmdpb,
 };
 use pd_client::BucketMeta;
@@ -60,7 +61,7 @@ use txn_types::{Key, PessimisticLock, ReqType, TimeStamp, TxnExtra, Value};
 pub use self::{
     btree_engine::{BTreeEngine, BTreeEngineIterator, BTreeEngineSnapshot},
     cursor::{Cursor, CursorBuilder},
-    mock_engine::{ExpectedWrite, MockEngineBuilder},
+    mock_engine::{ExpectedWrite, MockEngine, MockEngineBuilder},
     raft_extension::{FakeExtension, RaftExtension},
     rocksdb_engine::{RocksEngine, RocksSnapshot},
     stats::{
@@ -312,6 +313,14 @@ impl WriteEvent {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SecondaryRegionOverride {
+    pub region_id: u64,
+    pub region_epoch: RegionEpoch,
+    pub peer: Peer,
+    pub check_term: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SnapContext<'a> {
     pub pb_ctx: &'a Context,
@@ -324,6 +333,15 @@ pub struct SnapContext<'a> {
     pub key_ranges: Vec<KeyRange>,
     // Marks that this read is a FlashbackToVersionReadPhase.
     pub for_flashback: bool,
+    // secondary_region_override overrides some context fields in the `pb_ctx` for the secondary
+    // regions.
+    // The "secondary region" means the regions that are not the source region
+    // in a request.
+    // For example, if a cop-task contains a `IndexLookUp` executor which needs to
+    // access look up the primary rows,
+    // it will set this field to get the secondary region snapshot
+    // in lookup phase.
+    pub secondary_region_override: Option<SecondaryRegionOverride>,
 }
 
 /// Engine defines the common behaviour for a storage engine type.

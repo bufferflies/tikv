@@ -162,6 +162,8 @@ pub struct Config {
     #[online_config(skip)]
     pub enable_request_batch: bool,
     #[online_config(skip)]
+    pub enable_index_lookup_pushdown: bool,
+    #[online_config(skip)]
     pub background_thread_count: usize,
     // If handle time is larger than the threshold, it will print slow log in end point.
     #[online_config(skip)]
@@ -272,6 +274,7 @@ impl Default for Config {
             heavy_load_threshold: 75,
             heavy_load_wait_duration: None,
             enable_request_batch: true,
+            enable_index_lookup_pushdown: false,
             reject_messages_on_memory_ratio: 0.2,
             background_thread_count,
             end_point_slow_log_threshold: ReadableDuration::secs(1),

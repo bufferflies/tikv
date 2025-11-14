@@ -51,7 +51,7 @@ use raftstore::{
     RegionInfoAccessor,
 };
 use thiserror::Error;
-use tikv_kv::{write_modifies, OnAppliedCb, WriteEvent};
+use tikv_kv::{write_modifies, OnAppliedCb, SecondaryRegionOverride, WriteEvent};
 use tikv_util::{
     codec::number::NumberEncoder,
     future::{paired_future_callback, paired_must_called_future_callback},
@@ -154,13 +154,33 @@ where
 }
 
 #[inline]
-pub fn new_request_header(ctx: &Context) -> RaftRequestHeader {
+pub fn new_request_header(
+    ctx: &Context,
+    extra_snap_override: Option<&SecondaryRegionOverride>,
+) -> RaftRequestHeader {
     let mut header = RaftRequestHeader::default();
-    header.set_region_id(ctx.get_region_id());
-    header.set_peer(ctx.get_peer().clone());
-    header.set_region_epoch(ctx.get_region_epoch().clone());
-    if ctx.get_term() != 0 {
-        header.set_term(ctx.get_term());
+    match extra_snap_override {
+        Some(&SecondaryRegionOverride {
+            region_id,
+            ref region_epoch,
+            ref peer,
+            check_term,
+        }) => {
+            header.set_region_id(region_id);
+            header.set_peer(peer.clone());
+            header.set_region_epoch(region_epoch.clone());
+            if let Some(term) = check_term {
+                header.set_term(term);
+            }
+        }
+        _ => {
+            header.set_region_id(ctx.get_region_id());
+            header.set_peer(ctx.get_peer().clone());
+            header.set_region_epoch(ctx.get_region_epoch().clone());
+            if ctx.get_term() != 0 {
+                header.set_term(ctx.get_term());
+            }
+        }
     }
     header.set_sync_log(ctx.get_sync_log());
     header.set_replica_read(ctx.get_replica_read());
@@ -169,7 +189,7 @@ pub fn new_request_header(ctx: &Context) -> RaftRequestHeader {
 
 #[inline]
 pub fn new_flashback_req(ctx: &Context, ty: AdminCmdType) -> RaftCmdRequest {
-    let header = new_request_header(ctx);
+    let header = new_request_header(ctx, None);
     let mut req = RaftCmdRequest::default();
     req.set_header(header);
     req.mut_header()
@@ -455,7 +475,7 @@ where
 
         let reqs: Vec<Request> = batch.modifies.into_iter().map(Into::into).collect();
         let txn_extra = batch.extra;
-        let mut header = new_request_header(ctx);
+        let mut header = new_request_header(ctx, None);
         let mut flags = 0;
         if txn_extra.one_pc {
             flags |= WriteBatchFlags::ONE_PC.bits();
@@ -554,7 +574,7 @@ where
         let begin_instant = Instant::now_coarse();
         let (cb, f) = paired_must_called_future_callback(drop_snapshot_callback);
 
-        let mut header = new_request_header(ctx.pb_ctx);
+        let mut header = new_request_header(ctx.pb_ctx, ctx.secondary_region_override.as_ref());
         let mut flags = 0;
         if ctx.pb_ctx.get_stale_read() && ctx.start_ts.map_or(true, |ts| !ts.is_zero()) {
             let mut data = [0u8; 8];

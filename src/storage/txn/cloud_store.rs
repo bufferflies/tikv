@@ -117,6 +117,11 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
     fn get_read_ts(&self) -> u64 {
         self.start_ts
     }
+
+    #[inline]
+    fn is_check_has_newer_ts_data(&self) -> bool {
+        false
+    }
 }
 
 impl<S: Snapshot> CloudStore<S> {
@@ -248,6 +253,21 @@ impl<S: Snapshot> CloudStore<S> {
             output_delete,
         )
         .await
+    }
+
+    #[cfg(test)]
+    pub fn get_start_ts(&self) -> u64 {
+        self.start_ts
+    }
+
+    #[cfg(test)]
+    pub fn get_by_pass_locks(&self) -> TsSet {
+        self.bypass_locks.clone()
+    }
+
+    #[cfg(test)]
+    pub fn is_fill_cache(&self) -> bool {
+        self.fill_cache
     }
 }
 

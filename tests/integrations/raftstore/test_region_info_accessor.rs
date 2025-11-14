@@ -10,7 +10,7 @@ use kvproto::metapb::Region;
 use raft::StateRole;
 use raftstore::coprocessor::{RangeKey, RegionInfo, RegionInfoAccessor};
 use test_pd_client::PdClientExt;
-use test_raftstore::{configure_for_merge, new_node_cluster, Cluster, NodeCluster};
+use test_raftstore::*;
 use tikv_util::{
     store::{find_peer, new_peer},
     HandyRwLock,

@@ -109,6 +109,7 @@ pub fn init_data_with_details<E: Engine>(
         cfg,
         pool.handle(),
         cm,
+        None,
         ResourceTagFactory::new_for_test(),
         limiter.clone(),
         None,

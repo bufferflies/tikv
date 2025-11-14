@@ -120,6 +120,7 @@ fn test_serde_custom_tikv_config() {
         heavy_load_threshold: 25,
         heavy_load_wait_duration: Some(ReadableDuration::millis(2)),
         enable_request_batch: false,
+        enable_index_lookup_pushdown: false,
         background_thread_count: 999,
         end_point_slow_log_threshold: ReadableDuration::secs(1),
         forward_max_connections_per_address: 5,

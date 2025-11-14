@@ -732,10 +732,16 @@ impl TikvServer {
             .unwrap_or_else(|e| fatal!("failed to bootstrap node id: {}", e));
         info!("store bootstrapped");
 
+        let region_info_accessor = if self.config.server.enable_index_lookup_pushdown {
+            Some(self.region_info_accessor.clone())
+        } else {
+            None
+        };
         let mut copr = coprocessor::Endpoint::new(
             &server_config.value(),
             cop_read_pool_handle,
             self.concurrency_manager.clone(),
+            region_info_accessor,
             resource_tag_factory,
             Arc::new(QuotaLimiter::default()),
             Some(self.overload_protector.clone()),

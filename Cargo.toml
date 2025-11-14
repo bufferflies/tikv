@@ -361,6 +361,7 @@ overload_protector = { path = "components/overload_protector" }
 panic_hook = { path = "components/panic_hook" }
 pd_client = { path = "components/pd_client" }
 profiler = { path = "components/profiler" }
+raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
 raft_log_engine = { path = "components/raft_log_engine" }
 raftstore = { path = "components/raftstore", default-features = false }
 recovery = { path = "components/recovery" }

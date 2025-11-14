@@ -228,6 +228,7 @@ fn init_coprocessor_with_data(
         &tikv::server::Config::default(),
         pool.handle(),
         cm,
+        None,
         tag_factory,
         Arc::new(QuotaLimiter::default()),
         None,

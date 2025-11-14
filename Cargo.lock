@@ -9446,6 +9446,7 @@ dependencies = [
  "paste",
  "prometheus",
  "prometheus-static-metric",
+ "raft",
  "serde_json",
  "thiserror 1.0.44",
  "tikv_util",

@@ -732,6 +732,21 @@ impl RegionInfoAccessor {
         }
     }
 
+    pub fn new_with_regions_for_test(regions: Vec<RegionInfo>) -> Self {
+        let worker = WorkerBuilder::new("test").create();
+        let mut collector = RegionCollector::default();
+        let scheduler = worker.start_with_timer("test", collector.clone());
+        for region in regions {
+            collector.create_region(region.region, region.role);
+        }
+
+        Self {
+            worker,
+            scheduler,
+            collector,
+        }
+    }
+
     /// Stops the `RegionInfoAccessor`. It should be stopped after raftstore.
     pub fn stop(&self) {
         self.scheduler.stop();
@@ -805,6 +820,10 @@ pub trait RegionInfoProvider: Send + Sync {
     fn get_regions_in_range(&self, _start_key: &[u8], _end_key: &[u8]) -> Result<Vec<Region>> {
         unimplemented!()
     }
+
+    fn find_region_info_by_key(&self, _key: &[u8]) -> Option<RegionInfo> {
+        unimplemented!()
+    }
 }
 
 impl RegionInfoProvider for RegionInfoAccessor {
@@ -822,6 +841,10 @@ impl RegionInfoProvider for RegionInfoAccessor {
             return Err(box_err!("Not found region containing {:?}", key));
         };
         Ok(region.region)
+    }
+
+    fn find_region_info_by_key(&self, key: &[u8]) -> Option<RegionInfo> {
+        self.collector.handle_find_region_by_key(key.to_vec())
     }
 
     fn get_regions_in_range(&self, start_key: &[u8], end_key: &[u8]) -> Result<Vec<Region>> {

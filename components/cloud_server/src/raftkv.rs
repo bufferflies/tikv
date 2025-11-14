@@ -56,7 +56,7 @@ use tikv::{
         },
     },
 };
-use tikv_kv::{OnAppliedCb, WriteEvent};
+use tikv_kv::{OnAppliedCb, SecondaryRegionOverride, WriteEvent};
 use tikv_util::{
     callback::must_call, codec::number::NumberEncoder, future::paired_must_called_future_callback,
     time::Instant,
@@ -116,13 +116,33 @@ impl From<Error> for kv::Error {
 }
 
 #[inline]
-pub fn new_request_header(ctx: &Context) -> RaftRequestHeader {
+pub fn new_request_header(
+    ctx: &Context,
+    extra_snap_override: Option<&SecondaryRegionOverride>,
+) -> RaftRequestHeader {
     let mut header = RaftRequestHeader::default();
-    header.set_region_id(ctx.get_region_id());
-    header.set_peer(ctx.get_peer().clone());
-    header.set_region_epoch(ctx.get_region_epoch().clone());
-    if ctx.get_term() != 0 {
-        header.set_term(ctx.get_term());
+    match extra_snap_override {
+        Some(&SecondaryRegionOverride {
+            region_id,
+            ref region_epoch,
+            ref peer,
+            check_term,
+        }) => {
+            header.set_region_id(region_id);
+            header.set_peer(peer.clone());
+            header.set_region_epoch(region_epoch.clone());
+            if let Some(term) = check_term {
+                header.set_term(term);
+            }
+        }
+        _ => {
+            header.set_region_id(ctx.get_region_id());
+            header.set_peer(ctx.get_peer().clone());
+            header.set_region_epoch(ctx.get_region_epoch().clone());
+            if ctx.get_term() != 0 {
+                header.set_term(ctx.get_term());
+            }
+        }
     }
     header.set_sync_log(ctx.get_sync_log());
     header.set_replica_read(ctx.get_replica_read());
@@ -489,7 +509,7 @@ impl Engine for RaftKv {
         let begin_instant = Instant::now_coarse();
         let (cb, f) = paired_must_called_future_callback(drop_snapshot_callback);
 
-        let mut header = new_request_header(ctx.pb_ctx);
+        let mut header = new_request_header(ctx.pb_ctx, ctx.secondary_region_override.as_ref());
         let mut flags = 0;
         if ctx.pb_ctx.get_stale_read() && ctx.start_ts.map_or(true, |ts| !ts.is_zero()) {
             let mut data = [0u8; 8];
