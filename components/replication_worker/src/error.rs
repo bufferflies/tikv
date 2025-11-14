@@ -31,6 +31,8 @@ pub enum Error {
         conn_id: ConnId,
         request_id: RequestId,
     },
+    #[error("register cancelled: {0}")]
+    RegisterCancelled(String),
     #[error("other error {0}")]
     OtherError(#[from] Box<dyn std::error::Error + Sync + Send>),
 

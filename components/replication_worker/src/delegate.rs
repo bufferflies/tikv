@@ -110,7 +110,6 @@ impl Default for InitAlive {
 }
 
 impl InitAlive {
-    #[allow(dead_code)]
     pub(crate) fn ok(&self) -> bool {
         self.0.load(Ordering::Relaxed)
     }
@@ -597,6 +596,21 @@ impl RegionDelegate {
             .values()
             .filter_map(|x| (!x.resolved_ts.is_zero()).then_some(x.resolved_ts))
             .next()
+    }
+
+    pub(crate) fn mut_initializing_request(
+        &mut self,
+        conn_id: ConnId,
+        request_id: RequestId,
+        init_id: InitId,
+    ) -> Option<&mut RequestInfo> {
+        let req_info = self
+            .requests
+            .get_mut(&RequestKey::new(conn_id, request_id))?;
+        req_info
+            .state
+            .is_initializing_with_id(init_id)
+            .then_some(req_info)
     }
 
     pub(crate) fn mut_blocked_request(

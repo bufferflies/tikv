@@ -50,7 +50,9 @@ use rfstore::store::ApplyContext;
 use security::{HttpClient, SecurityConfig};
 use serde_json::{json, Value};
 use tikv_util::{
-    box_err, box_try, codec, debug, error, info,
+    box_err, box_try, codec, debug, error,
+    future::paired_future_callback,
+    info,
     mpsc::{Receiver, SendError, Sender},
     thd_name,
     time::Instant,
@@ -451,15 +453,15 @@ impl ReplicationWorker {
                 self.handle_resume_register(conn_id, request_id, snap_access, init_id);
             }
             CdcMsg::RegisterResult {
-                event,
+                region_id,
                 conn_id,
-                initialized,
+                request_id,
                 init_id,
+                err_opt,
             } => {
-                tikv_util::set_current_region(event.region_id);
-                let region_id = event.region_id;
-                let request_id: RequestId = event.request_id.into();
-                let res = self.handle_register_result(event, conn_id, initialized, init_id);
+                tikv_util::set_current_region(region_id);
+                let res =
+                    self.handle_register_result(region_id, conn_id, request_id, init_id, err_opt);
                 if let Err(err) = &res {
                     self.deregister_region_on_error(conn_id, request_id, region_id, err);
                 }
@@ -736,6 +738,12 @@ impl ReplicationWorker {
             return Ok(());
         };
         conn_regions.insert(region_id);
+        let Some(conn) = self.conns.get(&conn_id) else {
+            warn!("{} cdc register: conn not found", tag; "conn" => ?conn_id);
+            debug_assert!(false);
+            return Ok(());
+        };
+        let sink = conn.get_sink().clone();
 
         let delegate = self.region_delegates.entry(region_id).or_insert_with(|| {
             RegionDelegate::new(merged_store_id, region_id, snap_access.get_version())
@@ -776,6 +784,7 @@ impl ReplicationWorker {
                 init_id,
                 init_alive,
                 self.tx.clone(),
+                sink,
             );
             debug!("{} cdc register: spawn handler", tag; "req" => ?request, "conn" => ?conn_id);
             self.runtime
@@ -796,6 +805,13 @@ impl ReplicationWorker {
     ) {
         let tag = snap_access.get_tag();
         let region_id = snap_access.get_id();
+
+        let Some(conn) = self.conns.get(&conn_id) else {
+            info!("{} handle_resume_result: conn is closed, skip", tag;
+                "conn" => ?conn_id, "request" => %request_id);
+            return;
+        };
+        let sink = conn.get_sink().clone();
 
         let Some(request_info) =
             self.mut_blocked_request_info(region_id, conn_id, request_id, init_id)
@@ -821,6 +837,7 @@ impl ReplicationWorker {
             init_id,
             init_alive,
             self.tx.clone(),
+            sink,
         );
         debug!("{} cdc register: resume register spawn handler", tag; "req" => ?request, "conn" => ?conn_id);
         self.runtime
@@ -829,57 +846,49 @@ impl ReplicationWorker {
 
     fn handle_register_result(
         &mut self,
-        event: Event,
+        region_id: u64,
         conn_id: ConnId,
-        initialized: bool,
+        request_id: RequestId,
         init_id: InitId,
+        err_opt: Option<cdc::Error>,
     ) -> cdc::Result<()> {
-        let request_id: RequestId = event.get_request_id().into();
-        let region_id = event.get_region_id();
         let tag = self.get_region_tag(region_id, 0);
         let Some(delegate) = self.region_delegates.get_mut(&region_id) else {
-            warn!("{} handle_register_result: region delegate not found", tag; "conn" => ?conn_id, "request" => %request_id);
+            info!("{} handle_register_result: ignore stale result", tag; "conn" => ?conn_id, "request" => %request_id);
             return Ok(());
         };
-        let Some(request_info) = delegate
-            .requests
-            .get_mut(&RequestKey::new(conn_id, request_id))
+        let Some(request_info) = delegate.mut_initializing_request(conn_id, request_id, init_id)
         else {
-            warn!("{} handle_register_result: request not found", tag; "conn" => ?conn_id, "request" => %request_id);
+            info!("{} handle_register_result: ignore stale result", tag;
+                "conn" => ?conn_id, "request" => %request_id, "init_id" => ?init_id);
             return Ok(());
         };
-        if !request_info.state.is_initializing_with_id(init_id) {
-            info!("{} handle_register_result: ignore stale result", tag;
-                "conn" => ?conn_id, "request" => %request_id,
-                "init_id" => ?init_id, "current" => ?request_info.state);
-            return Ok(());
+
+        if let Some(err) = err_opt {
+            return Err(err);
         }
+
         let Some(conn) = self.conns.get(&conn_id) else {
             warn!("{} handle_register_result: conn not found", tag; "conn" => ?conn_id, "request" => %request_id);
             debug_assert!(false);
             // Unexpected conn not found. Return error to deregister for safe.
             return Err(box_err!("conn not found: {:?}", conn_id));
         };
-        trace!("{} handle_register_result: send event {:?}", tag, event);
         let sink = conn.get_sink();
-        sink.unbounded_send(CdcEvent::Event(event), false)
-            .map_err(|e| cdc::Error::from(e))?;
-        if initialized {
-            let (pending_events, events_bytes) = request_info.state.must_finish_initialize();
-            let events_count = pending_events.len();
-            for pending_event in pending_events {
-                trace!(
-                    "{} handle_register_result: send pending event {:?}",
-                    tag,
-                    pending_event
-                );
-                sink.unbounded_send(CdcEvent::Event(pending_event), false)
-                    .map_err(|e| cdc::Error::from(e))?;
-            }
-            info!("{} handle_register_result: initialized", tag;
-                "count" => events_count, "bytes" => events_bytes,
-                "conn" => ?conn_id, "request" => %request_id);
+        let (pending_events, events_bytes) = request_info.state.must_finish_initialize();
+        let events_count = pending_events.len();
+        for pending_event in pending_events {
+            trace!(
+                "{} handle_register_result: send pending event {:?}",
+                tag,
+                pending_event
+            );
+            sink.unbounded_send(CdcEvent::Event(pending_event), false)
+                .map_err(|e| cdc::Error::from(e))?;
         }
+        info!("{} handle_register_result: initialized", tag;
+            "pending_count" => events_count, "pending_bytes" => events_bytes,
+            "conn" => ?conn_id, "request" => %request_id);
         Ok(())
     }
 
@@ -2147,12 +2156,14 @@ struct RegisterHandler {
     request_id: RequestId,
     snap_access: SnapAccess,
     sender: Sender<CdcMsg>,
+    sink: cdc::Sink,
     start_key: Bytes,
     end_key: Bytes,
     checkpoint_ts: u64,
     event_rows: Vec<EventRow>,
     initialized: bool,
     init_id: InitId,
+    init_alive: InitAlive,
 }
 
 impl RegisterHandler {
@@ -2161,8 +2172,9 @@ impl RegisterHandler {
         request: &ChangeDataRequest,
         snap_access: SnapAccess,
         init_id: InitId,
-        _init_alive: InitAlive,
+        init_alive: InitAlive,
         sender: Sender<CdcMsg>,
+        sink: cdc::Sink,
     ) -> Self {
         let keyspace_id = snap_access.get_keyspace_id();
         let request_id = request.get_request_id().into();
@@ -2173,22 +2185,63 @@ impl RegisterHandler {
             request_id,
             snap_access,
             sender,
+            sink,
             start_key: start_key.into(),
             end_key: end_key.into(),
             checkpoint_ts,
             event_rows: vec![],
             initialized: false,
             init_id,
+            init_alive,
         }
     }
 
     async fn handle_register(&mut self) {
+        if let Err(err) = self.handle_register_impl().await {
+            let tag = self.snap_access.get_tag();
+            CDC_SCAN_TASKS.with_label_values(&["abort"]).inc();
+            match err {
+                Error::RegisterCancelled(msg) => {
+                    info!("{} incremental scan cancelled: {}", tag, msg);
+                }
+                Error::CdcError(cdc_err) => {
+                    error!("{} incremental scan failed: {:?}", tag, cdc_err;
+                        "request" => %self.request_id, "conn" => ?self.conn_id);
+                    if !self.send_register_result(Some(cdc_err)) {
+                        warn!("{} incremental scan: send error result failed", tag);
+                    }
+                }
+                err => {
+                    // Should not reach here.
+                    error!("{} incremental scan failed: {:?}", tag, err;
+                        "request" => %self.request_id, "conn" => ?self.conn_id);
+                    debug_assert!(false);
+                    let cdc_err = cdc::Error::Other(box_err!(err));
+                    if !self.send_register_result(Some(cdc_err)) {
+                        warn!("{} incremental scan: send error result failed", tag);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_register_impl(&mut self) -> Result<()> {
+        CDC_SCAN_TASKS.with_label_values(&["total"]).inc();
+
+        self.check_alive()?;
+
+        CDC_SCAN_TASKS.with_label_values(&["ongoing"]).inc();
+        tikv_util::defer!({
+            CDC_SCAN_TASKS.with_label_values(&["ongoing"]).dec();
+        });
+
         let tag = self.snap_access.get_tag();
         let mut entries_bytes = 0;
         let keyspace_id = self.snap_access.get_keyspace_id();
         info!("{} start incremental scan", tag; "checkpoint_ts" => self.checkpoint_ts,
             "request" => %self.request_id, "conn" => ?self.conn_id);
         // scan incremental write after checkpoint ts;
+        let start_time = Instant::now_coarse();
         let mut write_iter = self
             .snap_access
             .new_delta_write_iterator_async(self.checkpoint_ts)
@@ -2230,10 +2283,10 @@ impl RegisterHandler {
             }
             event_row.set_type(EventLogType::Committed);
             entries_bytes += event_row.get_key().len() + event_row.get_value().len();
-            trace!("{} delta add event row {:?}", tag, event_row);
             self.event_rows.push(event_row);
             if entries_bytes > MAX_INITIALIZE_SCAN_BATCH_BYTES {
-                self.send_rows();
+                self.send_rows().await?;
+                CDC_SCAN_BYTES.inc_by(entries_bytes as u64);
                 entries_bytes = 0;
             }
             write_iter.next_all_version_async().await;
@@ -2242,23 +2295,88 @@ impl RegisterHandler {
         init_row.set_type(EventLogType::Initialized);
         self.event_rows.push(init_row);
         self.initialized = true;
-        self.send_rows();
+        self.send_rows().await?;
+        CDC_SCAN_BYTES.inc_by(entries_bytes as u64);
+
+        let takes = start_time.saturating_elapsed();
+        CDC_SCAN_DURATION_HISTOGRAM.observe(takes.as_secs_f64());
+        CDC_SCAN_TASKS.with_label_values(&["finish"]).inc();
+        info!("{} incremental scan finished", tag; "checkpoint_ts" => self.checkpoint_ts,
+            "request" => %self.request_id, "conn" => ?self.conn_id, "takes" => ?takes,
+            "entries_bytes" => entries_bytes);
+        Ok(())
     }
 
-    fn send_rows(&mut self) {
+    async fn send_rows(&mut self) -> Result<()> {
+        self.check_alive()?;
+
         let event_rows = mem::take(&mut self.event_rows);
         let mut new_event = Event::new();
         new_event.set_region_id(self.snap_access.get_id());
         new_event.set_request_id(self.request_id.into_inner());
         new_event.mut_entries().set_entries(event_rows.into());
 
-        trace!("{} send event {:?}", self.snap_access.get_tag(), new_event);
-        let _ = self.sender.send(CdcMsg::RegisterResult {
-            event: new_event,
-            conn_id: self.conn_id,
-            initialized: self.initialized,
-            init_id: self.init_id,
-        });
+        let tag = self.snap_access.get_tag();
+        trace!("{} incremental scan: send event {:?}", tag, new_event);
+        let mut events = vec![CdcEvent::Event(new_event)];
+
+        // CDC needs to make sure resolved ts events can only be sent after
+        // incremental scan is finished.
+        // Wait the barrier to ensure channel sends out all events.
+        // Ref: cdc::Initializer::sink_scan_events.
+        let barrier = if self.initialized {
+            let (cb, fut) = paired_future_callback();
+            events.push(CdcEvent::Barrier(Some(cb)));
+            Some(fut)
+        } else {
+            None
+        };
+
+        // Use `send_all` for back-pressure.
+        if let Err(e) = self.sink.send_all(events).await {
+            return Err(Error::CdcError(cdc::Error::Sink(e)));
+        }
+
+        if let Some(barrier) = barrier {
+            debug_assert!(self.initialized);
+            if barrier.await.is_err() {
+                // Should happen only when the sink is closed.
+                return Err(Error::RegisterCancelled("barrier cancelled".into()));
+            }
+
+            // Send "initialized" event.
+            if !self.send_register_result(None) {
+                // Should happen only when the sender/receiver is closed.
+                return Err(Error::RegisterCancelled(
+                    "send register result failed".into(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn send_register_result(&self, err_opt: Option<cdc::Error>) -> bool /* ok */ {
+        debug!("{} incremental scan: send register result", self.snap_access.get_tag();
+            "init_id" => ?self.init_id, "err" => ?err_opt,
+            "request" => %self.request_id, "conn" => ?self.conn_id);
+        self.sender
+            .send(CdcMsg::RegisterResult {
+                region_id: self.snap_access.get_id(),
+                conn_id: self.conn_id,
+                request_id: self.request_id,
+                init_id: self.init_id,
+                err_opt,
+            })
+            .is_ok()
+    }
+
+    fn check_alive(&self) -> Result<()> {
+        if !self.init_alive.ok() {
+            Err(Error::RegisterCancelled("init not alive".into()))
+        } else {
+            Ok(())
+        }
     }
 }
 

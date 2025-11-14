@@ -201,10 +201,11 @@ pub enum CdcMsg {
         init_id: InitId,
     },
     RegisterResult {
-        event: cdcpb::Event,
+        region_id: u64,
         conn_id: ConnId,
-        initialized: bool,
+        request_id: RequestId,
         init_id: InitId,
+        err_opt: Option<cdc::Error>,
     },
     SpawnScanLocks {
         snap_access: SnapAccess,
