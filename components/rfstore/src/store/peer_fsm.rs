@@ -60,8 +60,8 @@ use crate::{
         CasualMessage, Config, CustomBuilder, Engines, MsgApplyResult, PdTask, PeerMsg,
         PersistReady, RaftApplyState, RaftCommand, RaftContext, SignificantMsg, SnapState,
         StoreMeta, StoreMsg, Ticker, TrimOverBoundParameter, PEER_TICK_CHECK_LONG,
-        PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC, PEER_TICK_SPLIT_CHECK,
-        PEER_TICK_SWITCH_MEM_TABLE_CHECK,
+        PEER_TICK_MAINTENANCE, PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC,
+        PEER_TICK_SPLIT_CHECK,
     },
     DiscardReason, Error, RaftStoreRouter, Result, MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
 };
@@ -367,9 +367,8 @@ impl<'a> PeerMsgHandler<'a> {
         if self.ticker.is_on_tick(PEER_TICK_SPLIT_CHECK) {
             self.on_split_region_check_tick();
         }
-        if self.ticker.is_on_tick(PEER_TICK_SWITCH_MEM_TABLE_CHECK) {
-            self.on_switch_mem_table_check_tick();
-            self.check_gc_tombstones();
+        if self.ticker.is_on_tick(PEER_TICK_MAINTENANCE) {
+            self.on_maintenance_tick();
         }
         if self.ticker.is_on_tick(PEER_TICK_RAFT_LOG_GC) {
             self.on_raft_log_gc_tick();
@@ -383,7 +382,7 @@ impl<'a> PeerMsgHandler<'a> {
         self.ticker.schedule(PEER_TICK_RAFT);
         self.ticker.schedule(PEER_TICK_PD_HEARTBEAT);
         self.ticker.schedule(PEER_TICK_SPLIT_CHECK);
-        self.ticker.schedule(PEER_TICK_SWITCH_MEM_TABLE_CHECK);
+        self.ticker.schedule(PEER_TICK_MAINTENANCE);
         self.ticker.schedule(PEER_TICK_RAFT_LOG_GC);
         self.ticker.schedule(PEER_TICK_CHECK_LONG);
     }
@@ -1389,20 +1388,20 @@ impl<'a> PeerMsgHandler<'a> {
         self.schedule_ask_split(keys);
     }
 
-    // For idle regions, we need tick to trigger switch mem-table to reduce memory
-    // consumption. Only the applier knows how large the mem-table is and when
-    // the mem-table has been switched, so we don't need to check anything, just
-    // send a message.
-    fn on_switch_mem_table_check_tick(&mut self) {
-        self.ticker.schedule(PEER_TICK_SWITCH_MEM_TABLE_CHECK);
-        if !self.peer.is_leader() {
-            return;
-        }
+    // For idle regions, we need tick to trigger switch mem-table and shrink
+    // lock_cache to reduce memory consumption. Only the applier knows how large
+    // the mem-table is and when the mem-table has been switched, so we don't
+    // need to check anything, just send a message.
+    fn on_maintenance_tick(&mut self) {
+        self.ticker.schedule(PEER_TICK_MAINTENANCE);
+        // We also send the message to follower to let follower do periodic maintenance
+        // task.
         let region_id = self.region_id();
         self.ctx
             .apply_msgs
             .msgs
-            .push(ApplyMsg::CheckSwitchMemTable { region_id });
+            .push(ApplyMsg::Maintenance { region_id });
+        self.check_gc_tombstones();
     }
 
     fn on_prepare_split_region(

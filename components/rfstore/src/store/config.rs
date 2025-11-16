@@ -79,8 +79,11 @@ pub struct Config {
     // Maximum number of split_keys in a split region request.
     pub split_region_max_keys: usize,
 
-    // Interval (ms) to check region whether need to switch mem-table or not.
-    pub switch_mem_table_check_tick_interval: ReadableDuration,
+    // Interval (ms) to do maintenance task like
+    //  - switch mem-table
+    //  - shrink lock_cache
+    //  - compaction to gc tombstone
+    pub maintenance_tick_interval: ReadableDuration,
 
     pub pd_heartbeat_tick_interval: ReadableDuration,
 
@@ -166,7 +169,7 @@ impl Default for Config {
             raft_log_gc_no_kv_count: 4,
             split_region_check_tick_interval: ReadableDuration::secs(3),
             split_region_max_keys: SPLIT_REGION_MAX_KEYS_DEF,
-            switch_mem_table_check_tick_interval: ReadableDuration::minutes(1),
+            maintenance_tick_interval: ReadableDuration::minutes(1),
             region_split_size: ReadableSize::mb(256),
             region_split_keys: 2_560_000,
             enable_region_bucket: false,
@@ -285,7 +288,7 @@ impl Config {
         if cfg!(debug_assertions) && cfg.raft_base_tick_interval.as_millis() < 100 {
             // It is a test config, adjust the fields not included in the old.
             cfg.update_safe_ts_interval.0 = cfg.raft_base_tick_interval.0 * 60;
-            cfg.switch_mem_table_check_tick_interval.0 = cfg.raft_base_tick_interval.0 * 60;
+            cfg.maintenance_tick_interval.0 = cfg.raft_base_tick_interval.0 * 60;
             if cfg.local_file_gc_timeout.0 > cfg.raft_base_tick_interval.0 * 20 * 120 {
                 cfg.local_file_gc_timeout.0 = cfg.raft_base_tick_interval.0 * 20 * 30; // 30s, see `new_test_config`.
                 cfg.local_file_gc_tick_interval.0 = cfg.raft_base_tick_interval.0 * 20 * 10; // 10s, see `new_test_config`.

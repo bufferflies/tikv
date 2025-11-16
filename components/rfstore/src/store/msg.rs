@@ -145,7 +145,7 @@ pub(crate) enum ApplyMsg {
     UnsafeDestroy {
         region_id: u64,
     },
-    CheckSwitchMemTable {
+    Maintenance {
         region_id: u64,
     },
     PrepareTxnFile {

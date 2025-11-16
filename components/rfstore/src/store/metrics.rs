@@ -11,4 +11,8 @@ lazy_static! {
     .unwrap();
     pub static ref IDLE_PEER_COUNT: IntGauge =
         register_int_gauge!("rfstore_idle_peers_count", "The number of idle peers").unwrap();
+    pub static ref LOCK_CACHE_LEN: IntGauge =
+        register_int_gauge!("rfstore_lock_cache_len", "The length of lock cache").unwrap();
+    pub static ref LOCK_CACHE_CAPCITY: IntGauge =
+        register_int_gauge!("rfstore_lock_cache_capacity", "The capacity of lock cache").unwrap();
 }

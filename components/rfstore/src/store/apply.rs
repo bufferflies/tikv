@@ -60,7 +60,7 @@ use crate::{
     errors::*,
     store::{
         cmd_resp::{bind_term, err_resp},
-        metrics::STORE_PROPOSE_SWITCH_MEM_TABLE_COUNTER,
+        metrics::{LOCK_CACHE_CAPCITY, LOCK_CACHE_LEN, STORE_PROPOSE_SWITCH_MEM_TABLE_COUNTER},
     },
     RaftRouter, RaftStoreRouter,
 };
@@ -262,6 +262,8 @@ pub struct Applier {
     pub(crate) apply_state: RaftApplyState,
 
     pub(crate) lock_cache: HashMap<Vec<u8>, Vec<u8>>,
+    last_lock_cache_len: i64,
+    last_lock_cache_cap: i64,
 
     pub(crate) snap: Option<SnapAccess>,
 
@@ -418,8 +420,23 @@ impl Applier {
 
     fn clear_caches(&mut self) {
         self.snap.take();
-        self.lock_cache.clear();
+        self.lock_cache = HashMap::new();
         self.mem_table_state.take();
+    }
+
+    fn update_lock_cache_metrics(&mut self) {
+        let current_len = self.lock_cache.len() as i64;
+        let len_diff = current_len - self.last_lock_cache_len;
+        self.last_lock_cache_len = current_len;
+        if len_diff != 0 {
+            LOCK_CACHE_LEN.add(len_diff);
+        }
+        let current_cap = self.lock_cache.capacity() as i64;
+        let cap_diff = current_cap - self.last_lock_cache_cap;
+        self.last_lock_cache_cap = current_cap;
+        if cap_diff != 0 {
+            LOCK_CACHE_CAPCITY.add(cap_diff);
+        }
     }
 
     pub(crate) fn get_peer(&self) -> &metapb::Peer {
@@ -1142,7 +1159,7 @@ impl Applier {
         self.snap.take(); // snapshot is outdated.
         // clear the cache here or the locks doesn't belong to the new range would never
         // have chance to delete.
-        self.lock_cache.clear();
+        self.lock_cache = HashMap::new();
         let mut splits = BatchSplitResponse::default();
         let regions =
             split_gen_new_region_metas(self.peer.store_id, &self.region, request.get_splits())
@@ -1529,6 +1546,7 @@ impl Applier {
             "peer_id" => peer_id,
         );
         self.stopped = true;
+        self.lock_cache = HashMap::new();
         for mut apply in self.paused_apply_queue.drain(..) {
             for proposal in apply.cbs.drain(..) {
                 notify_req_region_removed(self.region.get_id(), proposal.cb);
@@ -1620,8 +1638,9 @@ impl Applier {
         }
     }
 
-    fn handle_check_switch_mem_table(&mut self, ctx: &mut ApplyContext, region_id: u64) {
+    fn handle_maintenance(&mut self, ctx: &mut ApplyContext, region_id: u64) {
         assert_eq!(self.region_id(), region_id);
+        self.lock_cache.shrink_to_fit();
         self.maybe_propose_switch_mem_table(ctx, Instant::now());
     }
 
@@ -1845,8 +1864,8 @@ impl Applier {
             ApplyMsg::ApplyChangeSet(cs) => {
                 self.handle_apply_change_set(ctx, cs);
             }
-            ApplyMsg::CheckSwitchMemTable { region_id } => {
-                self.handle_check_switch_mem_table(ctx, region_id);
+            ApplyMsg::Maintenance { region_id } => {
+                self.handle_maintenance(ctx, region_id);
             }
             ApplyMsg::PrepareMerge => {
                 self.maybe_pause_for_merge();
@@ -1880,6 +1899,7 @@ impl Applier {
                 self.trigger_refresh_shard_states(ctx);
             }
         }
+        self.update_lock_cache_metrics();
     }
 
     fn trigger_trim_over_bound(

@@ -29,9 +29,7 @@ impl Ticker {
             TickSchedule::new(1),
             TickSchedule::new(config.split_region_check_tick_interval.as_millis() / base_interval),
             TickSchedule::new(config.pd_heartbeat_tick_interval.as_millis() / base_interval),
-            TickSchedule::new(
-                config.switch_mem_table_check_tick_interval.as_millis() / base_interval,
-            ),
+            TickSchedule::new(config.maintenance_tick_interval.as_millis() / base_interval),
             TickSchedule::new(config.raft_log_gc_tick_interval.as_millis() / base_interval),
             TickSchedule::new(config.peer_check_long_interval.as_millis() / base_interval),
         ];
@@ -99,7 +97,7 @@ pub(crate) struct PeerTick {
 pub(crate) const PEER_TICK_RAFT: PeerTick = PeerTick { idx: 0 };
 pub(crate) const PEER_TICK_SPLIT_CHECK: PeerTick = PeerTick { idx: 1 };
 pub(crate) const PEER_TICK_PD_HEARTBEAT: PeerTick = PeerTick { idx: 2 };
-pub(crate) const PEER_TICK_SWITCH_MEM_TABLE_CHECK: PeerTick = PeerTick { idx: 3 };
+pub(crate) const PEER_TICK_MAINTENANCE: PeerTick = PeerTick { idx: 3 };
 pub(crate) const PEER_TICK_RAFT_LOG_GC: PeerTick = PeerTick { idx: 4 };
 pub(crate) const PEER_TICK_CHECK_LONG: PeerTick = PeerTick { idx: 5 }; // Default is 5 minutes.
 
