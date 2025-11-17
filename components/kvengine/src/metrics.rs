@@ -118,19 +118,9 @@ pub fn flush_engine_properties(kv_engine: &Engine, _name: &str) {
 }
 
 make_static_metric! {
-    pub label_enum SeekType {
-        seek,
-        next,
-        prev,
-    }
-
     pub label_enum WriteFlowType {
         keys,
         bytes,
-    }
-
-    pub struct SeekDurationVec: Histogram {
-        "type" => SeekType,
     }
 
     pub struct WriteFlowVec: Histogram {
@@ -156,6 +146,15 @@ make_auto_flush_static_metric! {
     }
     pub struct ChangeSetVec: LocalIntCounter {
         "type" => ChangeSetType,
+    }
+
+    pub label_enum SeekType {
+        seek,
+        next,
+        prev,
+    }
+    pub struct SeekDurationVec: LocalHistogram {
+        "type" => SeekType,
     }
 }
 
@@ -321,14 +320,14 @@ lazy_static! {
         exponential_buckets(0.00005, 1.8, 26).unwrap()
     )
     .unwrap();
-    pub static ref ENGINE_SEEK_DURATION: SeekDurationVec = register_static_histogram_vec!(
-        SeekDurationVec,
+    pub static ref ENGINE_SEEK_DURATION_VEC: HistogramVec = register_histogram_vec!(
         "kv_engine_seek_duration_seconds",
         "Bucketed histogram of KV Engine seek duration",
         &["type"],
         exponential_buckets(0.00005, 1.8, 26).unwrap()
     )
     .unwrap();
+    pub static ref ENGINE_SEEK_DURATION_STATIC: SeekDurationVec = auto_flush_from!(ENGINE_SEEK_DURATION_VEC, SeekDurationVec);
     pub static ref ENGINE_WRITE_DURATION: Histogram = register_histogram!(
         "kv_engine_write_duration_seconds",
         "Bucketed histogram of KV Engine write duration",

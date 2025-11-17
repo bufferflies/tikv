@@ -15,7 +15,6 @@ use cloud_encryption::{EncryptionKey, KEY_TYPE_AES_256_CTR_LEGACY};
 use kvenginepb as pb;
 use kvenginepb::TxnFileRefs;
 use log_wrappers::Value as LogValue;
-use prometheus::local::LocalHistogram;
 use protobuf::Message;
 use tikv_util::{
     box_try,
@@ -394,8 +393,6 @@ impl SnapAccessCore {
             blob_prefetcher: None,
             data,
             range: None,
-            next_time: ENGINE_SEEK_DURATION.next.local(),
-            seek_time: ENGINE_SEEK_DURATION.seek.local(),
         }
     }
 
@@ -428,8 +425,6 @@ impl SnapAccessCore {
             blob_prefetcher,
             data,
             range: None,
-            next_time: ENGINE_SEEK_DURATION.next.local(),
-            seek_time: ENGINE_SEEK_DURATION.seek.local(),
         }
     }
 
@@ -453,8 +448,6 @@ impl SnapAccessCore {
             blob_prefetcher: None,
             data,
             range: None,
-            next_time: ENGINE_SEEK_DURATION.next.local(),
-            seek_time: ENGINE_SEEK_DURATION.seek.local(),
         }
     }
 
@@ -477,8 +470,6 @@ impl SnapAccessCore {
             blob_prefetcher,
             data,
             range: None,
-            next_time: ENGINE_SEEK_DURATION.next.local(),
-            seek_time: ENGINE_SEEK_DURATION.seek.local(),
         }
     }
 
@@ -519,8 +510,6 @@ impl SnapAccessCore {
     /// is none.
     #[maybe_async::both]
     pub async fn get(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
-        let _t = ENGINE_GET_DURATION.start_timer();
-
         let mut version = version;
         if version == 0 {
             version = u64::MAX;
@@ -547,8 +536,6 @@ impl SnapAccessCore {
     }
 
     pub fn get_non_txn_file_lock(&self, key: &[u8]) -> Item<'_> {
-        let _t = ENGINE_GET_DURATION.start_timer();
-
         let inner_key = InnerKey::from_outer_key(key);
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
@@ -1101,8 +1088,6 @@ impl SnapAccessCore {
             blob_prefetcher: None,
             data,
             range: None,
-            next_time: ENGINE_SEEK_DURATION.next.local(),
-            seek_time: ENGINE_SEEK_DURATION.seek.local(),
         };
 
         let mut rows = vec![];
@@ -1181,8 +1166,6 @@ impl SnapAccessCore {
 
     #[maybe_async::both]
     pub async fn get_newer(&self, cf: usize, key: &[u8], version: u64) -> Item<'_> {
-        let _t = ENGINE_GET_DURATION.start_timer();
-
         let inner_key = InnerKey::from_outer_key(key);
         let mut item = Item::new();
         item.owned_val = Some(vec![]);
@@ -1678,8 +1661,6 @@ pub struct Iterator {
     blob_prefetcher: Option<BlobPrefetcher>,
     data: ShardData,
     range: Option<(Bytes, Bytes)>, // [outer_lower_bound, outer_upper_bound)
-    next_time: LocalHistogram,
-    seek_time: LocalHistogram,
 }
 
 impl Iterator {
@@ -1734,7 +1715,8 @@ impl Iterator {
         next!(self.inner).await;
         self.parse_item().await;
 
-        self.next_time
+        ENGINE_SEEK_DURATION_STATIC
+            .next
             .observe(duration_to_sec(timer.saturating_elapsed()));
     }
 
@@ -1779,7 +1761,8 @@ impl Iterator {
         }
         self.parse_item().await;
 
-        self.seek_time
+        ENGINE_SEEK_DURATION_STATIC
+            .seek
             .observe(duration_to_sec(timer.saturating_elapsed()));
     }
 
@@ -1806,7 +1789,8 @@ impl Iterator {
         }
         self.parse_item().await;
 
-        self.seek_time
+        ENGINE_SEEK_DURATION_STATIC
+            .seek
             .observe(duration_to_sec(timer.saturating_elapsed()));
     }
 
