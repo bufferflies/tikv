@@ -7,10 +7,9 @@ use std::{
 
 use bytes::{Buf, BufMut, Bytes};
 use kvproto::raft_serverpb::RegionLocalState;
-use protobuf::Message;
 use raft_proto::eraftpb;
 
-use crate::{log_batch::RaftLogOp, PeerMeta, REGION_META_KEY_PREFIX};
+use crate::{log_batch::RaftLogOp, PeerMeta};
 
 /// `WriteBatch` contains multiple regions' `RegionBatch`.
 #[derive(Default)]
@@ -25,34 +24,72 @@ impl WriteBatch {
         }
     }
 
-    pub(crate) fn get_peer_mut(&mut self, peer_id: u64, region_id: u64) -> &mut PeerBatch {
+    pub(crate) fn get_peer_mut(
+        &mut self,
+        peer_id: u64,
+        region_id: u64,
+        keyspace_id: u32,
+    ) -> &mut PeerBatch {
         self.peers
             .entry(peer_id)
-            .or_insert_with(|| PeerBatch::new(peer_id, region_id))
+            .or_insert_with(|| PeerBatch::new(peer_id, region_id, keyspace_id))
     }
 
     pub(crate) fn get_peer(&self, peer_id: u64) -> Option<&PeerBatch> {
         self.peers.get(&peer_id)
     }
 
-    pub fn append_raft_log(&mut self, peer_id: u64, region_id: u64, entry: &eraftpb::Entry) -> i64 /* delta_encoded_len */
-    {
+    pub fn append_raft_log(
+        &mut self,
+        peer_id: u64,
+        region_id: u64,
+        keyspace_id: u32,
+        entry: &eraftpb::Entry,
+    ) -> i64 /* delta_encoded_len */ {
         let op = RaftLogOp::new(entry);
-        self.get_peer_mut(peer_id, region_id).append_raft_log(op)
+        self.get_peer_mut(peer_id, region_id, keyspace_id)
+            .append_raft_log(op)
     }
 
-    pub fn truncate_raft_log(&mut self, peer_id: u64, region_id: u64, index: u64) -> i64 /* delta_encoded_len */
-    {
-        self.get_peer_mut(peer_id, region_id).truncate(index)
+    pub fn truncate_raft_log(
+        &mut self,
+        peer_id: u64,
+        region_id: u64,
+        keyspace_id: u32,
+        index: u64,
+    ) -> i64 /* delta_encoded_len */ {
+        self.get_peer_mut(peer_id, region_id, keyspace_id)
+            .truncate(index)
     }
 
-    pub fn set_state(&mut self, peer_id: u64, region_id: u64, key: &[u8], val: &[u8]) {
-        self.get_peer_mut(peer_id, region_id).set_state(key, val);
+    pub fn set_state(
+        &mut self,
+        peer_id: u64,
+        region_id: u64,
+        keyspace_id: u32,
+        key: &[u8],
+        val: &[u8],
+    ) {
+        self.set_state_bytes(
+            peer_id,
+            region_id,
+            keyspace_id,
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(val),
+        );
     }
 
-    pub fn set_state_bytes(&mut self, peer_id: u64, region_id: u64, key: Bytes, val: Bytes) {
-        self.get_peer_mut(peer_id, region_id)
-            .set_state_bytes(key, val);
+    pub fn set_state_bytes(
+        &mut self,
+        peer_id: u64,
+        region_id: u64,
+        keyspace_id: u32,
+        key: Bytes,
+        val: Bytes,
+    ) {
+        let peer_batch = self.get_peer_mut(peer_id, region_id, keyspace_id);
+        peer_batch.keyspace_id = keyspace_id;
+        peer_batch.set_state_bytes(key, val);
     }
 
     pub fn get_state(&self, peer_id: u64, key: &[u8]) -> Option<&[u8]> {
@@ -162,10 +199,10 @@ impl DerefMut for PeerBatch {
 }
 
 impl PeerBatch {
-    pub(crate) fn new(peer_id: u64, region_id: u64) -> Self {
+    pub(crate) fn new(peer_id: u64, region_id: u64, keyspace_id: u32) -> Self {
         Self {
             peer_id,
-            meta: PeerMeta::new(region_id),
+            meta: PeerMeta::new(region_id, keyspace_id),
             raft_logs: Default::default(),
             raft_logs_encoded_len: 0,
         }
@@ -185,13 +222,6 @@ impl PeerBatch {
         self.truncated_idx = idx;
 
         self.raft_logs_encoded_len as i64 - origin_encoded_len
-    }
-
-    pub fn get_latest_peer_state(&self) -> Option<RegionLocalState> {
-        let bin = self.get_latest_state(REGION_META_KEY_PREFIX)?;
-        let mut region_local_state = RegionLocalState::new();
-        region_local_state.merge_from_bytes(bin).unwrap();
-        Some(region_local_state)
     }
 
     pub fn append_raft_log(&mut self, op: RaftLogOp) -> i64 /* delta_encoded_len */ {
@@ -268,7 +298,7 @@ impl PeerBatch {
     }
 
     pub(crate) fn decode(mut buf: &[u8]) -> Self {
-        let mut batch = PeerBatch::new(0, 0);
+        let mut batch = PeerBatch::new(0, 0, 0);
         batch.peer_id = buf.get_u64_le();
         batch.region_id = buf.get_u64_le();
         batch.truncated_idx = buf.get_u64_le();
@@ -318,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_region_batch() {
-        let mut region_batch = PeerBatch::new(1, 2);
+        let mut region_batch = PeerBatch::new(1, 2, 1);
 
         let mut logs = vec![];
         for i in 1..=10 {
@@ -348,7 +378,7 @@ mod tests {
         assert_eq!(region_batch.raft_logs.len(), 1);
         assert_eq!(region_batch.raft_logs[0], log);
 
-        let mut region_batch = PeerBatch::new(1, 2);
+        let mut region_batch = PeerBatch::new(1, 2, 1);
         for log in &logs[..5] {
             region_batch.append_raft_log(log.clone());
         }

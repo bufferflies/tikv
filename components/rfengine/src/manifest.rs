@@ -57,9 +57,9 @@ impl DerefMut for PeerMetaFiles {
 }
 
 impl PeerMetaFiles {
-    fn new(region_id: u64) -> Self {
+    fn new(region_id: u64, keyspace_id: u32) -> Self {
         Self {
-            meta: PeerMeta::new(region_id),
+            meta: PeerMeta::new(region_id, keyspace_id),
             files: Default::default(),
         }
     }
@@ -161,10 +161,9 @@ impl Manifest {
             self.first_epoch = cs.epoch_id;
         }
         for peer_meta_pb in cs.get_peers() {
-            let peer_meta = self
-                .peers
-                .entry(peer_meta_pb.peer_id)
-                .or_insert_with(|| PeerMetaFiles::new(peer_meta_pb.region_id));
+            let peer_meta = self.peers.entry(peer_meta_pb.peer_id).or_insert_with(|| {
+                PeerMetaFiles::new(peer_meta_pb.region_id, peer_meta_pb.keyspace_id)
+            });
             if peer_meta.truncated_idx < peer_meta_pb.truncated_index {
                 peer_meta.truncated_idx = peer_meta_pb.truncated_index;
             }
@@ -174,6 +173,12 @@ impl Manifest {
                 } else {
                     peer_meta.set_state(state_pb.get_key(), state_pb.get_value());
                 }
+            }
+            let pb_keyspace_id = peer_meta_pb.get_keyspace_id();
+            if pb_keyspace_id > 0 {
+                peer_meta.keyspace_id = pb_keyspace_id;
+            } else if peer_meta.keyspace_id == 0 {
+                peer_meta.keyspace_id = peer_meta.get_keyspace_id().unwrap_or_default();
             }
             for file in peer_meta_pb.get_files() {
                 peer_meta.files.push_back(file.into());
@@ -208,6 +213,7 @@ impl Manifest {
             meta_pb.set_peer_id(peer_id);
             meta_pb.set_region_id(peer_meta.region_id);
             meta_pb.set_truncated_index(peer_meta.truncated_idx);
+            meta_pb.set_keyspace_id(peer_meta.keyspace_id);
             for (key, val) in &peer_meta.states {
                 let mut state = rfenginepb::PeerState::new();
                 state.set_key(key.to_vec());

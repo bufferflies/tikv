@@ -751,6 +751,28 @@ pub(crate) fn verify_region_info_accessor(cluster: &ServerCluster) {
     }
 }
 
+pub(crate) fn verify_rfengine_keyspace_id(cluster: &ServerCluster) {
+    let nodes = cluster.get_nodes();
+    for &node_id in &nodes {
+        let raft = cluster.get_rfengine(node_id);
+        let region_peer_map = raft.get_region_peer_map();
+        let kvengine = cluster.get_kvengine(node_id);
+        let id_vers = kvengine.get_all_shard_id_vers();
+        for id_ver in id_vers {
+            let shard = kvengine.get_shard(id_ver.id).unwrap();
+            let peer_id = region_peer_map.get(&id_ver.id).cloned().unwrap();
+            let peer_stat = raft.get_peer_stats(peer_id);
+            assert_eq!(
+                peer_stat.keyspace_id,
+                shard.keyspace_id,
+                "shard {}:{}",
+                raft.get_engine_id(),
+                id_ver
+            );
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Running(Arc<AtomicBool>);
 

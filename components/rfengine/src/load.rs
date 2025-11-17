@@ -17,7 +17,12 @@ impl RfEngineCore {
     pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<u64> {
         for (&peer_id, peer_meta) in &manifest.peers {
             let guard = self.peers.peers.guard();
-            let peer_ref = self.get_or_init_peer_data(peer_id, peer_meta.region_id, &guard);
+            let peer_ref = self.get_or_init_peer_data(
+                peer_id,
+                peer_meta.region_id,
+                peer_meta.keyspace_id,
+                &guard,
+            );
             let mut peer_data = peer_ref.write().unwrap();
             peer_data.meta.merge(peer_meta, false);
             drop(peer_data);
@@ -26,6 +31,7 @@ impl RfEngineCore {
                 self.load_raft_log_file(
                     peer_id,
                     peer_meta.region_id,
+                    peer_meta.keyspace_id,
                     file.first_index,
                     file.last_index,
                 )?;
@@ -87,6 +93,7 @@ impl RfEngineCore {
                 let peer_ref = self.get_or_init_peer_data(
                     peer_batch.peer_id,
                     peer_batch.meta.region_id,
+                    peer_batch.keyspace_id,
                     &guard,
                 );
                 let mut peer_data = peer_ref.write().unwrap();
@@ -169,6 +176,7 @@ impl RfEngineCore {
         &mut self,
         peer_id: u64,
         region_id: u64,
+        keyspace_id: u32,
         first: u64,
         last: u64,
     ) -> Result<()> {
@@ -183,7 +191,7 @@ impl RfEngineCore {
             end_offs.push(data.get_u32_le());
         }
         let guard = self.peers.peers.guard();
-        let peer_data_ref = self.get_or_init_peer_data(peer_id, region_id, &guard);
+        let peer_data_ref = self.get_or_init_peer_data(peer_id, region_id, keyspace_id, &guard);
         let mut peer_data = peer_data_ref.write().unwrap();
         for i in 0..header.count as usize {
             if first + i as u64 <= peer_data.truncated_idx {
@@ -354,9 +362,9 @@ mod tests {
             let mut wb = WriteBatch::new();
             for peer_id in 1..=10_u64 {
                 let region_id = peer_id + 1;
-                wb.append_raft_log(peer_id, region_id, &make_log_data(idx, 128));
+                wb.append_raft_log(peer_id, region_id, 1, &make_log_data(idx, 128));
                 let (key, val) = make_state_kv(1, idx);
-                wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
+                wb.set_state(peer_id, region_id, 1, key.chunk(), val.chunk());
             }
             engine.write(wb).unwrap();
         }

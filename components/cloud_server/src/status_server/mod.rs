@@ -220,6 +220,7 @@ impl StatusServer {
         peer_id: u64,
         region_id: u64,
         ver: u64,
+        keyspace_id: u32,
         index: u64,
         term: u64,
         inner_key_off: u32,
@@ -259,7 +260,7 @@ impl StatusServer {
         props.mut_keys().push(TERM_KEY.to_string());
         props.mut_values().push(term.to_le_bytes().to_vec());
         let cs_val = cs.write_to_bytes().unwrap();
-        write_engine_meta_bytes(wb, peer_id, region_id, &cs_val);
+        write_engine_meta_bytes(wb, peer_id, region_id, keyspace_id, &cs_val);
         Ok(cs)
     }
 
@@ -267,6 +268,7 @@ impl StatusServer {
         wb: &mut WriteBatch,
         peer_id: u64,
         region_id: u64,
+        keyspace_id: u32,
         index: u64,
         term: u64,
     ) {
@@ -274,7 +276,13 @@ impl StatusServer {
         ts_val.put_u64_le(term);
         ts_val.put_u64_le(index);
         let ts = ts_val.freeze();
-        wb.set_state(peer_id, region_id, RAFT_TRUNCATED_STATE_KEY, ts.chunk());
+        wb.set_state(
+            peer_id,
+            region_id,
+            keyspace_id,
+            RAFT_TRUNCATED_STATE_KEY,
+            ts.chunk(),
+        );
     }
 
     fn write_raft_state(
@@ -282,6 +290,7 @@ impl StatusServer {
         peer_id: u64,
         region_id: u64,
         ver: u64,
+        keyspace_id: u32,
         index: u64,
         term: u64,
     ) -> RaftState {
@@ -293,7 +302,7 @@ impl StatusServer {
         rs_val.put_u64_le(index);
         let rs = rs_val.freeze();
         let key = raft_state_key(ver);
-        wb.set_state(peer_id, region_id, key.chunk(), rs.chunk());
+        wb.set_state(peer_id, region_id, keyspace_id, key.chunk(), rs.chunk());
         let mut raft_state = RaftState::default();
         raft_state.unmarshal(rs.chunk());
         raft_state
@@ -1164,7 +1173,11 @@ impl StatusServer {
                             format!("region {} peer {} not exists", region_id, peer_id).as_str(),
                         ));
                     }
-                    vec![(peer_id, region_id, cs.unwrap().shard_ver)]
+                    let cs = cs.unwrap();
+                    let keyspace_id =
+                        ApiV2::get_u32_keyspace_id_by_key(&cs.get_snapshot().outer_start)
+                            .unwrap_or_default();
+                    vec![(peer_id, region_id, cs.shard_ver, keyspace_id)]
                 }
                 None => {
                     return Ok(bad_request_resp(
@@ -1204,7 +1217,7 @@ impl StatusServer {
                     "body not empty only support single region clear",
                 ));
             }
-            let (_, target_shard_id, target_shard_ver) = target_regions[0];
+            let (_, target_shard_id, target_shard_ver, _) = target_regions[0];
             let mut delegate_resp = DelegateResponse::default();
             delegate_resp.merge_from_bytes(body.chunk()).unwrap();
             let mut change_set = kvenginepb::ChangeSet::default();
@@ -1229,7 +1242,7 @@ impl StatusServer {
         } else {
             None
         };
-        for (peer_id, region_id, region_version) in target_regions {
+        for (peer_id, region_id, region_version, keyspace_id) in target_regions {
             let shard_stats = engine.get_shard_stat(region_id);
             info!(
                 "unsafe recover region {} peer {} shard_stats {:?}",
@@ -1262,7 +1275,7 @@ impl StatusServer {
                 "unsafe_recover region: {} peer: {} truncate raft log to {}",
                 region_id, peer_id, last_index
             );
-            wb.truncate_raft_log(peer_id, region_id, last_index);
+            wb.truncate_raft_log(peer_id, region_id, keyspace_id, last_index);
 
             let raft_log_term = rf
                 .get_term(peer_id, origin_last_index)
@@ -1291,6 +1304,7 @@ impl StatusServer {
                 peer_id,
                 region_id,
                 region_version,
+                keyspace_id,
                 last_index,
                 term,
                 inner_key_off,
@@ -1306,7 +1320,7 @@ impl StatusServer {
                 Err(e) => return Ok(bad_request_resp(e.to_string().as_str())),
             };
 
-            Self::write_truncated_state(&mut wb, peer_id, region_id, last_index, term);
+            Self::write_truncated_state(&mut wb, peer_id, region_id, keyspace_id, last_index, term);
             info!(
                 "unsafe_recover region: {} peer: {} reset truncated state to truncated_index: {} truncated_term: {}",
                 region_id, peer_id, last_index, term
@@ -1317,6 +1331,7 @@ impl StatusServer {
                 peer_id,
                 region_id,
                 region_version,
+                keyspace_id,
                 last_index,
                 term,
             );
@@ -1410,7 +1425,7 @@ impl StatusServer {
             if let Some(regions) = collect_prefix_regions(rf, &prefix) {
                 regions
                     .into_iter()
-                    .map(|(_, region_id, _)| region_id)
+                    .map(|(_, region_id, ..)| region_id)
                     .collect::<Vec<_>>()
             } else {
                 return Ok(not_found_resp("collect none region with prefix"));

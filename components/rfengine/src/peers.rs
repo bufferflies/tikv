@@ -30,9 +30,10 @@ impl RaftPeers {
         let mut truncated_logs = vec![];
         for (&peer_id, batch_data) in &wb.peers {
             let region_id = batch_data.meta.region_id;
+            let keyspace_id = batch_data.meta.keyspace_id;
             tikv_util::set_current_region_thread_local(region_id);
             let guard = self.peers.guard();
-            let peer_data = self.get_or_init_peer_data(peer_id, region_id, &guard);
+            let peer_data = self.get_or_init_peer_data(peer_id, region_id, keyspace_id, &guard);
             let mut peer_data = peer_data.write().unwrap();
             let truncated = peer_data.apply(batch_data);
             drop(peer_data);
@@ -175,11 +176,12 @@ impl RaftPeers {
         &self,
         peer_id: u64,
         region_id: u64,
+        keyspace_id: u32,
         guard: &'a papaya::LocalGuard<'a>,
     ) -> &'a RwLock<PeerData> {
         self.peers.get_or_insert_with(
             peer_id,
-            || RwLock::new(PeerData::new(peer_id, region_id)),
+            || RwLock::new(PeerData::new(peer_id, region_id, keyspace_id)),
             guard,
         )
     }

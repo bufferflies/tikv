@@ -321,6 +321,9 @@ pub fn wal_chunk_file_suffix(start_off: u64, end_off: u64) -> String {
 }
 
 pub fn get_keyspace_id_from_peer(peer_meta: &rfenginepb::PeerMeta) -> Option<u32> {
+    if peer_meta.keyspace_id > 0 {
+        return Some(peer_meta.keyspace_id);
+    }
     peer_meta
         .get_states()
         .iter()
@@ -439,18 +442,18 @@ pub mod test_util {
     pub fn prepare_rfengine_with_idx(engine: &RfEngine, start_idx: u64, end_idx: u64) {
         let mut wb = WriteBatch::new();
         for peer_id in 1..=10_u64 {
-            let (key, val) = make_state_kv(2, 1);
+            let (key, val) = make_state_kv(3, 1);
             let region_id = peer_id + 1;
-            wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
+            wb.set_state(peer_id, region_id, 1, key.chunk(), val.chunk());
         }
         engine.write(wb).unwrap();
         for idx in start_idx..=end_idx {
             let mut wb = WriteBatch::new();
             for peer_id in 1..=10_u64 {
                 let region_id = peer_id + 1;
-                wb.append_raft_log(peer_id, region_id, &make_log_data(idx, 128));
+                wb.append_raft_log(peer_id, region_id, 1, &make_log_data(idx, 128));
                 let (key, val) = make_state_kv(1, idx);
-                wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
+                wb.set_state(peer_id, region_id, 1, key.chunk(), val.chunk());
             }
             engine.write(wb).unwrap();
         }

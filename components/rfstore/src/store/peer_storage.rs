@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 
+use api_version::ApiV2;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cloud_encryption::EncryptionKey;
@@ -84,6 +85,7 @@ pub(crate) struct PeerStorage {
     pub(crate) peer_id: u64,
     pub(crate) store_id: u64,
     pub(crate) region: metapb::Region,
+    pub(crate) keyspace_id: u32,
     // The preprocessed_region applies all the committed conf change, we should use it instead of
     // the current region to do preprocessed_split and preprocessed_conf_change because the current
     // region may be outdated due to slow apply.
@@ -239,7 +241,9 @@ impl PeerStorage {
         peer_id: u64,
         store_id: u64,
     ) -> Result<PeerStorage> {
-        let raft_state = init_raft_state(&engines.raft, peer_id, &region)?;
+        let keyspace_id =
+            ApiV2::get_u32_keyspace_id_by_key(region.get_start_key()).unwrap_or_default();
+        let raft_state = init_raft_state(&engines.raft, peer_id, &region, keyspace_id)?;
         let apply_state = init_apply_state(&engines.kv, &region);
         let truncated_state = init_truncated_state(&engines.raft, peer_id, &region);
         let mut shard_meta: Option<ShardMeta> = None;
@@ -258,6 +262,7 @@ impl PeerStorage {
             peer_id,
             store_id,
             region,
+            keyspace_id,
             preprocessed_region: None,
             raft_state,
             apply_state,
@@ -283,10 +288,11 @@ impl PeerStorage {
     ) {
         self.truncated_state.truncated_index = index;
         self.truncated_state.truncated_index_term = term;
-        wb.truncate_raft_log(self.peer_id, self.get_region_id(), index);
+        wb.truncate_raft_log(self.peer_id, self.get_region_id(), self.keyspace_id, index);
         wb.set_state(
             self.peer_id,
             self.get_region_id(),
+            self.keyspace_id,
             RAFT_TRUNCATED_STATE_KEY,
             &self.truncated_state.marshal(),
         );
@@ -298,7 +304,7 @@ impl PeerStorage {
         self.engines
             .raft
             .iterate_peer_states(peer_id, false, |k, _| {
-                rwb.set_state(peer_id, region_id, k, &[]);
+                rwb.set_state(peer_id, region_id, self.keyspace_id, k, &[]);
                 true
             });
         if truncate_logs {
@@ -386,6 +392,8 @@ impl PeerStorage {
     }
 
     pub fn set_region(&mut self, region: metapb::Region) {
+        self.keyspace_id =
+            ApiV2::get_u32_keyspace_id_by_key(region.get_start_key()).unwrap_or_default();
         self.region = region;
     }
 
@@ -534,7 +542,7 @@ impl PeerStorage {
             return;
         }
         for e in &entries {
-            raft_wb.append_raft_log(self.peer_id, self.get_region_id(), e);
+            raft_wb.append_raft_log(self.peer_id, self.get_region_id(), self.keyspace_id, e);
         }
         let last_entry = entries.last().unwrap();
         self.raft_state.last_index = last_entry.get_index();
@@ -581,6 +589,7 @@ fn init_raft_state(
     raft_engine: &rfengine::RfEngine,
     peer_id: u64,
     region: &metapb::Region,
+    keyspace_id: u32,
 ) -> Result<RaftState> {
     let mut rs = RaftState::default();
     if region.peers.is_empty() {
@@ -597,7 +606,13 @@ fn init_raft_state(
         rs.commit = RAFT_INIT_LOG_INDEX;
         rs.last_preprocessed_index = RAFT_INIT_LOG_INDEX;
         let mut wb = rfengine::WriteBatch::new();
-        wb.set_state(peer_id, region.id, rs_key.chunk(), rs.marshal().chunk());
+        wb.set_state(
+            peer_id,
+            region.id,
+            keyspace_id,
+            rs_key.chunk(),
+            rs.marshal().chunk(),
+        );
         raft_engine.write(wb)?;
     }
     Ok(rs)
@@ -669,6 +684,7 @@ pub fn write_initial_raft_state(
     peer_id: u64,
     region_id: u64,
     region_version: u64,
+    keyspace_id: u32,
 ) {
     let raft_state = RaftState {
         last_index: RAFT_INIT_LOG_INDEX,
@@ -680,6 +696,7 @@ pub fn write_initial_raft_state(
     raft_wb.set_state(
         peer_id,
         region_id,
+        keyspace_id,
         &raft_state_key(region_version),
         &raft_state.marshal(),
     );
@@ -706,17 +723,24 @@ pub fn write_peer_state(
     if let Some(merge_state) = merge_state {
         region_state.set_merge_state(merge_state);
     }
+    let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(region.get_start_key()).unwrap_or_default();
     let state_bin = region_state.write_to_bytes().unwrap();
     let epoch = region.get_region_epoch();
     let key = region_state_key(epoch.get_version());
-    raft_wb.set_state(peer_id, region.get_id(), &key, &state_bin);
+    raft_wb.set_state(peer_id, region.get_id(), keyspace_id, &key, &state_bin);
 }
 
 // write_engine_meta write the latest meta to rfengine. The
 // `KV_ENGINE_META_DIFF_KEY` will be cleared.
 pub fn write_engine_meta(raft_wb: &mut rfengine::WriteBatch, peer_id: u64, meta: &ShardMeta) {
     info!("{} write_engine_meta, sequence: {}", meta.tag(), meta.seq);
-    write_engine_meta_bytes(raft_wb, peer_id, meta.id, &meta.marshal());
+    write_engine_meta_bytes(
+        raft_wb,
+        peer_id,
+        meta.id,
+        meta.range.keyspace_id,
+        &meta.marshal(),
+    );
 }
 
 #[inline]
@@ -724,11 +748,24 @@ pub fn write_engine_meta_bytes(
     raft_wb: &mut rfengine::WriteBatch,
     peer_id: u64,
     region_id: u64,
+    keyspace_id: u32,
     meta: &[u8],
 ) {
-    raft_wb.set_state(peer_id, region_id, KV_ENGINE_META_KEY, meta);
-    raft_wb.set_state(peer_id, region_id, KV_ENGINE_META_DIFF_KEY, &[]);
-    raft_wb.set_state(peer_id, region_id, KV_ENGINE_META_SNAP_DIFF_KEY, &[]);
+    raft_wb.set_state(peer_id, region_id, keyspace_id, KV_ENGINE_META_KEY, meta);
+    raft_wb.set_state(
+        peer_id,
+        region_id,
+        keyspace_id,
+        KV_ENGINE_META_DIFF_KEY,
+        &[],
+    );
+    raft_wb.set_state(
+        peer_id,
+        region_id,
+        keyspace_id,
+        KV_ENGINE_META_SNAP_DIFF_KEY,
+        &[],
+    );
 }
 
 pub fn write_engine_meta_diff(
@@ -750,6 +787,7 @@ pub fn write_engine_meta_diff(
     raft_wb.set_state(
         peer_id,
         shard_id,
+        shard_meta.range.keyspace_id,
         KV_ENGINE_META_SNAP_DIFF_KEY,
         &snap_diff_cs.write_to_bytes().unwrap(),
     );
@@ -777,6 +815,7 @@ pub fn write_engine_meta_diff(
         raft_wb.set_state(
             peer_id,
             shard_id,
+            shard_meta.range.keyspace_id,
             KV_ENGINE_META_DIFF_KEY,
             &merged_diffs.write_to_bytes().unwrap(),
         );
@@ -847,7 +886,13 @@ pub(crate) fn write_raft_state(
     // The meta's version is the latest region version, use it to persist raft
     // state.
     let key = raft_state_key(meta.ver);
-    raft_wb.set_state(peer_id, meta.id, &key, &raft_state.marshal());
+    raft_wb.set_state(
+        peer_id,
+        meta.id,
+        meta.range.keyspace_id,
+        &key,
+        &raft_state.marshal(),
+    );
 }
 
 // load_engine_meta will get the meta and merge meta diffs.
@@ -954,7 +999,7 @@ pub fn load_last_raft_state_from_wb(wb: &rfengine::WriteBatch, peer_id: u64) -> 
 pub fn collect_prefix_regions(
     raft: &rfengine::RfEngine,
     prefix: &[u8],
-) -> Option<Vec<(u64, u64, u64)>> {
+) -> Option<Vec<(u64, u64, u64, u32)>> {
     let region_peers = raft.get_region_peer_map();
     let mut prefix_peers = vec![];
     for (region_id, peer_id) in region_peers {
@@ -967,8 +1012,9 @@ pub fn collect_prefix_regions(
         };
         let snap = engine_meta.get_snapshot();
         let start = snap.get_outer_start();
+        let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(start).unwrap_or_default();
         if start.starts_with(prefix) {
-            prefix_peers.push((peer_id, region_id, engine_meta.shard_ver));
+            prefix_peers.push((peer_id, region_id, engine_meta.shard_ver, keyspace_id));
         }
     }
     Some(prefix_peers)

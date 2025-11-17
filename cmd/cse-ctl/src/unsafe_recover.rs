@@ -7,6 +7,7 @@ use std::{
     str::FromStr,
 };
 
+use api_version::ApiV2;
 use bytes::{Buf, BufMut, BytesMut};
 use clap::Args;
 use kvproto::{
@@ -99,7 +100,9 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
         let region_to_peers = rf.get_region_peer_map();
         let &peer_id = region_to_peers.get(&region_id).unwrap();
         let cs = load_raft_engine_meta(&rf, peer_id).unwrap();
-        vec![(peer_id, region_id, cs.shard_ver)]
+        let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(cs.get_snapshot().get_outer_start())
+            .unwrap_or_default();
+        vec![(peer_id, region_id, cs.shard_ver, keyspace_id)]
     } else if let Some(keyspace_id) = args.keyspace {
         let mut keyspace = keyspace_id.to_be_bytes();
         keyspace[0] = b'x';
@@ -121,7 +124,7 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
     let mut wb = WriteBatch::new();
     if let Some(failed_stores_str) = args.remove_stores {
         let failed_stores: HashSet<u64> = parse_stores(&failed_stores_str);
-        for (peer_id, region_id, region_version) in target_regions {
+        for (peer_id, region_id, region_version, keyspace_id) in target_regions {
             let mut region_local_state = load_region_state(&rf, peer_id, region_version).unwrap();
             let region = region_local_state.mut_region();
             let old_region = region.clone();
@@ -131,7 +134,13 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
             region.set_peers(new_peers.into());
             let region_state_val = region_local_state.write_to_bytes().unwrap();
             let region_state_key = region_state_key(region_version);
-            wb.set_state(peer_id, region_id, &region_state_key, &region_state_val);
+            wb.set_state(
+                peer_id,
+                region_id,
+                keyspace_id,
+                &region_state_key,
+                &region_state_val,
+            );
             info!(
                 "update region from {:?} to {:?}",
                 old_region,
@@ -139,21 +148,27 @@ pub(crate) fn execute_unsafe_recover(args: UnsafeRecoverArgs) {
             );
         }
     } else if args.destroy {
-        for (peer_id, region_id, region_version) in target_regions {
+        for (peer_id, region_id, region_version, keyspace_id) in target_regions {
             rf.iterate_peer_states(peer_id, false, |k, _| {
-                wb.set_state(peer_id, region_id, k, &[]);
+                wb.set_state(peer_id, region_id, keyspace_id, k, &[]);
                 true
             });
             let mut region_local_state = load_region_state(&rf, peer_id, region_version).unwrap();
             region_local_state.state = PeerState::Tombstone;
             let region_state_val = region_local_state.write_to_bytes().unwrap();
             let region_state_key = region_state_key(region_version);
-            wb.set_state(peer_id, region_id, &region_state_key, &region_state_val);
-            wb.truncate_raft_log(peer_id, region_id, u64::MAX);
+            wb.set_state(
+                peer_id,
+                region_id,
+                keyspace_id,
+                &region_state_key,
+                &region_state_val,
+            );
+            wb.truncate_raft_log(peer_id, region_id, keyspace_id, u64::MAX);
             info!("destroy region {:?}", region_local_state);
         }
     } else {
-        for (peer_id, _, region_version) in target_regions {
+        for (peer_id, _, region_version, _) in target_regions {
             let region_local_state = load_region_state(&rf, peer_id, region_version).unwrap();
             info!("region: {:?}", region_local_state.get_region());
         }
@@ -222,6 +237,7 @@ fn create_empty_regions(rf: &RfEngine, empty_region_file: String, commit: bool) 
         wb.set_state(
             peer_id,
             region_id,
+            empty_region.keyspace_id,
             raft_state_key.chunk(),
             raft_state_val.chunk(),
         );
@@ -234,13 +250,20 @@ fn create_empty_regions(rf: &RfEngine, empty_region_file: String, commit: bool) 
         wb.set_state(
             peer_id,
             region_id,
+            empty_region.keyspace_id,
             region_state_key.chunk(),
             &region_state_val,
         );
         let engine_meta = empty_region.to_engine_meta();
         info!("create engine meta {:?}", &engine_meta);
         let engine_meta_data = engine_meta.write_to_bytes().unwrap();
-        write_engine_meta_bytes(&mut wb, peer_id, region_id, &engine_meta_data);
+        write_engine_meta_bytes(
+            &mut wb,
+            peer_id,
+            region_id,
+            empty_region.keyspace_id,
+            &engine_meta_data,
+        );
     }
     if commit {
         rf.write(wb).unwrap();
@@ -254,6 +277,7 @@ struct EmptyRegion {
     pub region_id: u64,
     pub store_id: u64,
     pub peer_id: u64,
+    pub keyspace_id: u32,
     pub start_key: String,
     pub end_key: String,
     pub epoch_ver: u64,

@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use api_version::ApiV2;
 use bitflags::bitflags;
 use bytes::{Buf, BufMut};
 use cloud_encryption::EncryptionKey;
@@ -432,6 +433,7 @@ impl DiskFullPeers {
 pub(crate) struct Peer {
     /// The ID of the Region which this Peer belongs to.
     pub(crate) region_id: u64,
+    pub(crate) keyspace_id: u32,
 
     /// The Peer meta information.
     pub(crate) peer: metapb::Peer,
@@ -537,7 +539,6 @@ impl Peer {
         if peer.get_id() == raft::INVALID_ID {
             return Err(box_err!("invalid peer id"));
         }
-
         let ps = PeerStorage::new(engines, region.clone(), peer.get_id(), store_id)?;
         let first = ps.first_index();
         let truncated = ps.truncated_index();
@@ -579,9 +580,12 @@ impl Peer {
         let logger = slog_global::get_global().new(slog::o!("region" => region_tag));
         let encryption_key = ps.get_encryption_key();
         let raft_group = RawNode::new(&raft_cfg, ps, &logger)?;
+        let keyspace_id =
+            ApiV2::get_u32_keyspace_id_by_key(region.get_start_key()).unwrap_or_default();
         let mut peer = Peer {
             peer,
             region_id: region.get_id(),
+            keyspace_id,
             raft_group,
             proposals: ProposalQueue::default(),
             pending_reads: Default::default(),
@@ -787,6 +791,8 @@ impl Peer {
             self.mut_store().preprocessed_region = None;
         }
         self.mut_store().set_region(region);
+        self.keyspace_id =
+            ApiV2::get_u32_keyspace_id_by_key(self.region().get_start_key()).unwrap_or_default();
 
         if !self.pending_remove {
             host.on_region_changed(
@@ -2242,11 +2248,14 @@ impl<'a> PreprocessRef<'a> {
                 );
                 write_engine_meta(ctx.raft_wb, new_peer_id, new_meta);
                 let region_version = new_region.get_region_epoch().get_version();
+                let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(new_region.get_start_key())
+                    .unwrap_or_default();
                 write_initial_raft_state(
                     ctx.raft_wb,
                     new_peer_id,
                     new_region.get_id(),
                     region_version,
+                    keyspace_id,
                 );
             }
             ctx.raft

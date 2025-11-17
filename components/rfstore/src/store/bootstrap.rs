@@ -50,7 +50,7 @@ pub fn bootstrap_store(engines: &Engines, cluster_id: u64, store_id: u64) -> Res
     ident.set_store_id(store_id);
     let bin = ident.write_to_bytes().unwrap();
     let mut wb = rfengine::WriteBatch::new();
-    wb.set_state(0, 0, STORE_IDENT_KEY, bin.as_slice());
+    wb.set_state(0, 0, 0, STORE_IDENT_KEY, bin.as_slice());
     engines.raft.write(wb)?;
     Ok(())
 }
@@ -75,13 +75,13 @@ pub fn prepare_bootstrap_cluster(engines: &Engines, region: &metapb::Region) -> 
     state.set_region(region.clone());
     let mut raft_wb = rfengine::WriteBatch::new();
     let val = state.write_to_bytes().unwrap();
-    raft_wb.set_state(0, 0, PREPARE_BOOTSTRAP_KEY, val.as_slice());
+    raft_wb.set_state(0, 0, 0, PREPARE_BOOTSTRAP_KEY, val.as_slice());
     write_peer_state(&mut raft_wb, peer_id, region, PeerState::Normal, None);
     let region_version = region.get_region_epoch().get_version();
-    write_initial_raft_state(&mut raft_wb, peer_id, region.get_id(), region_version);
+    write_initial_raft_state(&mut raft_wb, peer_id, region.get_id(), region_version, 0);
     let change_set = initial_change_set(region.get_id(), region_version);
     let cs_bin = change_set.write_to_bytes().unwrap();
-    raft_wb.set_state(peer_id, region.get_id(), KV_ENGINE_META_KEY, &cs_bin);
+    raft_wb.set_state(peer_id, region.get_id(), 0, KV_ENGINE_META_KEY, &cs_bin);
     engines.raft.write(raft_wb)?;
     engines.kv.ingest(change_set, true)?;
     Ok(())
@@ -117,15 +117,15 @@ pub fn clear_prepare_bootstrap_cluster(engines: &Engines, region: &metapb::Regio
     let region_ver = region.get_region_epoch().get_version();
     let peer_id = region.get_peers().first().unwrap().id;
     let mut wb = rfengine::WriteBatch::new();
-    wb.set_state(0, 0, PREPARE_BOOTSTRAP_KEY, &[]);
+    wb.set_state(0, 0, 0, PREPARE_BOOTSTRAP_KEY, &[]);
     let state_key = region_state_key(region_ver);
-    wb.set_state(peer_id, region_id, state_key.chunk(), &[]);
+    wb.set_state(peer_id, region_id, 0, state_key.chunk(), &[]);
     let raft_state_key = raft_state_key(region_ver);
-    wb.set_state(peer_id, region_id, raft_state_key.chunk(), &[]);
-    wb.set_state(peer_id, region_id, KV_ENGINE_META_KEY, &[]);
-    wb.set_state(peer_id, region_id, KV_ENGINE_META_DIFF_KEY, &[]);
-    wb.set_state(peer_id, region_id, KV_ENGINE_META_SNAP_DIFF_KEY, &[]);
-    wb.truncate_raft_log(peer_id, region_id, TRUNCATE_ALL_INDEX);
+    wb.set_state(peer_id, region_id, 0, raft_state_key.chunk(), &[]);
+    wb.set_state(peer_id, region_id, 0, KV_ENGINE_META_KEY, &[]);
+    wb.set_state(peer_id, region_id, 0, KV_ENGINE_META_DIFF_KEY, &[]);
+    wb.set_state(peer_id, region_id, 0, KV_ENGINE_META_SNAP_DIFF_KEY, &[]);
+    wb.truncate_raft_log(peer_id, region_id, 0, TRUNCATE_ALL_INDEX);
     engines.raft.write(wb)?;
     engines.kv.remove_shard(region_id);
     Ok(())
@@ -133,7 +133,7 @@ pub fn clear_prepare_bootstrap_cluster(engines: &Engines, region: &metapb::Regio
 
 pub fn clear_prepare_bootstrap_state(engines: &Engines) -> Result<()> {
     let mut wb = rfengine::WriteBatch::new();
-    wb.set_state(0, 0, PREPARE_BOOTSTRAP_KEY, &[]);
+    wb.set_state(0, 0, 0, PREPARE_BOOTSTRAP_KEY, &[]);
     engines.raft.write(wb)?;
     Ok(())
 }

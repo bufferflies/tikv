@@ -593,6 +593,7 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
     // stats.
     verify_cluster_stats(cluster, REGION_BUCKET_SIZE.0, Duration::from_secs(30));
     verify_region_info_accessor(cluster);
+    verify_rfengine_keyspace_id(cluster);
 
     check_br();
     check_load_data();

@@ -494,10 +494,13 @@ impl kvengine::MetaIterator for RecoverHandler {
             if has_dependent {
                 continue;
             }
-
+            let keyspace_id = ApiV2::get_u32_keyspace_id_by_key(
+                peer.region_local_state.get_region().get_start_key(),
+            )
+            .unwrap_or_default();
             self.rf_engine
                 .iterate_peer_states(peer.peer_id, false, |k, _| {
-                    wb.set_state(peer.peer_id, peer.region_id, k, &[]);
+                    wb.set_state(peer.peer_id, peer.region_id, keyspace_id, k, &[]);
                     true
                 });
             peer.region_local_state.state = raft_serverpb::PeerState::Tombstone;
@@ -506,10 +509,16 @@ impl kvengine::MetaIterator for RecoverHandler {
             wb.set_state(
                 peer.peer_id,
                 peer.region_id,
+                keyspace_id,
                 &region_state_key,
                 &region_state_val,
             );
-            wb.truncate_raft_log(peer.peer_id, peer.region_id, TRUNCATE_ALL_INDEX);
+            wb.truncate_raft_log(
+                peer.peer_id,
+                peer.region_id,
+                keyspace_id,
+                TRUNCATE_ALL_INDEX,
+            );
             if let Some(&parent_id) = peer.parent_id.as_ref() {
                 self.rf_engine.remove_dependent(parent_id, peer.region_id);
             }

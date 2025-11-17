@@ -17,11 +17,12 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+use api_version::ApiV2;
 use bytes::{Buf, Bytes};
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use file_system::{open_direct_file, IoRateLimitMode, IoRateLimiter};
 use kvengine::dfs::{Dfs, S3Fs};
-use kvproto::raft_serverpb::StoreIdent;
+use kvproto::raft_serverpb::{RegionLocalState, StoreIdent};
 use protobuf::Message;
 use raft_proto::eraftpb;
 use rfenginepb::{ClusterBackupMeta, KeySpaceBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
@@ -920,7 +921,7 @@ pub fn load_store_ident(rf: &RfEngine) -> Option<StoreIdent> {
 pub fn save_store_ident(rf: &RfEngine, store_ident: &StoreIdent) {
     let val = store_ident.write_to_bytes().unwrap();
     let mut wb = WriteBatch::new();
-    wb.set_state(0, 0, STORE_IDENT_KEY, &val);
+    wb.set_state(0, 0, 0, STORE_IDENT_KEY, &val);
     rf.write(wb).unwrap();
 }
 
@@ -928,6 +929,8 @@ pub fn save_store_ident(rf: &RfEngine, store_ident: &StoreIdent) {
 pub(crate) struct PeerMeta {
     pub(crate) region_id: u64,
     pub(crate) truncated_idx: u64,
+    pub(crate) keyspace_id: u32,
+    pub(crate) has_region_meta: bool,
     pub(crate) states: BTreeMap<Bytes, Bytes>,
     pub(crate) states_encoded_len: usize,
 }
@@ -935,9 +938,10 @@ pub(crate) struct PeerMeta {
 const ENTRY_BASE_LEN: usize = 2 /* key len */ + 4 /* value len */;
 
 impl PeerMeta {
-    pub(crate) fn new(region_id: u64) -> Self {
+    pub(crate) fn new(region_id: u64, keyspace_id: u32) -> Self {
         Self {
             region_id,
+            keyspace_id,
             ..Default::default()
         }
     }
@@ -947,6 +951,9 @@ impl PeerMeta {
     }
 
     pub fn set_state_bytes(&mut self, key: Bytes, val: Bytes) {
+        if key[0] == REGION_META_KEY_BYTE && !val.is_empty() {
+            self.has_region_meta = true;
+        }
         let key_len = key.len();
         self.states_encoded_len += key_len + val.len() + ENTRY_BASE_LEN;
         let old = self.states.insert(key, val);
@@ -958,6 +965,9 @@ impl PeerMeta {
     pub fn remove_state(&mut self, key: &[u8]) {
         if let Some(old) = self.states.remove(key) {
             self.states_encoded_len -= key.len() + old.len() + ENTRY_BASE_LEN;
+            if self.has_region_meta && key[0] == REGION_META_KEY_BYTE {
+                self.has_region_meta = self.get_latest_state(REGION_META_KEY_PREFIX).is_some()
+            }
         }
     }
 
@@ -977,21 +987,40 @@ impl PeerMeta {
             .map(|(_, v)| v.chunk())
     }
 
+    pub fn get_latest_peer_state(&self) -> Option<RegionLocalState> {
+        let bin = self.get_latest_state(REGION_META_KEY_PREFIX)?;
+        let mut region_local_state = RegionLocalState::new();
+        region_local_state.merge_from_bytes(bin).unwrap();
+        Some(region_local_state)
+    }
+
+    pub fn get_keyspace_id(&self) -> Option<u32> {
+        if self.keyspace_id > 0 {
+            return Some(self.keyspace_id);
+        }
+        if !self.has_region_meta {
+            return None;
+        }
+        self.get_latest_peer_state().map(|local_state| {
+            ApiV2::get_u32_keyspace_id_by_key(local_state.get_region().get_start_key())
+                .unwrap_or_default()
+        })
+    }
+
     pub(crate) fn merge(&mut self, other: &PeerMeta, keep_empty: bool) {
         assert_eq!(self.region_id, other.region_id);
         if self.truncated_idx < other.truncated_idx {
             self.truncated_idx = other.truncated_idx;
         }
+        if let Some(keyspace_id) = other.get_keyspace_id() {
+            self.keyspace_id = keyspace_id;
+        }
         for (key, val) in &other.states {
-            let old = if keep_empty || !val.is_empty() {
-                self.states_encoded_len += key.len() + val.len() + ENTRY_BASE_LEN;
-                self.states.insert(key.clone(), val.clone())
+            if keep_empty || !val.is_empty() {
+                self.set_state_bytes(key.clone(), val.clone());
             } else {
-                self.states.remove(key)
+                self.remove_state(key)
             };
-            if let Some(old) = old {
-                self.states_encoded_len -= key.len() + old.len() + ENTRY_BASE_LEN;
-            }
         }
     }
 }
@@ -1019,10 +1048,10 @@ impl DerefMut for PeerData {
 }
 
 impl PeerData {
-    pub(crate) fn new(peer_id: u64, region_id: u64) -> Self {
+    pub(crate) fn new(peer_id: u64, region_id: u64, keyspace_id: u32) -> Self {
         Self {
             peer_id,
-            meta: PeerMeta::new(region_id),
+            meta: PeerMeta::new(region_id, keyspace_id),
             ..Default::default()
         }
     }
@@ -1079,6 +1108,7 @@ impl PeerData {
         PeerStats {
             peer_id: self.peer_id,
             region_id: self.meta.region_id,
+            keyspace_id: self.meta.keyspace_id,
             size,
             num_logs,
             num_states: self.meta.states.len(),
@@ -1107,6 +1137,7 @@ pub struct EngineStats {
 pub struct PeerStats {
     pub peer_id: u64,
     pub region_id: u64,
+    pub keyspace_id: u32,
     pub size: usize,
     pub num_logs: usize,
     pub num_states: usize,
@@ -1160,9 +1191,9 @@ mod tests {
         let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
         let mut wb = WriteBatch::new();
         for peer_id in 1..=10_u64 {
-            let (key, val) = make_state_kv(2, 1);
+            let (key, val) = make_state_kv(3, 1);
             let region_id = peer_id + 1;
-            wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
+            wb.set_state(peer_id, region_id, 0, key.chunk(), val.chunk());
         }
         engine.write(wb).unwrap();
 
@@ -1174,12 +1205,13 @@ mod tests {
                     continue;
                 }
                 let region_id = peer_id + 1;
-                wb.append_raft_log(peer_id, region_id, &make_log_data(idx, 128));
+                let keyspace_id = 1;
+                wb.append_raft_log(peer_id, region_id, keyspace_id, &make_log_data(idx, 128));
                 let (key, val) = make_state_kv(1, idx);
-                wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
+                wb.set_state(peer_id, region_id, keyspace_id, key.chunk(), val.chunk());
                 if idx % 100 == 0 && peer_id != 1 {
-                    truncated_regions.push((peer_id, region_id, idx - 100));
-                    wb.truncate_raft_log(peer_id, region_id, idx - 100);
+                    truncated_regions.push((peer_id, region_id, keyspace_id, idx - 100));
+                    wb.truncate_raft_log(peer_id, region_id, keyspace_id, idx - 100);
                 }
             }
             engine.write(wb).unwrap();
@@ -1213,8 +1245,8 @@ mod tests {
         for _ in 0..2 {
             let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
             let mut wb = WriteBatch::new();
-            for &(peer_id, region_id, truncated_idx) in truncated_regions.iter() {
-                wb.truncate_raft_log(peer_id, region_id, truncated_idx);
+            for &(peer_id, region_id, keyspace_id, truncated_idx) in truncated_regions.iter() {
+                wb.truncate_raft_log(peer_id, region_id, keyspace_id, truncated_idx);
             }
             engine.apply(&wb);
             engine.iterate_all_states(false, |peer_id, _, key, _| {
@@ -1249,9 +1281,9 @@ mod tests {
     #[test]
     fn test_region_data() {
         init_logger();
-        let mut region_data = PeerData::new(1, 2);
+        let mut region_data = PeerData::new(1, 2, 1);
 
-        let mut region_batch = PeerBatch::new(1, 2);
+        let mut region_batch = PeerBatch::new(1, 2, 1);
         for i in 1..=5 {
             region_batch.append_raft_log(RaftLogOp::new(&new_raft_entry(
                 EntryType::EntryNormal,
@@ -1276,6 +1308,7 @@ mod tests {
             PeerStats {
                 peer_id: 1,
                 region_id: 2,
+                keyspace_id: 1,
                 size: 20,
                 num_logs: 5,
                 num_states: 0,
@@ -1285,7 +1318,7 @@ mod tests {
             }
         );
 
-        region_batch = PeerBatch::new(1, 2);
+        region_batch = PeerBatch::new(1, 2, 1);
         region_batch.truncate(5);
         region_batch.set_state(b"k1", b"v1");
         region_batch.set_state(b"k2", b"v2");
@@ -1304,6 +1337,7 @@ mod tests {
             PeerStats {
                 peer_id: 1,
                 region_id: 2,
+                keyspace_id: 1,
                 size: 0,
                 num_logs: 0,
                 num_states: 2,
@@ -1313,14 +1347,14 @@ mod tests {
             }
         );
 
-        region_batch = PeerBatch::new(1, 2);
+        region_batch = PeerBatch::new(1, 2, 1);
         region_batch.truncate(5);
         region_batch.set_state(b"k1", b"");
         assert!(region_data.apply(&region_batch).is_empty());
         assert!(region_data.get_state(b"k1").is_none());
         assert_eq!(region_data.get_state(b"k2"), Some(&b"v2".to_vec().into()));
 
-        region_batch = PeerBatch::new(1, 2);
+        region_batch = PeerBatch::new(1, 2, 1);
         region_batch.truncate(100);
         assert!(region_data.apply(&region_batch).is_empty());
         assert_eq!(region_data.truncated_idx, 100);
@@ -1340,11 +1374,12 @@ mod tests {
         let mut wb = WriteBatch::new();
         for peer_id in 1..=2 {
             let region_id = peer_id + 1;
+            let keyspace_id = 1;
             for i in 1..=10 {
                 let entry = new_raft_entry(EntryType::EntryNormal, peer_id, i, b"data", 0);
                 let (state_key, state_val) = (&[STATE_PREFIX, i as u8], &[i as u8]);
-                wb.append_raft_log(peer_id, region_id, &entry);
-                wb.set_state(peer_id, region_id, state_key, state_val);
+                wb.append_raft_log(peer_id, region_id, keyspace_id, &entry);
+                wb.set_state(peer_id, region_id, keyspace_id, state_key, state_val);
 
                 let (entries, states) = data_map
                     .entry(peer_id)
@@ -1497,18 +1532,19 @@ mod tests {
         let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
         let mut wb = WriteBatch::new();
         for peer_id in 1..=10_u64 {
-            let (key, val) = make_state_kv(2, 1);
+            let (key, val) = make_state_kv(3, 1);
             let region_id = peer_id + 1;
-            wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
+            wb.set_state(peer_id, region_id, 0, key.chunk(), val.chunk());
         }
         engine.write(wb).unwrap();
         for idx in 1..=1050_u64 {
             let mut wb = WriteBatch::new();
             for peer_id in 1..=10_u64 {
                 let region_id = peer_id + 1;
-                wb.append_raft_log(peer_id, region_id, &make_log_data(idx, 128));
+                let keyspace_id = 1;
+                wb.append_raft_log(peer_id, region_id, keyspace_id, &make_log_data(idx, 128));
                 let (key, val) = make_state_kv(1, idx);
-                wb.set_state(peer_id, region_id, key.chunk(), val.chunk());
+                wb.set_state(peer_id, region_id, keyspace_id, key.chunk(), val.chunk());
             }
             engine.write(wb).unwrap();
         }
@@ -1599,30 +1635,30 @@ mod tests {
         {
             let mut wb = WriteBatch::new();
             let (key, val) = make_region_state(10, 42);
-            wb.set_state(1, 2, &key, &val);
+            wb.set_state(1, 2, 1, &key, &val);
             engine.write(wb).unwrap();
         }
         for i in 1..=50 {
             let mut wb = WriteBatch::new();
-            wb.append_raft_log(1, 2, &make_log_data(i, 128));
+            wb.append_raft_log(1, 2, 1, &make_log_data(i, 128));
             engine.write(wb).unwrap();
         }
 
         // Truncate all index.
         let mut wb = WriteBatch::new();
-        wb.truncate_raft_log(1, 2, TRUNCATE_ALL_INDEX);
+        wb.truncate_raft_log(1, 2, 1, TRUNCATE_ALL_INDEX);
         engine.write(wb).unwrap();
 
         // Write more batch to trigger WAL compaction.
         {
             let mut wb = WriteBatch::new();
             let (key, val) = make_region_state(11, 43);
-            wb.set_state(2, 3, &key, &val);
+            wb.set_state(2, 3, 0, &key, &val);
             engine.write(wb).unwrap();
         }
         for i in 1..=10 {
             let mut wb = WriteBatch::new();
-            wb.append_raft_log(2, 3, &make_log_data(i, wal_size));
+            wb.append_raft_log(2, 3, 0, &make_log_data(i, wal_size));
             engine.write(wb).unwrap();
         }
 

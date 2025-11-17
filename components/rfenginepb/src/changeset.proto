@@ -27,6 +27,7 @@ message PeerMeta {
     uint64 truncated_index = 3;
     repeated PeerState states = 4;
     repeated RaftLogFile files = 5;
+    uint32 keyspace_id = 6;
 }
 
 message PeerState {

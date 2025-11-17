@@ -304,10 +304,17 @@ impl RaftBatchSystem {
                 if local_state.state != PeerState::Tombstone {
                     local_states.push(local_state);
                 } else {
+                    let keyspace_id =
+                        ApiV2::get_u32_keyspace_id_by_key(local_state.get_region().get_start_key())
+                            .unwrap_or_default();
                     ctx.engines
                         .kv
                         .remove_shard(local_state.get_region().get_id());
-                    tomb_stone_peers.push((peer_id, local_state.get_region().get_id()));
+                    tomb_stone_peers.push((
+                        peer_id,
+                        local_state.get_region().get_id(),
+                        keyspace_id,
+                    ));
                 }
                 false
             });
@@ -340,15 +347,15 @@ impl RaftBatchSystem {
     fn clear_tombstone_peers_on_restart(
         &self,
         rfengine: &rfengine::RfEngine,
-        tombstone_peers: Vec<(u64, u64)>,
+        tombstone_peers: Vec<(u64, u64, u32)>,
     ) {
         let mut rwb = rfengine::WriteBatch::new();
-        for (peer_id, region_id) in tombstone_peers {
+        for (peer_id, region_id, keyspace_id) in tombstone_peers {
             rfengine.iterate_peer_states(peer_id, false, |k, _| {
-                rwb.set_state(peer_id, region_id, k, &[]);
+                rwb.set_state(peer_id, region_id, keyspace_id, k, &[]);
                 true
             });
-            rwb.truncate_raft_log(peer_id, region_id, TRUNCATE_ALL_INDEX);
+            rwb.truncate_raft_log(peer_id, region_id, keyspace_id, TRUNCATE_ALL_INDEX);
         }
     }
 }

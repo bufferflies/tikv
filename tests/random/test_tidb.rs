@@ -859,6 +859,7 @@ pub(crate) async fn verify_cluster(
     // stats.
     verify_cluster_stats(cluster, REGION_BUCKET_SIZE.0, Duration::from_secs(60));
     verify_region_info_accessor(cluster);
+    verify_rfengine_keyspace_id(cluster);
 
     if switches.tpc_switch_on {
         check_tpc();

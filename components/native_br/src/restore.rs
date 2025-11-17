@@ -7,6 +7,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use api_version::ApiV2;
 use cloud_server::TikvServer;
 use etcd_client::{Compare, CompareOp, Txn, TxnOp};
 use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
@@ -134,7 +135,7 @@ pub fn restore_tikv(
 fn put_store_ident(rf: &RfEngine, ident: &StoreIdent) {
     let val = ident.write_to_bytes().unwrap();
     let mut wb = rfengine::WriteBatch::new();
-    wb.set_state(0, 0, STORE_IDENT_KEY, val.as_slice());
+    wb.set_state(0, 0, 0, STORE_IDENT_KEY, val.as_slice());
     rf.write(wb).unwrap();
 }
 
@@ -182,12 +183,15 @@ fn update_local_region_state_store_id(
                 );
                 peer.set_store_id(new_store_id);
             }
-
+            let keyspace_id =
+                ApiV2::get_u32_keyspace_id_by_key(region_local_state.get_region().get_start_key())
+                    .unwrap_or_default();
             let region_state_key = region_state_key(cs.shard_ver);
             let region_state_val = region_local_state.write_to_bytes().unwrap();
             wb.set_state(
                 peer_id,
                 cs.shard_id,
+                keyspace_id,
                 region_state_key.as_ref(),
                 region_state_val.as_slice(),
             );

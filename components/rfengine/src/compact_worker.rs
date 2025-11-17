@@ -250,6 +250,17 @@ impl CompactWorker {
             peer_meta_pb.set_peer_id(peer_batch.peer_id);
             peer_meta_pb.set_region_id(peer_batch.meta.region_id);
             peer_meta_pb.set_truncated_index(peer_batch.truncated_idx);
+            if let Some(keyspace_id) = peer_batch.get_keyspace_id() {
+                peer_meta_pb.set_keyspace_id(keyspace_id);
+            } else {
+                let keyspace_id = self
+                    .manifest
+                    .peers
+                    .get(&peer_batch.peer_id)
+                    .map(|peer| peer.keyspace_id)
+                    .unwrap_or_default();
+                peer_meta_pb.set_keyspace_id(keyspace_id);
+            }
             for (k, v) in &peer_batch.meta.states {
                 let mut state_pb = rfenginepb::PeerState::new();
                 state_pb.set_key(k.to_vec());
@@ -1243,10 +1254,11 @@ mod tests {
         raft_logs: &mut RaftLogs,
         peer_id: u64,
         region_id: u64,
+        keyspace_id: u32,
         first_index: u64,
         last_index: u64,
     ) -> (rfenginepb::RaftLogFile, bool /* is_cached */) {
-        let mut peer_batch = PeerBatch::new(peer_id, region_id);
+        let mut peer_batch = PeerBatch::new(peer_id, region_id, keyspace_id);
         for index in first_index..=last_index {
             let op = RaftLogOp {
                 index,
@@ -1321,6 +1333,7 @@ mod tests {
                     &mut peer_raft_log,
                     peer_id,
                     region_id,
+                    1,
                     first_index,
                     last_index,
                 );
@@ -1437,7 +1450,7 @@ mod tests {
             None,
         );
 
-        let mut peer_batch = PeerBatch::new(1, 1000);
+        let mut peer_batch = PeerBatch::new(1, 1000, 1);
         for index in 1..=30 {
             let op = RaftLogOp {
                 index,
@@ -1458,7 +1471,7 @@ mod tests {
 
         // Test that if a single raft entry exceeds the size limit, an
         // error will be returned.
-        let mut peer_batch = PeerBatch::new(1, 1000);
+        let mut peer_batch = PeerBatch::new(1, 1000, 1);
         peer_batch.append_raft_log(RaftLogOp {
             index: 1,
             term: 1,
