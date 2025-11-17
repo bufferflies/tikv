@@ -2,12 +2,15 @@
 
 use core::panic;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     fmt::{Debug, Formatter},
     iter::Iterator as _,
     marker::PhantomData,
     ops::Deref,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -21,7 +24,7 @@ use protobuf::Message;
 use tidb_query_datatype::{
     codec::{
         mysql::VectorFloat32Decoder,
-        table::{decode_common_handle, decode_int_handle},
+        table::{decode_common_handle, decode_int_handle, decode_table_id},
     },
     FieldTypeFlag,
 };
@@ -29,9 +32,11 @@ use tikv_util::{
     box_try,
     codec::number::{U32_SIZE, U64_SIZE},
     memory::{MemoryLimiter, MemoryLimiterGuard},
+    mpsc,
     time::Instant,
 };
 use tipb::{AnnQueryInfo, ColumnInfo, FtsQueryInfo};
+use tokio::runtime::Handle;
 use txn_types::Lock;
 
 use crate::{
@@ -57,6 +62,7 @@ use crate::{
         Iterator as TableIterator, SkipOpTxnFileIterator, SnapVersion, TxnFile, TxnFileIterator,
         Value,
     },
+    table_id::encode_table_prefix_key,
     txn_chunk_manager::TxnChunkManager,
     *,
 };
@@ -1879,6 +1885,79 @@ impl SnapAccessCore {
         self.data.columnar_table_ids.clone()
     }
 
+    // Filter the columnar table ids that are not empty.
+    // `table_ids` is the list of table ids to filter.
+    // Returns the list of columnar table ids that are not empty. If the table_id is
+    // not in the snapshot, it will be filtered out.
+    // NOTE: The caller should guarantee that table_ids is sorted.
+    pub fn filter_columnar_table_ids_not_empty(&self, table_ids: &[i64]) -> HashSet<i64> {
+        if table_ids.is_empty() {
+            return HashSet::new();
+        }
+        let columnar_table_ids = self
+            .data
+            .columnar_table_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let mut filtered_table_ids = HashSet::new();
+        let mut iter = self.new_memtable_unconverted_l0_iterator();
+        let mut delta_data_table_id = table_ids[0];
+        for &table_id in table_ids {
+            if !columnar_table_ids.contains(&table_id) {
+                continue;
+            }
+
+            // Optimize the seek if there are lots of tables are empty.
+            if table_id >= delta_data_table_id {
+                // Check data exists in the snapshot delta data.
+                let table_key_prefix = encode_table_prefix_key(table_id);
+                iter.seek(table_key_prefix.as_ref());
+                if iter.valid() {
+                    let key = iter.key();
+                    delta_data_table_id = decode_table_id(key.deref()).unwrap_or(i64::MAX);
+                    if key.starts_with(table_key_prefix.as_ref().deref()) {
+                        filtered_table_ids.insert(table_id);
+                        continue;
+                    }
+                } else {
+                    delta_data_table_id = i64::MAX;
+                }
+            }
+
+            // Check data exists in the snapshots columnar files.
+            if self.columnar_files_contains_table(table_id) {
+                filtered_table_ids.insert(table_id);
+            }
+        }
+        filtered_table_ids
+    }
+
+    fn new_memtable_unconverted_l0_iterator(&self) -> Box<dyn table::Iterator> {
+        let mut iters: Vec<Box<dyn table::Iterator>> = Vec::new();
+        for mem_tbl in &self.data.mem_tbls {
+            iters.push(mem_tbl.get_cf(WRITE_CF).new_iterator(false));
+        }
+        for l0 in &self.data.col_levels.unconverted_l0s {
+            let Some(l0_write_cf) = l0.get_cf(WRITE_CF) else {
+                continue;
+            };
+            iters.push(l0_write_cf.new_iterator(false, false));
+        }
+        table::new_merge_iterator(iters, false)
+    }
+
+    fn columnar_files_contains_table(&self, table_id: i64) -> bool {
+        for columnar_level in &self.data.col_levels.levels {
+            for file in &columnar_level.files {
+                if file.has_table(table_id) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // validate_cached_value validate the cached value for the given inner_key and
     // snap_version.
     // By checking the mem tables with greater snap_version, we ensure the cached
@@ -2149,22 +2228,28 @@ pub struct TableCtx {
     pub ranges: Vec<tipb::KeyRange>,
 }
 
-/// CloudColumnarReaders is used to read columnar data from multiple tables
-/// sequentially in one shard.
-/// NOTE: This is used in columnar read node.
+/// CloudColumnarReaders coordinates reading columnar data from multiple tables,
+/// dispatching per-table work onto worker threads to leverage CPU parallelism.
 pub struct CloudColumnarReaders {
+    runtime: Handle,
     snap_access: SnapAccess,
-    reader: Option<CloudColumnarReader>,
     tables: Vec<TableCtx>,
-    columns: Vec<ColumnInfo>,
+    columns: Arc<Vec<ColumnInfo>>,
     scan_ctx: TableScanCtx,
     ann_query_info: Arc<tipb::AnnQueryInfo>,
     ia_ctx: IaCtx,
     start_ts: u64,
+    concurrency: usize,
+    reader: Option<CloudColumnarReader>,
+    result_rx: Option<mpsc::Receiver<ReadResult>>,
+    current_block: Option<BlockResult>,
+    read_limit: Option<usize>,
+    finished: bool,
 }
 
 impl CloudColumnarReaders {
     pub fn new(
+        runtime: Handle,
         snap_access: SnapAccess,
         tables: Vec<TableCtx>,
         columns: Vec<ColumnInfo>,
@@ -2172,21 +2257,299 @@ impl CloudColumnarReaders {
         ann_query_info: tipb::AnnQueryInfo,
         ia_ctx: IaCtx,
         start_ts: u64,
+        concurrency: usize,
     ) -> Self {
+        let mut table_ids = tables
+            .iter()
+            .map(|table| table.table_id)
+            .collect::<Vec<_>>();
+        table_ids.sort_unstable();
+        let filtered_table_ids = snap_access.filter_columnar_table_ids_not_empty(&table_ids);
+        let tables = tables
+            .into_iter()
+            .filter(|table| filtered_table_ids.contains(&table.table_id))
+            .collect::<Vec<_>>();
+        let concurrency = if tables.len() > 1 && concurrency > 1 {
+            concurrency
+        } else {
+            0
+        };
         Self {
+            runtime,
             snap_access,
-            reader: None,
             tables,
-            columns,
+            columns: Arc::new(columns),
             scan_ctx,
             ann_query_info: Arc::new(ann_query_info),
             ia_ctx,
             start_ts,
+            concurrency,
+            reader: None,
+            result_rx: None,
+            current_block: None,
+            read_limit: None,
+            finished: false,
         }
     }
 
+    fn need_concurrency(&self) -> bool {
+        self.concurrency > 0
+    }
+
     pub fn ffi_read_block(&mut self, read_limit: usize) -> Result<usize> {
+        // If there is only one table, we use sequential read.
+        if !self.need_concurrency() {
+            return self.sequential_read_block(read_limit);
+        }
+
+        if self.finished {
+            self.current_block = None;
+            return Ok(0);
+        }
+        if read_limit == 0 {
+            self.finished = true;
+            self.current_block = None;
+            return Ok(0);
+        }
+        if self.result_rx.is_none() {
+            self.start_workers(read_limit)?;
+        }
+        if let Some(expected) = self.read_limit {
+            debug_assert_eq!(expected, read_limit);
+        }
+        let Some(rx) = self.result_rx.as_ref() else {
+            return Ok(0);
+        };
+        match rx.recv() {
+            Ok(ReadResult::Block(block)) => {
+                let read_count = block.read_count;
+                self.current_block = Some(block);
+                Ok(read_count)
+            }
+            Ok(ReadResult::Finished) => {
+                self.finished = true;
+                self.current_block = None;
+                Ok(0)
+            }
+            Ok(ReadResult::Error(err)) => {
+                self.finished = true;
+                self.current_block = None;
+                Err(err)
+            }
+            Err(_) => {
+                self.finished = true;
+                self.current_block = None;
+                Ok(0)
+            }
+        }
+    }
+
+    pub fn ffi_read_handle(&mut self) -> Vec<u8> {
+        if !self.need_concurrency() {
+            if let Some(reader) = self.reader.as_mut() {
+                return reader.ffi_read_handle();
+            }
+            return vec![];
+        }
+        self.current_block
+            .as_mut()
+            .map(|block| std::mem::take(&mut block.handle_data))
+            .unwrap_or_default()
+    }
+
+    pub fn ffi_read_version(&mut self) -> Vec<u8> {
+        if !self.need_concurrency() {
+            if let Some(reader) = self.reader.as_mut() {
+                return reader.ffi_read_version();
+            }
+            return vec![];
+        }
+        self.current_block
+            .as_mut()
+            .map(|block| std::mem::take(&mut block.version_data))
+            .unwrap_or_default()
+    }
+
+    pub fn ffi_read_column(&mut self, col_id: i64) -> Vec<u8> {
+        if !self.need_concurrency() {
+            if let Some(reader) = self.reader.as_mut() {
+                return reader.ffi_read_column(col_id);
+            }
+            return vec![];
+        }
+        self.current_block
+            .as_mut()
+            .map(|block| block.take_column_data(col_id))
+            .unwrap_or_default()
+    }
+
+    pub fn ffi_physical_table_id(&self) -> i64 {
+        if !self.need_concurrency() {
+            return self
+                .reader
+                .as_ref()
+                .map(|reader| reader.physical_table_id())
+                .unwrap_or(-1);
+        }
+        self.current_block
+            .as_ref()
+            .map(|block| block.table_id)
+            .unwrap_or(-1)
+    }
+
+    fn start_workers(&mut self, read_limit: usize) -> Result<()> {
+        debug_assert!(self.concurrency > 0);
+
+        let (tx, rx) = mpsc::bounded(self.concurrency * 2);
+        self.read_limit = Some(read_limit);
+
+        let tables = std::mem::take(&mut self.tables);
+        if tables.is_empty() {
+            self.finished = true;
+            self.result_rx = Some(rx);
+            let _ = tx.send(ReadResult::Finished);
+            return Ok(());
+        }
+
+        let table_count = tables.len();
+        let queue = Arc::new(Mutex::new(VecDeque::from(tables)));
+        let worker_count = std::cmp::min(self.concurrency, table_count);
+        let active_workers = Arc::new(AtomicUsize::new(worker_count));
+        let ann_query_info = Arc::clone(&self.ann_query_info);
+        let columns = Arc::clone(&self.columns);
+        let start_ts = self.start_ts;
+
+        for _ in 0..worker_count {
+            let tx_clone = tx.clone();
+            let queue_clone = Arc::clone(&queue);
+            let ann_query = Arc::clone(&ann_query_info);
+            let columns = Arc::clone(&columns);
+            let snap_access = self.snap_access.clone();
+            let ia_ctx = self.ia_ctx.clone();
+            let scan_ctx = self.scan_ctx.clone();
+            let active_workers = Arc::clone(&active_workers);
+
+            self.runtime.spawn_blocking(move || {
+                let send_finished = Self::worker_loop(
+                    &queue_clone,
+                    &tx_clone,
+                    &snap_access,
+                    &ia_ctx,
+                    &columns,
+                    &scan_ctx,
+                    &ann_query,
+                    start_ts,
+                    read_limit,
+                );
+
+                let prev = active_workers.fetch_sub(1, Ordering::AcqRel);
+                if send_finished && prev == 1 {
+                    let _ = tx_clone.send(ReadResult::Finished);
+                }
+            });
+        }
+        drop(tx);
+        self.result_rx = Some(rx);
+        Ok(())
+    }
+
+    fn worker_loop(
+        queue: &Arc<Mutex<VecDeque<TableCtx>>>,
+        tx: &mpsc::Sender<ReadResult>,
+        snap_access: &SnapAccess,
+        ia_ctx: &IaCtx,
+        columns: &Arc<Vec<ColumnInfo>>,
+        scan_ctx: &TableScanCtx,
+        ann_query: &Arc<tipb::AnnQueryInfo>,
+        start_ts: u64,
+        read_limit: usize,
+    ) -> bool {
+        while let Some(table_ctx) = Self::pop_table(queue) {
+            if !Self::process_table(
+                table_ctx,
+                read_limit,
+                tx,
+                snap_access,
+                ia_ctx,
+                columns,
+                scan_ctx,
+                ann_query,
+                start_ts,
+            ) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn pop_table(queue: &Arc<Mutex<VecDeque<TableCtx>>>) -> Option<TableCtx> {
+        let mut guard = queue.lock().unwrap();
+        guard.pop_front()
+    }
+
+    fn process_table(
+        table_ctx: TableCtx,
+        read_limit: usize,
+        tx: &mpsc::Sender<ReadResult>,
+        snap_access: &SnapAccess,
+        ia_ctx: &IaCtx,
+        columns: &Arc<Vec<ColumnInfo>>,
+        scan_ctx: &TableScanCtx,
+        ann_query: &Arc<tipb::AnnQueryInfo>,
+        start_ts: u64,
+    ) -> bool {
+        let mut reader = match CloudColumnarReader::new(
+            snap_access.clone(),
+            ia_ctx.clone(),
+            table_ctx.table_id,
+            table_ctx.ranges.clone(),
+            columns,
+            scan_ctx,
+            Arc::clone(ann_query),
+            start_ts,
+        ) {
+            Ok(reader) => reader,
+            Err(err) => {
+                let err = crate::Error::from(crate::table::Error::Other(err.to_string()));
+                let _ = tx.send(ReadResult::Error(err));
+                return false;
+            }
+        };
+
+        Self::stream_table_blocks(&mut reader, read_limit, tx)
+    }
+
+    fn stream_table_blocks(
+        reader: &mut CloudColumnarReader,
+        read_limit: usize,
+        tx: &mpsc::Sender<ReadResult>,
+    ) -> bool {
+        loop {
+            match reader.ffi_read_block(read_limit) {
+                Ok(0) => return true,
+                Ok(read_count) => {
+                    let block = BlockResult::new(read_count, reader);
+                    if tx.send(ReadResult::Block(block)).is_err() {
+                        return false;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(ReadResult::Error(e));
+                    return false;
+                }
+            }
+        }
+    }
+
+    fn sequential_read_block(&mut self, read_limit: usize) -> Result<usize> {
+        if read_limit == 0 {
+            return Ok(0);
+        }
+
         if self.reader.is_none() {
+            if self.tables.is_empty() {
+                return Ok(0);
+            }
             let table_ctx = self.tables.remove(0);
             self.reader = Some(
                 CloudColumnarReader::new(
@@ -2202,6 +2565,7 @@ impl CloudColumnarReaders {
                 .map_err(|e| crate::table::Error::Other(e.to_string()))?,
             );
         }
+
         loop {
             let read_count = self.reader.as_mut().unwrap().ffi_read_block(read_limit)?;
             if read_count == 0 {
@@ -2217,7 +2581,7 @@ impl CloudColumnarReaders {
                         table_ctx.ranges.clone(),
                         &self.columns,
                         &self.scan_ctx,
-                        self.ann_query_info.clone(),
+                        Arc::clone(&self.ann_query_info),
                         self.start_ts,
                     )
                     .map_err(|e| crate::table::Error::Other(e.to_string()))?,
@@ -2227,34 +2591,69 @@ impl CloudColumnarReaders {
             return Ok(read_count);
         }
     }
+}
 
-    pub fn ffi_read_handle(&mut self) -> Vec<u8> {
-        if let Some(reader) = self.reader.as_mut() {
-            return reader.ffi_read_handle();
+struct BlockResult {
+    table_id: i64,
+    read_count: usize,
+    schema: Schema,
+    handle_column_id: i64,
+    version_column_id: i64,
+    handle_data: Vec<u8>,
+    version_data: Vec<u8>,
+    columns: HashMap<i64, Vec<u8>>,
+}
+
+impl BlockResult {
+    fn new(read_count: usize, reader: &mut CloudColumnarReader) -> Self {
+        let schema = reader.schema.clone();
+        let handle_data = reader.ffi_read_handle();
+        let version_data = reader.ffi_read_version();
+        let mut columns = HashMap::with_capacity(schema.columns.len());
+        for col_info in &schema.columns {
+            let col_id = col_info.get_column_id();
+            if col_info.get_pk_handle() {
+                continue;
+            }
+            columns.insert(col_id, reader.ffi_read_column(col_id));
         }
-        vec![]
-    }
-
-    pub fn ffi_read_version(&mut self) -> Vec<u8> {
-        if let Some(reader) = self.reader.as_mut() {
-            return reader.ffi_read_version();
+        let handle_column_id = schema.handle_column.get_column_id();
+        let version_column_id = schema.version_column.get_column_id();
+        let table_id = schema.table_id;
+        Self {
+            table_id,
+            read_count,
+            schema,
+            handle_column_id,
+            version_column_id,
+            handle_data,
+            version_data,
+            columns,
         }
-        vec![]
     }
 
-    pub fn ffi_read_column(&mut self, col_id: i64) -> Vec<u8> {
-        if let Some(reader) = self.reader.as_mut() {
-            return reader.ffi_read_column(col_id);
+    // Take the column data and remove it from the block result to avoid cloning.
+    // NOTE: This method can only be called once for each column.
+    fn take_column_data(&mut self, col_id: i64) -> Vec<u8> {
+        if col_id == self.handle_column_id {
+            return std::mem::take(&mut self.handle_data);
         }
-        vec![]
+        if col_id == self.version_column_id {
+            return std::mem::take(&mut self.version_data);
+        }
+        if let Some(col_info) = self.schema.find_column_by_id(col_id) {
+            if col_info.get_pk_handle() {
+                return std::mem::take(&mut self.handle_data);
+            }
+        }
+        self.columns.remove(&col_id).unwrap_or_default()
     }
+}
 
-    pub fn ffi_physical_table_id(&self) -> i64 {
-        self.reader
-            .as_ref()
-            .map(|reader| reader.physical_table_id())
-            .unwrap_or(-1)
-    }
+enum ReadResult {
+    Block(BlockResult),
+    Error(crate::Error),
+    Finished,
 }
 
 pub struct CloudColumnarReader {
@@ -2456,8 +2855,7 @@ impl CloudColumnarReader {
     pub fn ffi_read_handle(&mut self) -> Vec<u8> {
         let start = Instant::now_coarse();
         let mut data = vec![];
-        let col_id = self.block.get_handle_buf().col_id();
-        let col_info = self.schema.find_column_by_id(col_id as i64).unwrap();
+        let col_info = &self.schema.handle_column;
         self.block.get_handle_buf().serialize_for_tiflash(
             &mut data,
             col_info.get_tp(),
@@ -2471,8 +2869,7 @@ impl CloudColumnarReader {
     pub fn ffi_read_version(&mut self) -> Vec<u8> {
         let start = Instant::now_coarse();
         let mut data = vec![];
-        let col_id = self.block.get_version_buf().col_id();
-        let col_info = self.schema.find_column_by_id(col_id as i64).unwrap();
+        let col_info = &self.schema.version_column;
         self.block.get_version_buf().serialize_for_tiflash(
             &mut data,
             col_info.get_tp(),
