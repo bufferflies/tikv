@@ -760,6 +760,15 @@ pub(crate) fn start_workloads(
 }
 
 pub(crate) async fn stop_schedulers(pd_ctl: Arc<pd_control::PdControl>) {
+    // Disable scheduler limit config.
+    let configs = vec![
+        ("merge-schedule-limit", "0"),
+        ("region-schedule-limit", "0"),
+        ("replica-schedule-limit", "0"),
+        ("leader-schedule-limit", "0"),
+        ("hot-region-schedule-limit", "0"),
+    ];
+    pd_ctl.set_config(&configs).await.unwrap();
     // Pause all schedulers to make stats stable.
     pd_ctl
         .pause_or_resume_scheduler("all", Duration::from_secs(3600))

@@ -133,6 +133,16 @@ impl PdControl {
         self.client.get(PD_CONFIG_PATH).await.map_err(Into::into)
     }
 
+    pub async fn set_config(&self, configs: &[(&str, &str)]) -> Result<()> {
+        let mut params = serde_json::Map::new();
+        for &(item, value) in configs {
+            let json_value: serde_json::Value = serde_json::from_str(value)?;
+            params.insert(item.to_string(), json_value);
+        }
+        let _: String = self.client.post(PD_CONFIG_PATH, &params).await?;
+        Ok(())
+    }
+
     pub async fn get_store_regions(&self, store_id: u64) -> Result<RegionsInfo> {
         let query = format!("{}/{}", PD_REGIONS_STORE_PATH, store_id);
         self.client.get(query).await.map_err(Into::into)
