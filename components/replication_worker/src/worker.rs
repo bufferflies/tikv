@@ -359,10 +359,9 @@ impl ReplicationWorker {
         WalProgressFetcher::run(
             self.ctx.pd.clone(),
             TRACK_WAL_PROGRESS_TIMEOUT,
-            self.config.tolerate_store_err,
+            &self.config,
             self.runtime.handle().clone(),
             self.wal_progress_targets.clone(),
-            self.config.sync_interval.0,
         );
 
         loop {

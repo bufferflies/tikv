@@ -14,7 +14,7 @@ use tikv_util::{box_err, box_try_join, debug, error, time::Instant, warn};
 use tokio::task::JoinSet;
 use txn_types::TimeStamp;
 
-use crate::{util::send_request_to_store, Error, Result};
+use crate::{util::send_request_to_store, Error, ReplicationWorkerConfig, Result};
 
 // None: When the store is not ready.
 pub(crate) type StoreWalProgresses = HashMap<u64 /* store_id */, Option<StoreProgress>>;
@@ -60,22 +60,25 @@ pub(crate) struct WalProgressFetcher {
     tolerate_store_err: bool,
     thread_pool: tokio::runtime::Handle,
     http_client: HttpClient,
+
+    skip_store_addr_keywords: Vec<String>,
 }
 
 impl WalProgressFetcher {
     pub(crate) fn run(
         pd: Arc<dyn PdClient>,
         timeout: Duration,
-        tolerate_store_err: bool,
+        config: &ReplicationWorkerConfig,
         thread_pool: tokio::runtime::Handle,
         targets: WalProgressTargets,
-        interval: Duration,
     ) {
+        let interval = config.sync_interval.0;
         let fetcher = Arc::new(Self::new(
             pd,
             timeout,
-            tolerate_store_err,
+            config.tolerate_store_err,
             thread_pool.clone(),
+            config.skip_store_addr_keywords.clone(),
         ));
         thread_pool.spawn(async move {
             loop {
@@ -102,6 +105,7 @@ impl WalProgressFetcher {
         timeout: Duration,
         tolerate_store_err: bool,
         thread_pool: tokio::runtime::Handle,
+        skip_store_addr_keywords: Vec<String>,
     ) -> Self {
         let http_client = pd
             .get_security_mgr()
@@ -113,6 +117,7 @@ impl WalProgressFetcher {
             tolerate_store_err,
             http_client,
             thread_pool,
+            skip_store_addr_keywords,
         }
     }
 
@@ -123,7 +128,8 @@ impl WalProgressFetcher {
     async fn fetch_target_ts_and_progress(
         self: &Arc<Self>,
     ) -> Result<(TimeStamp, StoreWalProgresses)> {
-        let stores = get_all_stores_except_tiflash_async(self.pd.as_ref()).await?;
+        let ori_stores = get_all_stores_except_tiflash_async(self.pd.as_ref()).await?;
+        let stores = filter_stores(&self.skip_store_addr_keywords, ori_stores);
         let ts = self.pd.get_min_tso().await?;
 
         let mut errors = vec![];
@@ -250,5 +256,62 @@ impl UpdateWalResult {
             Self::Finished { .. } => "finished",
             Self::NotFinished { .. } => "not_finished",
         }
+    }
+}
+
+fn filter_stores(
+    skip_store_addr_keywords: &[String],
+    stores: Vec<metapb::Store>,
+) -> Vec<metapb::Store> {
+    if skip_store_addr_keywords.is_empty() {
+        return stores;
+    }
+    stores
+        .into_iter()
+        .filter(|store| {
+            // Store address NOT contains ANY keyword.
+            !skip_store_addr_keywords
+                .iter()
+                .any(|keyword| store.get_address().contains(keyword))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_stores() {
+        let store_addrs = vec![
+            "tikv-p0-tikv-0",
+            "tikv-p1-tikv-0",
+            "tikv-poc-p0-tikv-0",
+            "tikv-poc-p1-tikv-0",
+            "tikv-poc-p2-tikv-0",
+            "tikv-p2-tikv-0",
+            "tikv-hot-p0-tikv-0",
+            "tikv-hot-p1-tikv-0",
+            "tikv-hot-p2-tikv-0",
+        ];
+        let stores = store_addrs
+            .into_iter()
+            .enumerate()
+            .map(|(i, addr)| {
+                let mut store = metapb::Store::default();
+                store.set_id(i as u64);
+                store.set_address(addr.to_string());
+                store
+            })
+            .collect::<Vec<_>>();
+
+        let skip_keywords = vec!["poc".to_string(), "hot".to_string()];
+        let filtered_stores = filter_stores(&skip_keywords, stores);
+        let filtered_addrs: Vec<&str> = filtered_stores
+            .iter()
+            .map(|store| store.get_address())
+            .collect();
+        let expected_addrs = vec!["tikv-p0-tikv-0", "tikv-p1-tikv-0", "tikv-p2-tikv-0"];
+        assert_eq!(filtered_addrs, expected_addrs);
     }
 }

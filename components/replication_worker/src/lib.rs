@@ -93,6 +93,9 @@ pub struct ReplicationWorkerConfig {
     pub report_region_interval: ReadableDuration,
     pub local_file_gc_timeout: ReadableDuration,
 
+    /// The address keywords of stores to be skipped during replication.
+    pub skip_store_addr_keywords: Vec<String>,
+
     pub merged_engine: MergedEngineConfig,
 }
 
@@ -111,6 +114,7 @@ impl Default for ReplicationWorkerConfig {
             sync_interval: ReadableDuration::secs(3),
             report_region_interval: ReadableDuration::secs(60),
             local_file_gc_timeout: ReadableDuration::secs(600), // 10m
+            skip_store_addr_keywords: vec![],
             merged_engine: Default::default(),
         }
     }
