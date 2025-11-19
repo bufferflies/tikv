@@ -1557,7 +1557,10 @@ impl BuildingWorker {
         loop {
             let mut unprocessed_keys = Vec::with_capacity(split_keys.len());
             for split_key in &split_keys {
-                let region = self.ctx.pd.get_region(split_key)?;
+                let region = self
+                    .ctx
+                    .pd
+                    .get_region_with_retry(split_key, Duration::from_secs(60))?;
                 let start_key = region.get_start_key();
                 if start_key == split_key {
                     new_regions_id.push(region.get_id());

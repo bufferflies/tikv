@@ -423,7 +423,6 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
     }
 
     /// Retry to tolerate region holes during split.
-    #[cfg(feature = "testexport")]
     fn get_region_with_retry(&self, key: &[u8], timeout: Duration) -> Result<metapb::Region> {
         use tikv_util::{backoff::ExponentialBackoff, retry::try_wait_result};
         let mut bo = ExponentialBackoff::new(
