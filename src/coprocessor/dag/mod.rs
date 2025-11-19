@@ -34,7 +34,7 @@ where
     req: DagRequest,
     ranges: Vec<KeyRange>,
     store: S,
-    secondary_storage_accessor: Option<R>,
+    extra_storage_accessor: Option<R>,
     data_version: Option<u64>,
     deadline: Deadline,
     batch_row_limit: usize,
@@ -53,7 +53,7 @@ where
         req: DagRequest,
         ranges: Vec<KeyRange>,
         store: S,
-        secondary_storage_accessor: Option<R>,
+        extra_storage_accessor: Option<R>,
         deadline: Deadline,
         batch_row_limit: usize,
         is_cache_enabled: bool,
@@ -65,7 +65,7 @@ where
             req,
             ranges,
             store,
-            secondary_storage_accessor,
+            extra_storage_accessor,
             data_version: None,
             deadline,
             batch_row_limit,
@@ -88,7 +88,7 @@ where
             self.req,
             self.ranges,
             self.store,
-            self.secondary_storage_accessor,
+            self.extra_storage_accessor,
             self.data_version,
             self.deadline,
             self.is_cache_enabled,
@@ -103,6 +103,7 @@ where
 
 /// Wraps the internal accessor to provide the accessor for the secondary
 /// TikvStorage.
+#[derive(Clone, Debug)]
 pub struct SecondaryStorageAccessor<R> {
     store_accessor: R,
 }
@@ -139,6 +140,10 @@ where
         let check_can_be_cached = store.is_check_has_newer_ts_data();
         Ok(Self::Storage::new(store, check_can_be_cached))
     }
+
+    fn get_original_region_id(&self) -> Option<u64> {
+        self.store_accessor.get_original_region_id()
+    }
 }
 
 pub struct BatchDagHandler {
@@ -151,7 +156,7 @@ impl BatchDagHandler {
         req: DagRequest,
         ranges: Vec<KeyRange>,
         store: S,
-        secondary_storage_accessor: Option<impl RegionStorageAccessor<Storage = S>>,
+        extra_storage_accessor: Option<impl RegionStorageAccessor<Storage = S>>,
         data_version: Option<u64>,
         deadline: Deadline,
         is_cache_enabled: bool,
@@ -161,14 +166,14 @@ impl BatchDagHandler {
         quota_limiter: Arc<QuotaLimiter>,
     ) -> Result<Self> {
         let snap = store.get_kvengine_snap();
-        let secondary_storage_accessor =
-            secondary_storage_accessor.map(SecondaryStorageAccessor::from_store_accessor);
+        let extra_storage_accessor =
+            extra_storage_accessor.map(SecondaryStorageAccessor::from_store_accessor);
         Ok(Self {
             runner: tidb_query_executors::runner::BatchExecutorsRunner::from_request::<_, F>(
                 req,
                 ranges,
                 TikvStorage::new(store, is_cache_enabled),
-                secondary_storage_accessor,
+                extra_storage_accessor,
                 deadline,
                 streaming_batch_limit,
                 paging_size,

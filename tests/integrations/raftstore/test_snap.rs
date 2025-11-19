@@ -26,7 +26,7 @@ use test_pd_client::PdClientExt;
 use test_raftstore::*;
 use tikv::server::snap::send_snap;
 use tikv_kv::{
-    Engine, Error, ErrorInner, SecondaryRegionOverride, SnapContext, Snapshot as _, SnapshotExt,
+    Engine, Error, ErrorInner, ExtraRegionOverride, SnapContext, Snapshot as _, SnapshotExt,
 };
 use tikv_util::{config::*, time::Instant, HandyRwLock};
 
@@ -795,7 +795,7 @@ fn test_extra_snapshot_override() {
     };
 
     // when `extra_snap_override`, should use the override region info
-    snap_ctx.secondary_region_override = Some(SecondaryRegionOverride {
+    snap_ctx.extra_region_override = Some(ExtraRegionOverride {
         region_id: r2.get_id(),
         region_epoch: r2.get_region_epoch().clone(),
         peer: r2_leader.clone(),
@@ -811,46 +811,30 @@ fn test_extra_snapshot_override() {
 
     // If`extra_snap_override`.`term` is set with an invalid value, should return an
     // error.
-    snap_ctx
-        .secondary_region_override
-        .as_mut()
-        .unwrap()
-        .check_term = Some(r2_term - 2);
+    snap_ctx.extra_region_override.as_mut().unwrap().check_term = Some(r2_term - 2);
     let err = cluster
         .must_get_raft_engine(r0_leader.get_store_id())
         .snapshot(snap_ctx.clone())
         .err()
         .unwrap();
     assert_matches!(err, Error(box ErrorInner::Request(header)) if header.stale_command.is_some());
-    snap_ctx
-        .secondary_region_override
-        .as_mut()
-        .unwrap()
-        .check_term = None;
+    snap_ctx.extra_region_override.as_mut().unwrap().check_term = None;
 
     // If `extra_snap_override`.`term` is set with a valid value, should return
     // a snapshot.
-    snap_ctx
-        .secondary_region_override
-        .as_mut()
-        .unwrap()
-        .check_term = Some(r2_term);
+    snap_ctx.extra_region_override.as_mut().unwrap().check_term = Some(r2_term);
     let snap = cluster
         .must_get_raft_engine(r0_leader.get_store_id())
         .snapshot(snap_ctx.clone())
         .unwrap();
     assert_eq!(snap.get_region().clone(), r2.region.clone());
-    snap_ctx
-        .secondary_region_override
-        .as_mut()
-        .unwrap()
-        .check_term = None;
+    snap_ctx.extra_region_override.as_mut().unwrap().check_term = None;
 
     // test invalid req_epoch will return an error
     let mut req_epoch = r2.get_region_epoch().clone();
     req_epoch.version -= 1;
     snap_ctx
-        .secondary_region_override
+        .extra_region_override
         .as_mut()
         .unwrap()
         .region_epoch = req_epoch;
@@ -861,7 +845,7 @@ fn test_extra_snapshot_override() {
         .unwrap();
     assert_matches!(err, Error(box ErrorInner::Request(header)) if header.epoch_not_match.is_some());
     snap_ctx
-        .secondary_region_override
+        .extra_region_override
         .as_mut()
         .unwrap()
         .region_epoch = r2.get_region_epoch().clone();

@@ -51,7 +51,7 @@ use raftstore::{
     RegionInfoAccessor,
 };
 use thiserror::Error;
-use tikv_kv::{write_modifies, OnAppliedCb, SecondaryRegionOverride, WriteEvent};
+use tikv_kv::{write_modifies, ExtraRegionOverride, OnAppliedCb, WriteEvent};
 use tikv_util::{
     codec::number::NumberEncoder,
     future::{paired_future_callback, paired_must_called_future_callback},
@@ -156,11 +156,11 @@ where
 #[inline]
 pub fn new_request_header(
     ctx: &Context,
-    extra_snap_override: Option<&SecondaryRegionOverride>,
+    extra_snap_override: Option<&ExtraRegionOverride>,
 ) -> RaftRequestHeader {
     let mut header = RaftRequestHeader::default();
     match extra_snap_override {
-        Some(&SecondaryRegionOverride {
+        Some(&ExtraRegionOverride {
             region_id,
             ref region_epoch,
             ref peer,
@@ -574,7 +574,7 @@ where
         let begin_instant = Instant::now_coarse();
         let (cb, f) = paired_must_called_future_callback(drop_snapshot_callback);
 
-        let mut header = new_request_header(ctx.pb_ctx, ctx.secondary_region_override.as_ref());
+        let mut header = new_request_header(ctx.pb_ctx, ctx.extra_region_override.as_ref());
         let mut flags = 0;
         if ctx.pb_ctx.get_stale_read() && ctx.start_ts.map_or(true, |ts| !ts.is_zero()) {
             let mut data = [0u8; 8];
