@@ -927,17 +927,12 @@ impl ShardMeta {
         let new_ver = old.ver + new_shards_len as u64 - 1;
 
         let mut parent = old.clone();
-        // This check is for compatibility. the old tikv-server may not able to apply
-        // ChangeSet during parent recover if we remove the write CF sst files.
-        // TODO: remove this check after all tikv-server has been upgraded.
-        if parent.data_sequence >= parent.seq {
-            // We only need lock CF files to recover the mem-table.
-            // remove other files to reduce memory usage and rfengine manifest file size.
-            parent.files.retain(|_, fm| {
-                (fm.file_type == FileType::Sst) && (fm.level == 0 || fm.cf == LOCK_CF as i8)
-            });
-            parent.vector_indexes.clear();
-        }
+        // We only need lock CF files to recover the mem-table.
+        // remove other files to reduce memory usage and rfengine manifest file size.
+        parent.files.retain(|_, fm| {
+            (fm.file_type == FileType::Sst) && (fm.level == 0 || fm.cf == LOCK_CF as i8)
+        });
+        parent.vector_indexes.clear();
 
         for i in 0..new_shards_len {
             let (start_key, end_key) = get_splitting_start_end(
