@@ -28,7 +28,7 @@ use crate::{
 
 pub struct DagHandlerBuilder<R, S>
 where
-    R: RegionStorageAccessor<Storage = S>,
+    R: RegionStorageAccessor<Storage = S> + 'static,
     S: Store + 'static,
 {
     req: DagRequest,
@@ -104,18 +104,18 @@ where
 /// Wraps the internal accessor to provide the accessor for the secondary
 /// TikvStorage.
 #[derive(Clone, Debug)]
-pub struct SecondaryStorageAccessor<R> {
+pub struct ExtraStorageAccessor<R> {
     store_accessor: R,
 }
 
-impl<R> SecondaryStorageAccessor<R> {
+impl<R> ExtraStorageAccessor<R> {
     pub fn from_store_accessor(store_accessor: R) -> Self {
-        Self { store_accessor }
+        ExtraStorageAccessor { store_accessor }
     }
 }
 
 #[async_trait]
-impl<R> RegionStorageAccessor for SecondaryStorageAccessor<R>
+impl<R> RegionStorageAccessor for ExtraStorageAccessor<R>
 where
     R: RegionStorageAccessor<Storage: Store>,
 {
@@ -156,7 +156,7 @@ impl BatchDagHandler {
         req: DagRequest,
         ranges: Vec<KeyRange>,
         store: S,
-        extra_storage_accessor: Option<impl RegionStorageAccessor<Storage = S>>,
+        extra_storage_accessor: Option<impl RegionStorageAccessor<Storage = S> + 'static>,
         data_version: Option<u64>,
         deadline: Deadline,
         is_cache_enabled: bool,
@@ -167,7 +167,7 @@ impl BatchDagHandler {
     ) -> Result<Self> {
         let snap = store.get_kvengine_snap();
         let extra_storage_accessor =
-            extra_storage_accessor.map(SecondaryStorageAccessor::from_store_accessor);
+            extra_storage_accessor.map(ExtraStorageAccessor::from_store_accessor);
         Ok(Self {
             runner: tidb_query_executors::runner::BatchExecutorsRunner::from_request::<_, F>(
                 req,
