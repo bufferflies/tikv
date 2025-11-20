@@ -21,7 +21,7 @@ use grpcio::{ChannelBuilder, EnvBuilder, ServerBuilder};
 use grpcio_health::{create_health, HealthService, ServingStatus};
 use hyper::{http, StatusCode};
 use kvengine::{
-    dfs::{Dfs, S3Fs},
+    dfs::S3Fs,
     table::{InnerKey, SnapVersion},
     Engine, IdVer, ShardMeta, ShardTag, SnapAccess, UserMeta, LOCK_CF, WRITE_CF,
 };
@@ -115,7 +115,7 @@ pub struct ReplicationWorker {
     grpc_server: Option<grpcio::Server>,
     health_service: Option<HealthService>,
     kube_api: Option<Arc<KubeApi>>,
-    runtime: tokio::runtime::Runtime,
+    runtime: Arc<tokio::runtime::Runtime>,
     gc_worker: Option<worker::Worker>,
 
     keyspaces: HashMap<u32, Keyspace>,
@@ -161,13 +161,14 @@ impl ReplicationWorker {
         data_dir: String,
         security: SecurityConfig,
         config: ReplicationWorkerConfig,
+        runtime: Arc<tokio::runtime::Runtime>,
     ) -> Result<Self> {
         let data_dir = PathBuf::from(data_dir);
         let merged_engine_dir = data_dir.join("merged_engine");
         box_try!(fs::create_dir_all(&merged_engine_dir));
         let worker_dir = data_dir.join("rep_worker");
         box_try!(fs::create_dir_all(&worker_dir));
-        let master_key = fs.get_runtime().block_on(security.new_master_key());
+        let master_key = runtime.block_on(security.new_master_key());
         let force_stop = ForceStop::default();
         let ctx = MergedEngineContext {
             pd,
@@ -183,7 +184,6 @@ impl ReplicationWorker {
             .get_security_mgr()
             .http_client(hyper::Client::builder())
             .unwrap();
-        let runtime = ctx.fs.get_runtime();
         let merged_engine = box_try!(MergedEngine::new(ctx.clone(), None));
         let keyspace_ids = merged_engine.get_keyspaces();
         let mut keyspaces = HashMap::default();
@@ -225,10 +225,6 @@ impl ReplicationWorker {
             cdc_addrs.insert(keyspace_id, cdc_addr);
             keyspaces.insert(keyspace_id, Keyspace::from(task_service));
         }
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
         let gc_runner = GcRunner::new(merged_engine.get_kv(), None, config.local_file_gc_timeout.0);
         let gc_worker = worker::Builder::new("rep-gc-worker").create();
         gc_worker.start_with_timer("rep-gc-worker", gc_runner);
@@ -353,7 +349,7 @@ impl ReplicationWorker {
     }
 
     pub fn run(&mut self) {
-        let _enter = self.ctx.fs.get_runtime().enter();
+        let _enter = self.runtime.enter();
         info!("replication worker started");
 
         WalProgressFetcher::run(
@@ -1357,7 +1353,7 @@ impl ReplicationWorker {
     }
 
     fn update_stores(&mut self, targets: &StoreWalProgresses) -> Result<UpdateWalResult> {
-        let _enter = self.ctx.fs.get_runtime().enter();
+        let _enter = self.runtime.enter();
         let stores = get_all_stores_except_tiflash(self.ctx.pd.as_ref())?;
         let wal_size_limit = self.update_stores_wal_size_limit / targets.len() as u64;
         let mut total_wal_size = 0;
@@ -1733,6 +1729,7 @@ impl ReplicationWorker {
                 states,
             ))
         };
+        let runtime = self.runtime.handle().clone();
         let scheduler = self.scheduler();
         let kv = self.merged_engine.kv.clone();
         let http_client = self.http_client.clone();
@@ -1755,19 +1752,36 @@ impl ReplicationWorker {
             // Note that the rfengine will update at the same time. So during load shards,
             // we will prepare again.
             let prepare_time = Instant::now_coarse();
-            let mut metas = HashMap::default();
-            if let Err(e) =
-                Self::prepare_keyspace_shard_metas(keyspace_id, &scheduler, &kv, &mut metas).await
             {
-                cb(Err(box_err!("prepare keyspace metas failed: {:?}", e)));
-                return;
-            }
-            // Prepare again in case some shards are changed during last prepare.
-            if let Err(e) =
-                Self::prepare_keyspace_shard_metas(keyspace_id, &scheduler, &kv, &mut metas).await
-            {
-                cb(Err(box_err!("prepare keyspace metas failed: {:?}", e)));
-                return;
+                let scheduler = scheduler.clone();
+                let kv = kv.clone();
+                let prepare_res = runtime
+                    .spawn_blocking(move || {
+                        let mut metas = HashMap::default();
+                        Self::prepare_keyspace_shard_metas(
+                            keyspace_id,
+                            &scheduler,
+                            &kv,
+                            &mut metas,
+                        )?;
+                        // Prepare again in case some shards are changed during last prepare.
+                        Self::prepare_keyspace_shard_metas(keyspace_id, &scheduler, &kv, &mut metas)
+                    })
+                    .await;
+                match prepare_res {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        cb(Err(box_err!("prepare keyspace metas failed: {:?}", e)));
+                        return;
+                    }
+                    Err(e) => {
+                        if e.is_panic() {
+                            panic!("prepare_keyspace_shard_metas panicked");
+                        }
+                        cb(Err(box_err!("prepare keyspace metas failed: {:?}", e)));
+                        return;
+                    }
+                }
             }
 
             // Load shards.
@@ -1791,15 +1805,15 @@ impl ReplicationWorker {
         }));
     }
 
-    async fn upsert_keyspace_shard_metas(
+    fn upsert_keyspace_shard_metas(
         keyspace_id: u32,
         scheduler: &ReplicationScheduler,
         metas: &mut HashMap<u64 /* region_id */, ShardMeta>,
     ) -> Result<()> {
-        let (cb, fut) = tikv_util::future::paired_future_callback();
+        let (cb, fut) = tikv_util::mpsc::paired_callback();
         scheduler.schedule(CdcMsg::LoadKeyspaceShardMetas { keyspace_id, cb });
         let new_metas = fut
-            .await
+            .recv()
             .map_err(|_| -> Error { box_err!("load keyspace metas canceled") })?
             .map_err(|e| -> Error { box_err!("load keyspace metas failed: {:?}", e) })?;
 
@@ -1823,14 +1837,14 @@ impl ReplicationWorker {
         Ok(())
     }
 
-    async fn prepare_keyspace_shard_metas(
+    fn prepare_keyspace_shard_metas(
         keyspace_id: u32,
         scheduler: &ReplicationScheduler,
         kv: &Engine,
         metas: &mut HashMap<u64 /* region_id */, ShardMeta>,
     ) -> Result<()> {
         let start_time = Instant::now_coarse();
-        Self::upsert_keyspace_shard_metas(keyspace_id, scheduler, metas).await?;
+        Self::upsert_keyspace_shard_metas(keyspace_id, scheduler, metas)?;
 
         let prepare_time = Instant::now_coarse();
         if !metas.is_empty() {
@@ -1918,7 +1932,7 @@ impl ReplicationWorker {
             self.merged_engine.remove_shard(region_id);
         });
         self.merged_engine.remove_keyspace(keyspace_id);
-        self.ctx.fs.get_runtime().spawn(async move {
+        self.runtime.spawn(async move {
             let res = ks.destroy().await;
             cb(res);
         });

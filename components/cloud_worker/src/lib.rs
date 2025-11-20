@@ -315,6 +315,7 @@ fn start_server_impl(
             config.data_dir.clone(),
             config.security.clone(),
             config.replication_worker.clone(),
+            thread_pool.clone(),
         )
         .map(|mut replication_worker| {
             let scheduler = replication_worker.scheduler();
