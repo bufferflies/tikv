@@ -467,6 +467,7 @@ impl Tikv for ReplicationService {
         let read_ts = Some(req.get_version());
         let snap_access = shard.new_snap_access();
         let task = async move {
+            tikv_util::set_current_region(region_id);
             // TODO: handle locks.
             let mut iter = snap_access
                 .new_iterator_async(WRITE_CF, false, false, read_ts, false)
@@ -498,7 +499,7 @@ impl Tikv for ReplicationService {
                 })
                 .await
         };
-        ctx.spawn(task);
+        ctx.spawn(tikv_util::init_task_local(task));
     }
 
     fn kv_get(&mut self, ctx: RpcContext<'_>, req: GetRequest, sink: UnarySink<GetResponse>) {
@@ -521,6 +522,7 @@ impl Tikv for ReplicationService {
         let snap_access = shard.new_snap_access();
         let key = Self::prepend_keyspace_prefix(&shard, req.get_key()).unwrap();
         let task = async move {
+            tikv_util::set_current_region(region_id);
             // TODO: handle locks.
             let item = snap_access
                 .get_async(WRITE_CF, &key, req.get_version())
@@ -536,7 +538,7 @@ impl Tikv for ReplicationService {
                 })
                 .await
         };
-        ctx.spawn(task);
+        ctx.spawn(tikv_util::init_task_local(task));
     }
 
     fn kv_scan_lock(

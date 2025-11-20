@@ -278,7 +278,14 @@ impl TableIterator {
                 self.fill_cache,
             )
             .await
-            .unwrap();
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to load block: {:?}, file: {}, block: {:?}",
+                    err,
+                    self.t.id(),
+                    self.b_pos
+                );
+            });
         self.bi.set_block(block);
         true
     }

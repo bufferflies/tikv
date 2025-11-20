@@ -889,6 +889,7 @@ impl S3FsCore {
                 warn!("retry read file {}, error {:?}", &file_name, &err);
                 continue;
             }
+            error!("read file {}, error {:?}", &file_name, err);
             return Err(err.into());
         }
     }
