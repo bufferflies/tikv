@@ -50,7 +50,7 @@ pub enum SchedPool {
         pool: FuturePool,
     },
     Tokio {
-        runtime: Arc<tokio::runtime::Runtime>,
+        handle: tokio::runtime::Handle,
         task_monitor: tokio_metrics::TaskMonitor,
     },
 }
@@ -100,12 +100,17 @@ impl SchedPool {
         SchedPool::Yatp { pool }
     }
 
+    /// Build a Tokio-based scheduler pool.
+    ///
+    /// Returns the pool plus the owned runtime so callers can shut it down
+    /// explicitly (e.g., during server shutdown) while cloned pools keep only a
+    /// handle.
     pub fn new_tokio<E: Engine>(
         engine: E,
         pool_size: usize,
         feature_gate: FeatureGate,
         name_prefix: &str,
-    ) -> Self {
+    ) -> (Self, tokio::runtime::Runtime) {
         let engine = Arc::new(Mutex::new(engine));
         let thread_name_prefix = name_prefix.to_string();
         let props = tikv_util::thread_group::current_properties();
@@ -130,12 +135,13 @@ impl SchedPool {
             .build()
             .unwrap();
 
+        let handle = runtime.handle().clone();
         // Create TaskMonitor for schedule wait time metrics
         let task_monitor = tokio_metrics::TaskMonitor::new();
 
         // Spawn background task to collect and export metrics
         let metrics_task_monitor = task_monitor.clone();
-        runtime.spawn(async move {
+        handle.spawn(async move {
             use std::time::Duration;
             let mut intervals = metrics_task_monitor.intervals();
             loop {
@@ -154,10 +160,13 @@ impl SchedPool {
             }
         });
 
-        SchedPool::Tokio {
-            runtime: Arc::new(runtime),
-            task_monitor,
-        }
+        (
+            SchedPool::Tokio {
+                handle,
+                task_monitor,
+            },
+            runtime,
+        )
     }
 
     pub fn spawn<F>(&self, future: F) -> Result<(), yatp_pool::Full>
@@ -170,13 +179,13 @@ impl SchedPool {
         match self {
             SchedPool::Yatp { pool } => pool.spawn(future),
             SchedPool::Tokio {
-                runtime,
+                handle,
                 task_monitor,
             } => {
                 let future = async move { tikv_util::init_task_local(future).await };
                 // Instrument with tokio-metrics to track schedule wait time
                 let instrumented = task_monitor.instrument(future);
-                runtime.spawn(instrumented);
+                handle.spawn(instrumented);
                 Ok(())
             }
         }

@@ -772,15 +772,18 @@ impl TikvServer {
         let storage_read_pool_handle = unified_read_pool.handle();
 
         // Build scheduler pool based on configuration
+        let mut scheduler_runtime = None;
         let scheduler_pool = if self.config.storage.use_separated_scheduler_pool {
             // Separated mode: build dedicated scheduler pool
             let pool = if self.config.storage.scheduler_use_tokio {
-                tikv::storage::txn::sched_pool::SchedPool::new_tokio(
+                let (pool, runtime) = tikv::storage::txn::sched_pool::SchedPool::new_tokio(
                     engines.engine.clone(),
                     self.config.storage.scheduler_worker_pool_size,
                     self.pd_client.feature_gate().clone(),
                     "sched-tokio-pool",
-                )
+                );
+                scheduler_runtime = Some(runtime);
+                pool
             } else {
                 tikv::storage::txn::sched_pool::SchedPool::new_yatp(
                     engines.engine.clone(),
@@ -891,6 +894,7 @@ impl TikvServer {
             unified_read_pool,
             debug_thread_pool,
             check_leader_scheduler,
+            scheduler_runtime,
         )
         .unwrap_or_else(|e| fatal!("failed to create server: {}", e));
 

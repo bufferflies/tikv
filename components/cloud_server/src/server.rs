@@ -146,6 +146,7 @@ pub struct Server<T: RaftStoreRouter + 'static, S: StoreAddrResolver + 'static> 
     grpc_thread_load: Arc<ThreadLoadPool>,
     read_pool: Option<ReadPool>,
     debug_thread_pool: Arc<Runtime>,
+    scheduler_runtime: Option<Runtime>,
     health_service: HealthService,
     timer: Handle,
 }
@@ -165,6 +166,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         read_pool: ReadPool,
         debug_thread_pool: Arc<Runtime>,
         check_leader_scheduler: Scheduler<CheckLeaderTask>,
+        scheduler_runtime: Option<Runtime>,
     ) -> Result<Self> {
         // A helper thread (or pool) for transport layer.
         let stats_pool = if cfg.value().stats_concurrency > 0 {
@@ -245,6 +247,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             grpc_thread_load,
             read_pool: Some(read_pool),
             debug_thread_pool,
+            scheduler_runtime,
             health_service,
             timer: GLOBAL_TIMER_HANDLE.clone(),
         };
@@ -358,6 +361,9 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         }
         if let Some(read_pool) = self.read_pool.take() {
             read_pool.shutdown();
+        }
+        if let Some(runtime) = self.scheduler_runtime.take() {
+            runtime.shutdown_background();
         }
         self.health_service
             .set_serving_status("", ServingStatus::NotServing);
