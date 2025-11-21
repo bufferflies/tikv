@@ -56,7 +56,8 @@ use crate::{
 };
 
 const DEFAULT_TIMEOUT: ReadableDuration = ReadableDuration::secs(5);
-const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024; // 32MB
+const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 128 * 1024 * 1024; // 128MB
+const SCAN_BATCH_SIZE: u32 = 1024;
 const KEYSPACE_REFRESH_INTERVAL: ReadableDuration = ReadableDuration::secs(30);
 const DEFAULT_SCHEMA_UPLOAD_CONCURRENCY: usize = 16;
 
@@ -373,6 +374,7 @@ pub struct SchemaManagerConfig {
     pub dir: PathBuf,
     pub keyspace_refresh_interval: ReadableDuration,
     pub http_timeout: ReadableDuration,
+    pub scan_batch_size: u32,
     pub enabled: bool,
     // `blacklist_file` is a json file contains a list of keyspace_id.
     pub blacklist_file: PathBuf,
@@ -390,6 +392,7 @@ impl Default for SchemaManagerConfig {
             dir: tempfile::tempdir().unwrap().into_path(),
             keyspace_refresh_interval: KEYSPACE_REFRESH_INTERVAL,
             http_timeout: DEFAULT_TIMEOUT,
+            scan_batch_size: SCAN_BATCH_SIZE,
             enabled: false,
             blacklist_file: PathBuf::new(), // Empty means no blacklist filtering.
             tikv_stores_tier: "".to_string(), // Empty means match all stores.
@@ -1620,8 +1623,6 @@ impl SchemaManagerCore {
     }
 }
 
-const SCAN_BATCH_SIZE: u32 = 4096;
-
 #[async_trait]
 impl schema::KvScanner for SchemaManager {
     async fn scan(
@@ -1641,7 +1642,7 @@ impl schema::KvScanner for SchemaManager {
         loop {
             let scan_range: BoundRange = (current_key.clone()..end.to_vec()).into();
             let batch: Vec<KvPair> = snapshot
-                .scan(scan_range, SCAN_BATCH_SIZE)
+                .scan(scan_range, self.config.scan_batch_size)
                 .await
                 .map_err(|e| e.to_string())?
                 .collect();
@@ -1656,7 +1657,7 @@ impl schema::KvScanner for SchemaManager {
             for KvPair(key, val) in batch {
                 pairs.push((key.into(), val));
             }
-            if batch_len < SCAN_BATCH_SIZE as usize {
+            if batch_len < self.config.scan_batch_size as usize {
                 // end of scan, no need to continue
                 break;
             }
