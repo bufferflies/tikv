@@ -254,37 +254,7 @@ impl<E: Engine> Endpoint<E> {
         concurrency_manager: &ConcurrencyManager,
         req_ctx: &ReqContext,
     ) -> Result<()> {
-        let start_ts = req_ctx.txn_start_ts;
-        if !req_ctx.context.get_stale_read() {
-            concurrency_manager.update_max_ts(start_ts);
-        }
-        if need_check_locks(req_ctx.context.get_isolation_level()) {
-            let begin_instant = Instant::now();
-            for range in &req_ctx.ranges {
-                let start_key = txn_types::Key::from_raw_maybe_unbounded(range.get_start());
-                let end_key = txn_types::Key::from_raw_maybe_unbounded(range.get_end());
-                concurrency_manager
-                    .read_range_check(start_key.as_ref(), end_key.as_ref(), |key, lock| {
-                        Lock::check_ts_conflict(
-                            Cow::Borrowed(lock),
-                            key,
-                            start_ts,
-                            &req_ctx.bypass_locks,
-                            req_ctx.context.get_isolation_level(),
-                        )
-                    })
-                    .map_err(|e| {
-                        MEM_LOCK_CHECK_HISTOGRAM_VEC_STATIC
-                            .locked
-                            .observe(begin_instant.saturating_elapsed().as_secs_f64());
-                        MvccError::from(e)
-                    })?;
-            }
-            MEM_LOCK_CHECK_HISTOGRAM_VEC_STATIC
-                .unlocked
-                .observe(begin_instant.saturating_elapsed().as_secs_f64());
-        }
-        Ok(())
+        check_memory_locks_for_ranges(concurrency_manager, req_ctx, &req_ctx.ranges)
     }
 
     fn parse_request_and_check_memory_locks(
@@ -392,6 +362,7 @@ impl<E: Engine> Endpoint<E> {
                 let quota_limiter = self.quota_limiter.clone();
                 let remote_ctx = self.remote_ctx.clone();
                 let region_info_accessor = self.region_info_accessor.clone();
+                let concurrency_manager = self.concurrency_manager.clone();
                 builder = Box::new(move |snap, req_ctx| {
                     let paging_size = match req.get_paging_size() {
                         0 => None,
@@ -420,7 +391,11 @@ impl<E: Engine> Endpoint<E> {
                         dag,
                         req_ctx.ranges.clone(),
                         store,
-                        ExtraSnapStoreAccessor::<E>::new(req_ctx.clone(), region_info_accessor),
+                        ExtraSnapStoreAccessor::<E>::new(
+                            req_ctx.clone(),
+                            region_info_accessor,
+                            concurrency_manager,
+                        ),
                         req_ctx.deadline,
                         batch_row_limit,
                         req.get_is_cache_enabled(),
@@ -1168,6 +1143,44 @@ impl<E: Engine> Endpoint<E> {
     }
 }
 
+fn check_memory_locks_for_ranges(
+    concurrency_manager: &ConcurrencyManager,
+    req_ctx: &ReqContext,
+    key_ranges: &[coppb::KeyRange],
+) -> Result<()> {
+    let start_ts = req_ctx.txn_start_ts;
+    if !req_ctx.context.get_stale_read() {
+        concurrency_manager.update_max_ts(start_ts);
+    }
+    if need_check_locks(req_ctx.context.get_isolation_level()) {
+        let begin_instant = Instant::now();
+        for range in key_ranges {
+            let start_key = txn_types::Key::from_raw_maybe_unbounded(range.get_start());
+            let end_key = txn_types::Key::from_raw_maybe_unbounded(range.get_end());
+            concurrency_manager
+                .read_range_check(start_key.as_ref(), end_key.as_ref(), |key, lock| {
+                    Lock::check_ts_conflict(
+                        Cow::Borrowed(lock),
+                        key,
+                        start_ts,
+                        &req_ctx.bypass_locks,
+                        req_ctx.context.get_isolation_level(),
+                    )
+                })
+                .map_err(|e| {
+                    MEM_LOCK_CHECK_HISTOGRAM_VEC_STATIC
+                        .locked
+                        .observe(begin_instant.saturating_elapsed().as_secs_f64());
+                    MvccError::from(e)
+                })?;
+        }
+        MEM_LOCK_CHECK_HISTOGRAM_VEC_STATIC
+            .unlocked
+            .observe(begin_instant.saturating_elapsed().as_secs_f64());
+    }
+    Ok(())
+}
+
 pub async fn parse_request_and_handle_remote_cop<S: 'static + Snapshot>(
     req: coppb::Request,
     peer: Option<String>,
@@ -1597,6 +1610,7 @@ fn make_cop_task_stats(start_ts: u64, resp: &coppb::Response) -> CopTaskStats {
 #[derive(Clone)]
 pub struct ExtraSnapStoreAccessor<E> {
     region_info_accessor: RegionInfoAccessor,
+    concurrency_manager: ConcurrencyManager,
     store_id: u64,
     req_ctx: ReqContext,
     _phantom: PhantomData<fn() -> E>,
@@ -1610,6 +1624,7 @@ impl<E: Engine> ExtraSnapStoreAccessor<E> {
     pub fn new(
         req_ctx: ReqContext,
         region_info_accessor: Option<RegionInfoAccessor>,
+        concurrency_manager: ConcurrencyManager,
     ) -> Option<Self> {
         match region_info_accessor {
             Some(region_info_accessor) => {
@@ -1631,6 +1646,7 @@ impl<E: Engine> ExtraSnapStoreAccessor<E> {
                     // - non-SI isolation level, TODO: support it later
                     return Some(Self {
                         region_info_accessor,
+                        concurrency_manager,
                         store_id,
                         req_ctx,
                         _phantom: PhantomData,
@@ -1671,7 +1687,7 @@ impl<E: Engine> RegionStorageAccessor for ExtraSnapStoreAccessor<E> {
     async fn get_local_region_storage(
         &self,
         region: &metapb::Region,
-        _key_range: &[coppb::KeyRange],
+        key_range: &[coppb::KeyRange],
     ) -> StorageResult<Self::Storage> {
         let peer = match find_peer(region, self.store_id) {
             Some(peer) => peer.clone(),
@@ -1684,6 +1700,7 @@ impl<E: Engine> RegionStorageAccessor for ExtraSnapStoreAccessor<E> {
             }
         };
 
+        check_memory_locks_for_ranges(&self.concurrency_manager, &self.req_ctx, key_range)?;
         let start_ts = self.req_ctx.txn_start_ts;
         let extra = ExtraRegionOverride {
             region_id: region.get_id(),
@@ -1721,12 +1738,13 @@ impl<E: Engine> RegionStorageAccessor for ExtraSnapStoreAccessor<E> {
 #[cfg(test)]
 mod tests {
     use std::{
+        assert_matches::assert_matches,
         sync::{atomic, mpsc, Mutex},
         thread, vec,
     };
 
     use futures::executor::{block_on, block_on_stream};
-    use kvproto::kvrpcpb::IsolationLevel;
+    use kvproto::kvrpcpb::{IsolationLevel, LockInfo};
     use protobuf::Message;
     use raft::StateRole;
     use raftstore::RegionInfo;
@@ -2920,25 +2938,60 @@ mod tests {
         // accessor support case
         let ri_accessor = RegionInfoAccessor::new_with_regions_for_test(vec![]);
         let mut ctx = req_ctx.clone();
-        assert!(StoreAccessor::new(ctx.into(), Some(ri_accessor.clone())).is_some());
+        assert!(
+            StoreAccessor::new(
+                ctx.into(),
+                Some(ri_accessor.clone()),
+                ConcurrencyManager::new(1.into())
+            )
+            .is_some()
+        );
 
         // does not support Rc / RcCheckTs
         ctx = req_ctx.clone();
         ctx.context.set_isolation_level(IsolationLevel::Rc);
-        assert!(StoreAccessor::new(ctx.into(), Some(ri_accessor.clone())).is_none());
+        assert!(
+            StoreAccessor::new(
+                ctx.into(),
+                Some(ri_accessor.clone()),
+                ConcurrencyManager::new(1.into())
+            )
+            .is_none()
+        );
         ctx = req_ctx.clone();
         ctx.context.set_isolation_level(IsolationLevel::RcCheckTs);
-        assert!(StoreAccessor::new(ctx.into(), Some(ri_accessor.clone())).is_none());
+        assert!(
+            StoreAccessor::new(
+                ctx.into(),
+                Some(ri_accessor.clone()),
+                ConcurrencyManager::new(1.into())
+            )
+            .is_none()
+        );
 
         // does not support stale read
         ctx = req_ctx.clone();
         ctx.context.set_stale_read(true);
-        assert!(StoreAccessor::new(ctx.into(), Some(ri_accessor.clone())).is_none());
+        assert!(
+            StoreAccessor::new(
+                ctx.into(),
+                Some(ri_accessor.clone()),
+                ConcurrencyManager::new(1.into())
+            )
+            .is_none()
+        );
 
         // does not support replica read
         ctx = req_ctx.clone();
         ctx.context.set_replica_read(true);
-        assert!(StoreAccessor::new(ctx.into(), Some(ri_accessor.clone())).is_none());
+        assert!(
+            StoreAccessor::new(
+                ctx.into(),
+                Some(ri_accessor.clone()),
+                ConcurrencyManager::new(1.into())
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2979,6 +3032,7 @@ mod tests {
         let accessor = StoreAccessor::new(
             default_req_ctx_support_snap_accessor().into(),
             Some(ri_accessor),
+            ConcurrencyManager::new(1.into()),
         )
         .unwrap();
 
@@ -3057,7 +3111,12 @@ mod tests {
                 let region = self.req_region.lock().unwrap().clone();
                 let region = RegionInfo::new(region, StateRole::Leader, 0);
                 let ri_accessor = RegionInfoAccessor::new_with_regions_for_test(vec![region]);
-                StoreAccessor::new(self.get_req_ctx(), Some(ri_accessor)).unwrap()
+                StoreAccessor::new(
+                    self.get_req_ctx(),
+                    Some(ri_accessor),
+                    ConcurrencyManager::new(1.into()),
+                )
+                .unwrap()
             }
 
             fn get_req_ctx(&self) -> ReqContext {
@@ -3239,8 +3298,12 @@ mod tests {
         let def_req = default_req_ctx_support_snap_accessor();
         let store_id = def_req.context.get_peer().get_store_id();
         let ri_accessor = RegionInfoAccessor::new_with_regions_for_test(vec![]);
-        let store_accessor =
-            ExtraSnapStoreAccessor::<RocksEngine>::new(def_req.into(), Some(ri_accessor)).unwrap();
+        let store_accessor = ExtraSnapStoreAccessor::<RocksEngine>::new(
+            def_req.into(),
+            Some(ri_accessor),
+            ConcurrencyManager::new(1.into()),
+        )
+        .unwrap();
         let storage_accessor =
             dag::ExtraStorageAccessor::<ExtraSnapStoreAccessor<RocksEngine>>::from_store_accessor(
                 store_accessor,
@@ -3270,5 +3333,69 @@ mod tests {
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(err.to_string().contains("unexpected snapshot"));
+    }
+
+    #[test]
+    fn test_extra_snap_accessor_check_memory_locks() {
+        let engine = TestEngineBuilder::new().build().unwrap();
+        set_tls_engine(engine);
+        defer! {
+            unsafe {destroy_tls_engine::<RocksEngine>()}
+        }
+
+        let region = metapb::Region {
+            id: 1,
+            start_key: b"".to_vec(),
+            end_key: b"".to_vec(),
+            peers: vec![metapb::Peer {
+                id: 1,
+                store_id: 100,
+                ..Default::default()
+            }]
+            .into(),
+            ..Default::default()
+        };
+        let cm = ConcurrencyManager::new(1.into());
+        let mut req = default_req_ctx_support_snap_accessor();
+        req.txn_start_ts = 100.into();
+        let ri_accessor = RegionInfoAccessor::new_with_regions_for_test(vec![RegionInfo::new(
+            region.clone(),
+            StateRole::Leader,
+            0,
+        )]);
+        let accessor =
+            ExtraSnapStoreAccessor::<RocksEngine>::new(req.into(), Some(ri_accessor), cm.clone())
+                .unwrap();
+
+        let key = Key::from_raw(b"key");
+        let guard = block_on(cm.lock_key(&key));
+        guard.with_lock(|lock| {
+            *lock = Some(txn_types::Lock::new(
+                LockType::Put,
+                b"key".to_vec(),
+                10.into(),
+                100,
+                Some(vec![]),
+                0.into(),
+                1,
+                20.into(),
+            ));
+        });
+
+        let err = block_on(accessor.get_local_region_storage(
+            &region,
+            &[coppb::KeyRange {
+                start: b"key".to_vec(),
+                end: b"key0".to_vec(),
+                ..Default::default()
+            }],
+        ))
+        .map_err(Error::from)
+        .err()
+        .unwrap();
+        assert_matches!(err, Error::Locked(LockInfo { key, .. }) if {
+            assert_eq!(key, b"key".to_vec());
+            true
+        });
     }
 }
