@@ -254,15 +254,14 @@ impl MetaFile {
         data
     }
 
-    fn add_file(&self, keyspace_id: u32, file_id: u64, schema_version: i64) {
+    fn add_file(&self, keyspace_id: u32, file_id: u64, schema_version: i64) -> Result<()> {
         if let Some((_, version)) = self.get_latest_file(keyspace_id) {
-            assert!(
-                version <= schema_version,
-                "schema version must be in order, keyspace_id: {}, version: {}, schema_version: {}",
-                keyspace_id,
-                version,
-                schema_version
-            );
+            if version > schema_version {
+                return Err(SchemaError(format!(
+                    "new schema version {} is older than existing version {} for keyspace {}",
+                    schema_version, version, keyspace_id
+                )));
+            }
         }
 
         self.core
@@ -270,10 +269,11 @@ impl MetaFile {
             .entry(keyspace_id)
             .and_modify(|v| v.push((file_id, schema_version)))
             .or_insert(vec![(file_id, schema_version)]);
+        Ok(())
     }
 
-    fn add_default_file(&self, keyspace_id: u32, schema_version: i64) {
-        self.add_file(keyspace_id, 0, schema_version);
+    fn add_default_file(&self, keyspace_id: u32, schema_version: i64) -> Result<()> {
+        self.add_file(keyspace_id, 0, schema_version)
     }
 
     fn add_checked_version(&self, keyspace_id: u32, version: i64) {
@@ -779,7 +779,10 @@ impl SchemaManager {
                     .add_write_sequence(keyspace_id, write_sequence);
             }
             if local_schema_file.is_none() {
-                self.meta_file.add_default_file(keyspace_id, schema_version);
+                let res = self.meta_file.add_default_file(keyspace_id, schema_version);
+                if res.is_err() {
+                    self.remove_keyspace_local_file(keyspace_id)?;
+                }
             }
             return Ok((schema_version, vec![], true));
         }
@@ -898,7 +901,10 @@ impl SchemaManager {
                 .add_checked_version(keyspace_id, schema_version);
             // Add default file to indicate the keyspace is already synced. There is no
             // valid schema file in local.
-            self.meta_file.add_default_file(keyspace_id, schema_version);
+            let res = self.meta_file.add_default_file(keyspace_id, schema_version);
+            if res.is_err() {
+                self.remove_keyspace_local_file(keyspace_id)?;
+            }
             if let Some(write_sequence) = update_write_sequence {
                 self.meta_file
                     .add_write_sequence(keyspace_id, write_sequence);
@@ -1015,8 +1021,25 @@ impl SchemaManager {
             let Ok((keyspace_id, file_id, schema_version)) = rx.recv().unwrap() else {
                 continue;
             };
-            self.meta_file
+            let res = self
+                .meta_file
                 .add_file(keyspace_id, file_id, schema_version);
+            if res.is_err() {
+                warn!(
+                    "{}: schema version step back detected, {} -> {}, clear keyspace schema files and retry",
+                    keyspace_id,
+                    self.meta_file
+                        .get_latest_file(keyspace_id)
+                        .map(|(_, v)| v)
+                        .unwrap_or_default(),
+                    schema_version
+                );
+                SCHEMA_MANAGER_SYNC_LOOP_ERROR_COUNT
+                    .with_label_values(&["schema_version_step_back"])
+                    .inc();
+                self.remove_keyspace_local_file(keyspace_id)?;
+                continue;
+            }
             self.meta_file
                 .add_checked_version(keyspace_id, schema_version);
             // Note: we don't update the write sequence here in case of
@@ -1390,8 +1413,21 @@ impl SchemaManager {
                             self.read_and_validate_schema_file(keyspace_id, file_id, &path)
                         {
                             let schema_version = schema_file.get_version();
-                            self.meta_file
+                            let res = self
+                                .meta_file
                                 .add_file(keyspace_id, file_id, schema_version);
+                            if res.is_err() {
+                                warn!(
+                                    "{}: schema version step back detected during repair, {} -> {}, clear keyspace schema files",
+                                    keyspace_id,
+                                    self.meta_file
+                                        .get_latest_file(keyspace_id)
+                                        .map(|(_, v)| v)
+                                        .unwrap_or_default(),
+                                    schema_version
+                                );
+                                self.remove_keyspace_local_file(keyspace_id)?;
+                            }
                             info!(
                                 "repaired meta_file for keyspace {}: file_id={:016x}, schema_version={}",
                                 keyspace_id, file_id, schema_version
@@ -1858,7 +1894,14 @@ fn remove_schema_file_from_local<P: AsRef<Path>>(
     for file_id in file_ids {
         let filename = format!("{:016x}.schema", file_id);
         let file_path = dir.join(filename);
-        fs::remove_file(file_path.as_path())?;
+        // Ignore NotFound errors and continue; propagate other errors.
+        fs::remove_file(file_path.as_path()).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })?;
     }
     Ok(())
 }
@@ -2045,8 +2088,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let meta = MetaFile::new();
         for i in 1..100 {
-            meta.add_file(i, (i * 10) as u64, (i + i * 10) as i64);
-            meta.add_file(i, (i * 10 + 1) as u64, (i + i * 10 + 1) as i64);
+            meta.add_file(i, (i * 10) as u64, (i + i * 10) as i64)
+                .unwrap();
+            meta.add_file(i, (i * 10 + 1) as u64, (i + i * 10 + 1) as i64)
+                .unwrap();
         }
         for i in 1..10 {
             meta.add_checked_version(i, (i + i * 11) as i64);
@@ -2134,8 +2179,8 @@ mod tests {
 
         let keyspace_id = 100;
         // Add default file to keyspace
-        meta.add_default_file(keyspace_id, 0);
-        meta.add_default_file(keyspace_id, 10);
+        meta.add_default_file(keyspace_id, 0).unwrap();
+        meta.add_default_file(keyspace_id, 10).unwrap();
         for i in 1..=5i64 {
             let file_id = (i * 1000) as u64;
             let schema_version = i * 10;
@@ -2148,7 +2193,7 @@ mod tests {
                 Bytes::from(schema_file_data),
             )
             .unwrap();
-            meta.add_file(keyspace_id, file_id, schema_version);
+            meta.add_file(keyspace_id, file_id, schema_version).unwrap();
         }
 
         // Verify all files exist
