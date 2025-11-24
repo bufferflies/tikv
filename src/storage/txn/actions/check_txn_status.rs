@@ -37,16 +37,8 @@ pub async fn check_txn_status_lock_exists(
     // Never rollback or push forward min_commit_ts in check_txn_status if it's
     // using async commit. Rollback of async-commit locks are done during
     // ResolveLock.
-    if lock.use_async_commit {
-        if force_sync_commit {
-            info!(
-                "fallback is set, check_txn_status treats it as a non-async-commit txn";
-                "start_ts" => reader.start_ts,
-                "primary_key" => ?primary_key,
-            );
-        } else {
-            return Ok((TxnStatus::uncommitted(lock, false), None));
-        }
+    if lock.use_async_commit && !force_sync_commit {
+        return Ok((TxnStatus::uncommitted(lock, false), None));
     }
 
     let is_pessimistic_txn = !lock.for_update_ts.is_zero();
@@ -55,24 +47,10 @@ pub async fn check_txn_status_lock_exists(
         // If the resolving and primary key lock are both pessimistic locks, just unlock
         // the primary pessimistic lock and do not write rollback records.
         return if resolving_pessimistic_lock && lock.lock_type == LockType::Pessimistic {
-            info!(
-                "check_txn_status pessimistic rolling back expired lock";
-                "trace_id" => tracker::get_tls_trace_id(),
-                "key" => %primary_key,
-                "start_ts" => lock.ts,
-                "lock_type" => ?lock.lock_type,
-            );
             let released = txn.unlock_key(primary_key, is_pessimistic_txn, TimeStamp::zero());
             MVCC_CHECK_TXN_STATUS_COUNTER_VEC.pessimistic_rollback.inc();
             Ok((TxnStatus::PessimisticRollBack, released))
         } else {
-            info!(
-                "check_txn_status rolling back expired lock";
-                "trace_id" => tracker::get_tls_trace_id(),
-                "key" => %primary_key,
-                "start_ts" => lock.ts,
-                "lock_type" => ?lock.lock_type,
-            );
             let released =
                 rollback_lock(txn, reader, primary_key, &lock, is_pessimistic_txn, true).await?;
             MVCC_CHECK_TXN_STATUS_COUNTER_VEC.rollback.inc();
@@ -160,12 +138,6 @@ pub async fn check_txn_status_missing_lock(
             // Insert a Rollback to Write CF in case that a stale prewrite
             // command is received after a cleanup command.
             if let Some(write) = action.construct_write(ts, overlapped_write) {
-                info!(
-                    "check_txn_status rolling back missing lock";
-                    "trace_id" => tracker::get_tls_trace_id(),
-                    "key" => %primary_key,
-                    "start_ts" => ts,
-                );
                 txn.put_write(primary_key, ts, write.as_ref().to_bytes());
             }
             MVCC_CHECK_TXN_STATUS_COUNTER_VEC.rollback.inc();

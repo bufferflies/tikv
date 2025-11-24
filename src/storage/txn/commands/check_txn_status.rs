@@ -114,10 +114,17 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatu
 
         let (txn_status, released) = match reader.load_lock(&self.primary_key)? {
             Some(lock) if lock.ts == self.lock_ts => {
-                check_txn_status_lock_exists(
+                // Capture lock info for logging before consuming it
+                let lock_type = lock.lock_type;
+                let ttl = lock.ttl;
+                let for_update_ts = lock.for_update_ts;
+                let use_async_commit = lock.use_async_commit;
+                let min_commit_ts = lock.min_commit_ts;
+
+                let result = check_txn_status_lock_exists(
                     &mut txn,
                     &mut reader,
-                    self.primary_key,
+                    self.primary_key.clone(),
                     lock,
                     self.current_ts,
                     self.caller_start_ts,
@@ -125,20 +132,70 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatu
                     self.resolving_pessimistic_lock,
                     self.verify_is_primary,
                 )
-                .await?
+                .await?;
+
+                // Log state-changing operations
+                match &result.0 {
+                    TxnStatus::TtlExpire => {
+                        tikv_util::txn_info!(
+                            "check_txn_status rolled back expired lock";
+                            "key" => %self.primary_key,
+                            "lock_ts" => self.lock_ts,
+                            "current_ts" => self.current_ts,
+                            "caller_start_ts" => self.caller_start_ts,
+                            "lock_type" => ?lock_type,
+                            "ttl" => ttl,
+                            "for_update_ts" => for_update_ts,
+                            "use_async_commit" => use_async_commit,
+                            "min_commit_ts" => min_commit_ts,
+                            "resolving_pessimistic_lock" => self.resolving_pessimistic_lock,
+                            "request_source" => %self.ctx.get_request_source(),
+                        );
+                    }
+                    TxnStatus::PessimisticRollBack => {
+                        tikv_util::txn_info!(
+                            "check_txn_status pessimistic rolled back expired lock";
+                            "key" => %self.primary_key,
+                            "lock_ts" => self.lock_ts,
+                            "current_ts" => self.current_ts,
+                            "caller_start_ts" => self.caller_start_ts,
+                            "lock_type" => ?lock_type,
+                            "ttl" => ttl,
+                            "for_update_ts" => for_update_ts,
+                            "use_async_commit" => use_async_commit,
+                            "min_commit_ts" => min_commit_ts,
+                            "resolving_pessimistic_lock" => self.resolving_pessimistic_lock,
+                            "request_source" => %self.ctx.get_request_source(),
+                        );
+                    }
+                    _ => {}
+                }
+
+                result
             }
-            l => (
-                check_txn_status_missing_lock(
+            l => {
+                let result = check_txn_status_missing_lock(
                     &mut txn,
                     &mut reader,
-                    self.primary_key,
+                    self.primary_key.clone(),
                     l,
                     MissingLockAction::rollback(self.rollback_if_not_exist),
                     self.resolving_pessimistic_lock,
                 )
-                .await?,
-                None,
-            ),
+                .await?;
+
+                // Log if rollback was written
+                if matches!(result, TxnStatus::LockNotExist) && self.rollback_if_not_exist {
+                    tikv_util::txn_info!(
+                        "check_txn_status wrote rollback for missing lock";
+                        "key" => %self.primary_key,
+                        "lock_ts" => self.lock_ts,
+                        "request_source" => %self.ctx.get_request_source(),
+                    );
+                }
+
+                (result, None)
+            }
         };
 
         let mut released_locks = ReleasedLocks::new();

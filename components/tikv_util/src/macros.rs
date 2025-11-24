@@ -189,7 +189,7 @@ macro_rules! txn_debug {
             let __control_flags = __trace_id.control_flags();
             let __category_flag = $category.flag_bit();
             if $crate::logger::is_category_enabled(__control_flags, __category_flag) {
-                if $crate::logger::is_immediate_log_enabled(__control_flags) || $crate::logger::unlikely($crate::logger::txn_info_logging_enabled()) {
+                if $crate::logger::is_immediate_log_enabled(__control_flags) {
                     info!($msg; "trace_id" => __trace_id, $($args)*);
                 } else {
                     debug!($msg; "trace_id" => __trace_id, $($args)*);
@@ -204,11 +204,27 @@ macro_rules! txn_debug {
             let __control_flags = __trace_id.control_flags();
             let __category_flag = $category.flag_bit();
             if $crate::logger::is_category_enabled(__control_flags, __category_flag) {
-                if $crate::logger::is_immediate_log_enabled(__control_flags) || $crate::logger::unlikely($crate::logger::txn_info_logging_enabled()) {
+                if $crate::logger::is_immediate_log_enabled(__control_flags) {
                     log::info!($($arg)+);
                 } else {
                     log::debug!($($arg)+);
                 }
+            }
+        }
+    };
+}
+
+/// Logs operational information at INFO level.
+/// Controlled by log.txn-info-logging config or per-request immediate_log flag.
+/// Only supports slog-style syntax: message; key-value pairs
+#[macro_export]
+macro_rules! txn_info {
+    ($msg:expr; $($args:tt)*) => {
+        {
+            let __trace_id = tracker::get_tls_trace_id();
+            let __control_flags = __trace_id.control_flags();
+            if $crate::logger::is_immediate_log_enabled(__control_flags) || $crate::logger::txn_info_logging_enabled() {
+                info!($msg; "trace_id" => __trace_id, $($args)*);
             }
         }
     };

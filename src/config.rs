@@ -2783,7 +2783,7 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             level: LogLevel(slog::Level::Info),
-            txn_info_logging: false,
+            txn_info_logging: true,
             format: LogFormat::Text,
             enable_timestamp: true,
             file: File::default(),

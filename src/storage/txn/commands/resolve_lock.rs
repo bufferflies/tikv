@@ -104,11 +104,16 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLock {
                 .expect("txn status not found");
 
             let released = if commit_ts.is_zero() {
-                info!(
+                tikv_util::txn_info!(
                     "resolve_lock rolling back transaction";
-                    "trace_id" => tracker::get_tls_trace_id(),
                     "key" => %current_key,
                     "start_ts" => current_lock.ts,
+                    "lock_type" => ?current_lock.lock_type,
+                    "ttl" => current_lock.ttl,
+                    "for_update_ts" => current_lock.for_update_ts,
+                    "use_async_commit" => current_lock.use_async_commit,
+                    "min_commit_ts" => current_lock.min_commit_ts,
+                    "request_source" => %ctx.get_request_source(),
                 );
                 cleanup(
                     &mut txn,
@@ -122,12 +127,17 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLock {
                 // Continue to resolve locks if the not found committed locks are pessimistic
                 // type. They could be left if the transaction is finally committed and
                 // pessimistic conflict retry happens during execution.
-                info!(
+                tikv_util::txn_info!(
                     "resolve_lock committing transaction";
-                    "trace_id" => tracker::get_tls_trace_id(),
                     "key" => %current_key,
                     "start_ts" => current_lock.ts,
                     "commit_ts" => commit_ts,
+                    "lock_type" => ?current_lock.lock_type,
+                    "ttl" => current_lock.ttl,
+                    "for_update_ts" => current_lock.for_update_ts,
+                    "use_async_commit" => current_lock.use_async_commit,
+                    "min_commit_ts" => current_lock.min_commit_ts,
+                    "request_source" => %ctx.get_request_source(),
                 );
                 match commit(&mut txn, &mut reader, current_key.clone(), commit_ts).await {
                     Ok(res) => {

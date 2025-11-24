@@ -82,7 +82,21 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckSecondar
                 // The lock exists, the lock information is returned.
                 Some(lock) if lock.ts == self.start_ts => {
                     if lock.lock_type == LockType::Pessimistic {
+                        let for_update_ts = lock.for_update_ts;
+                        let ttl = lock.ttl;
+                        let use_async_commit = lock.use_async_commit;
+                        let min_commit_ts = lock.min_commit_ts;
                         released_lock = txn.unlock_key(key.clone(), true, TimeStamp::zero());
+                        tikv_util::txn_info!(
+                            "check_secondary_locks rolled back pessimistic lock";
+                            "key" => %key,
+                            "start_ts" => self.start_ts,
+                            "ttl" => ttl,
+                            "for_update_ts" => for_update_ts,
+                            "use_async_commit" => use_async_commit,
+                            "min_commit_ts" => min_commit_ts,
+                            "request_source" => %self.ctx.get_request_source(),
+                        );
                         let overlapped_write =
                             reader.get_txn_commit_record(&key).await?.unwrap_none();
                         (SecondaryLockStatus::RolledBack, true, overlapped_write)
@@ -121,12 +135,23 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckSecondar
             // status being changed, a rollback may be written and this rollback
             // needs to be protected.
             if need_rollback {
-                if let Some(l) = mismatch_lock {
-                    txn.mark_rollback_on_mismatching_lock(&key, l, true);
+                let has_mismatch_lock = mismatch_lock.is_some();
+                if let Some(ref l) = mismatch_lock {
+                    txn.mark_rollback_on_mismatching_lock(&key, l.clone(), true);
                 }
                 // We must protect this rollback in case this rollback is collapsed and a stale
                 // acquire_pessimistic_lock and prewrite succeed again.
+                let has_overlapped_write = rollback_overlapped_write.is_some();
                 if let Some(write) = make_rollback(self.start_ts, true, rollback_overlapped_write) {
+                    tikv_util::txn_info!(
+                        "check_secondary_locks wrote protected rollback";
+                        "key" => %key,
+                        "start_ts" => self.start_ts,
+                        "has_overlapped_write" => has_overlapped_write,
+                        "has_mismatch_lock" => has_mismatch_lock,
+                        "mismatch_lock" => ?mismatch_lock,
+                        "request_source" => %self.ctx.get_request_source(),
+                    );
                     txn.put_write(key.clone(), self.start_ts, write.as_ref().to_bytes());
                     collapse_prev_rollback(&mut txn, &mut reader, &key)?;
                 }
