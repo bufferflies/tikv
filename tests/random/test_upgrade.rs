@@ -24,7 +24,11 @@ use test_cloud_server::{
     ServerCluster, ServerClusterBuilder, TikvWorkerOptions,
 };
 use test_pd_client::PdWrapper;
-use tikv_util::{config::ReadableDuration, info, time::Instant};
+use tikv_util::{
+    config::{ReadableDuration, ReadableSize},
+    info,
+    time::Instant,
+};
 
 use crate::{test_tidb::*, *};
 
@@ -115,9 +119,7 @@ fn test_random_upgrade() {
     switch_servers_version(
         Servers::TikvServers(&tikv_servers),
         Servers::ServerCluster(&cluster),
-        |_, conf| {
-            enable_value_cache(conf);
-        },
+        |_, _conf| {},
         &server_configs,
         pd_ctl.as_ref(),
         &upgrade_switches,
@@ -139,9 +141,7 @@ fn test_random_upgrade() {
     switch_servers_version(
         Servers::ServerCluster(&cluster),
         Servers::TikvServers(&tikv_servers),
-        |_, conf| {
-            disable_value_cache(conf);
-        },
+        |_, _conf| {},
         &server_configs,
         pd_ctl.as_ref(),
         &upgrade_switches,
@@ -163,9 +163,7 @@ fn test_random_upgrade() {
     switch_servers_version(
         Servers::TikvServers(&tikv_servers),
         Servers::ServerCluster(&cluster),
-        |_, conf| {
-            enable_value_cache(conf);
-        },
+        |_, _conf| {},
         &server_configs,
         pd_ctl.as_ref(),
         &upgrade_switches,
@@ -274,8 +272,9 @@ fn prepare_cluster(
     );
     let update_conf_fn_override = |node_id: u16, conf: &mut TikvConfig| {
         update_conf_fn(node_id, conf);
-        disable_value_cache(conf); // Remove after old version >= 069c52b.
-        conf.kvengine.gc_lock_extra_cf = false; // Remove after old version >= 18f207b
+
+        // Old version (release build) will check the config value (see #3494).
+        conf.rfengine.rlog_file_size = ReadableSize(rfengine::engine::MIN_RLOG_FILE_SIZE);
     };
     let pd_wrapper =
         PdWrapper::new_real(tc.pd.endpoints(), security_conf, PD_CLIENT_UPDATE_INTERVAL);
@@ -620,13 +619,4 @@ impl UpgradeTestSwitches {
             graceful_restart,
         }
     }
-}
-
-fn disable_value_cache(conf: &mut TikvConfig) {
-    conf.kvengine.value_cache_capacity = 0.into();
-}
-
-fn enable_value_cache(conf: &mut TikvConfig) {
-    use tikv_util::config::ReadableSize;
-    conf.kvengine.value_cache_capacity = ReadableSize::mb(1).into();
 }

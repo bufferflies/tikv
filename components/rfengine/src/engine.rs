@@ -52,7 +52,7 @@ pub const MAX_EPOCH_ROTATE_LEN: usize = 32;
 
 pub const TRUNCATE_ALL_INDEX: u64 = u64::MAX;
 pub const MAX_EPOCH_BACKWARD: u32 = 100;
-const MIN_RLOG_FILE_SIZE: u64 = 16 * 1024 * 1024; // 16MB
+pub const MIN_RLOG_FILE_SIZE: u64 = 16 * 1024 * 1024; // 16MB
 
 /// `RfEngine` is a persistent storage engine for multi-raft logs.
 /// It stores part of raft logs and states(key/value pair) in memory and
