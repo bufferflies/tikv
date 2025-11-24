@@ -4916,6 +4916,7 @@ dependencies = [
  "thiserror 1.0.44",
  "tikv",
  "tikv_util",
+ "txn_types",
 ]
 
 [[package]]
@@ -6889,6 +6890,7 @@ dependencies = [
  "cloud_server",
  "collections",
  "dashmap 5.1.0",
+ "engine_traits",
  "futures 0.3.28",
  "grpcio",
  "grpcio-health",
@@ -6909,6 +6911,7 @@ dependencies = [
  "protobuf",
  "resolved_ts",
  "rfengine",
+ "rfenginepb",
  "rfstore",
  "security",
  "semver 0.10.0",

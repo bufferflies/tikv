@@ -100,8 +100,8 @@ pub(crate) fn spawn_backup(
             // See https://github.com/tidbcloud/cloud-storage-engine/issues/1094.
             let shared_guard = guard.downgrade();
 
-            let backup_file = match backup_worker.instant_backup().await {
-                Ok(backup_file) => backup_file,
+            let backup_res = match backup_worker.instant_backup().await {
+                Ok(backup_res) => backup_res,
                 Err(err) if is_backup_error_retryable(&err) => {
                     warn!("backup failed, retry: {:?}", err);
                     continue;
@@ -111,15 +111,16 @@ pub(crate) fn spawn_backup(
                 }
             };
 
-            keyspace_backup.backup_name = Some(backup_file.name().to_string());
+            keyspace_backup.backup_name = Some(backup_res.backup_file.name().to_string());
             keyspace_manager.add_backup(keyspace_backup);
             drop(shared_guard);
 
             let backup_meta =
-                get_cluster_backup_meta_async(&s3fs, backup_file.name().to_string()).await;
+                get_cluster_backup_meta_async(&s3fs, backup_res.backup_file.name().to_string())
+                    .await;
             info!(
-                "instant backup success, keyspace {}, file {:?}, backup_meta {:?}",
-                keyspace_id, backup_file, backup_meta,
+                "instant backup success, keyspace {}, res {:?}, backup_meta {:?}",
+                keyspace_id, backup_res, backup_meta,
             );
 
             BACKUP_COUNTER.fetch_add(1, Ordering::SeqCst);

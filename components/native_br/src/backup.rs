@@ -332,7 +332,7 @@ pub fn backup_cluster_with_ts(
         Duration::from_secs(10),
         usize::MAX,
     );
-    let tolerated_errs = loop {
+    let tolerated_err_stores = loop {
         match runtime.block_on(backup_stores(
             &config,
             backup_type,
@@ -342,8 +342,8 @@ pub fn backup_cluster_with_ts(
             config.timeout.0 / 2,
             &mut cluster_backup_meta,
         )) {
-            Ok(tolerated_errs) => {
-                break tolerated_errs;
+            Ok(tolerated_err_stores) => {
+                break tolerated_err_stores;
             }
             Err(err) => {
                 if start_time.saturating_elapsed() > config.timeout.0 {
@@ -368,7 +368,9 @@ pub fn backup_cluster_with_ts(
     }
     cluster_backup_meta.set_alloc_id(alloc_id);
     cluster_backup_meta.set_safe_ts(safe_ts);
-    cluster_backup_meta.set_tolerated_err(tolerated_errs as u32);
+    cluster_backup_meta.set_tolerated_err(tolerated_err_stores.len() as u32);
+    cluster_backup_meta
+        .set_tolerated_err_stores(tolerated_err_stores.into_iter().map(|s| s.id).collect());
 
     let backup_key = backup_file_full_path(s3fs.get_prefix(), name, Some(backup_ts));
     let backup_data = Bytes::from(cluster_backup_meta.write_to_bytes().unwrap());
@@ -408,7 +410,7 @@ async fn backup_stores(
     stores: Vec<Store>,
     timeout: Duration,
     cluster_backup_meta: &mut ClusterBackupMeta,
-) -> Result<usize /* tolerated_errs */> {
+) -> Result<Vec<Store> /* tolerated_err_stores */> {
     let mut tasks = tokio::task::JoinSet::new();
     let cluster_id = cluster_backup_meta.cluster_id;
     debug_assert!(cluster_id > 0);
@@ -464,13 +466,13 @@ async fn backup_stores(
     }
 
     if error_stores.is_empty() {
-        Ok(0)
+        Ok(error_stores)
     } else {
         let store_ids = error_stores.iter().map(|s| s.id).collect::<Vec<_>>();
         if error_stores.len() <= config.tolerate_err {
             info!("backup stores: tolerated error: {}", error_stores.len();
                 "error_stores" => ?store_ids, "errors" => ?errors);
-            Ok(error_stores.len())
+            Ok(error_stores)
         } else {
             warn!("backup stores: not intact"; "error_stores" => ?store_ids, "errors" => ?errors);
             Err(Error::BackupErrorOnStores(errors, error_stores))

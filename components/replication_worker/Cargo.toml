@@ -16,6 +16,7 @@ chrono = "0.4"
 cloud_server = { workspace = true }
 collections = { workspace = true }
 dashmap = "5"
+engine_traits = { workspace = true }
 futures = "0.3"
 grpcio = { workspace = true }
 grpcio-health = { version = "0.10", default-features = false, features = ["protobuf-codec"] }
@@ -36,6 +37,7 @@ prometheus = { version = "0.13", features = ["nightly"] }
 protobuf = "2.8"
 resolved_ts = { workspace = true }
 rfengine = { workspace = true }
+rfenginepb = { workspace = true }
 rfstore = { workspace = true }
 security = { workspace = true }
 semver = "0.10.0"

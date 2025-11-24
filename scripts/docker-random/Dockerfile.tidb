@@ -1,7 +1,7 @@
 ARG TIDB_VERSION=v7.5.0
 ARG PD_VERSION=v8.5.0
 ARG TIFLASH_VERSION=v7.5.0
-ARG TICDC_VERSION=v7.5
+ARG TICDC_VERSION=v8.5
 
 FROM hub-new.pingcap.net/keyspace/tidb:${TIDB_VERSION} as tidb
 FROM hub-new.pingcap.net/kvaas/tidb-next-gen:latest as tidb-next-gen

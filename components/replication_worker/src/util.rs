@@ -1,6 +1,12 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use api_version::{api_v2::KEYSPACE_PREFIX_LEN, ApiV2};
 use bytes::Bytes;
@@ -172,5 +178,24 @@ impl ResolvedTsStats {
 
     pub(crate) fn record_unresolved_region(&mut self, _region_id: u64) {
         self.unresolved_regions += 1;
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ArcTimeStamp(Arc<AtomicU64>);
+
+impl ArcTimeStamp {
+    pub(crate) fn get(&self) -> TimeStamp {
+        TimeStamp::new(self.0.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn set(&self, ts: TimeStamp) {
+        self.0.store(ts.into_inner(), Ordering::Relaxed);
+    }
+}
+
+impl From<TimeStamp> for ArcTimeStamp {
+    fn from(ts: TimeStamp) -> Self {
+        ArcTimeStamp(Arc::new(AtomicU64::new(ts.into_inner())))
     }
 }

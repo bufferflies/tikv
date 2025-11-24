@@ -7,7 +7,7 @@ use chrono::Utc;
 use cloud_worker::CloudWorker;
 use futures::executor::block_on;
 use log_wrappers::Value as LogValue;
-use native_br::backup;
+use native_br::{backup, backup_worker};
 use pd_client::{PdClient, RpcClient};
 use replication_worker::{KeyspacesResp, LocalProvider};
 use security::{HttpClient, SecurityManager};
@@ -88,22 +88,24 @@ fn test_random_replication() {
     let tikv_worker_addr = cluster.tikv_worker_endpoints().pop().unwrap();
     start_components(&tc, tikv_worker_addr, &switches, &dfs_conf, &runtime);
 
+    let pd_client = cluster.get_pure_pd_client();
+    let client = cluster.new_client();
+
     let backup_config = backup::BackupConfig {
         dfs: dfs_conf.clone(),
         skip_keyspace_meta: true,
         ..Default::default()
     };
-    let client = cluster.new_client();
-    let backup_ts = client.get_ts().into_inner();
-    backup::backup_cluster_with_ts(
+    let mut backup_worker = backup_worker::BackupWorker::new(
         backup_config,
-        backup::BackupType::Lightweight,
-        "".into(),
-        cluster.get_pure_pd_client().as_ref(),
-        backup_ts,
-        None,
-    )
-    .expect("backup::backup_cluster");
+        pd_client.clone(),
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    );
+    let backup_ts = runtime
+        .block_on(backup_worker.instant_backup())
+        .unwrap()
+        .backup_ts;
 
     // Prepare workloads.
     info!("prepare workloads");
@@ -160,15 +162,21 @@ fn test_random_replication() {
     rep_config.enabled = true;
     rep_config.update_stores_wal_size_limit =
         (rfengine_wal_target_size * NODES_COUNT as u64).into();
+    rep_config.incr_scan_concurrency_limit = *[8, 32, 1024].choose(&mut rng).unwrap();
     rep_config.grpc_addr = "127.0.0.1:5999".to_string();
     rep_config.advertise_addr = "127.0.0.1:5999".to_string();
     rep_config.report_region_interval = ReadableDuration::secs(3);
     rep_config.local_file_gc_timeout = ReadableDuration::secs(30);
+    // 0s: always fetch target from backup.
+    let (min_wal_target_time_span, max_wal_target_time_span) =
+        *[(0, 10), (10, 20), (30, 60)].choose(&mut rng).unwrap();
+    rep_config.min_wal_target_time_span = ReadableDuration::secs(min_wal_target_time_span);
+    rep_config.max_wal_target_time_span = ReadableDuration::secs(max_wal_target_time_span);
+    rep_config.skip_store_addr_keywords = vec!["no-cdc".into()]; // Cover the skip stores process.
     rep_config.merged_engine.block_cache_size = ReadableSize::mb(64).into();
     rep_config.merged_engine.mem_table_size = cluster.get_mem_table_size();
     rep_config.merged_engine.raft_write_batch_size = ReadableSize::kb(256);
 
-    let pd_client = cluster.get_pure_pd_client();
     let mut worker = CloudWorker::new(worker_conf.clone(), None, 2, pd_client.clone());
     worker.start();
     let worker_addr = worker.addr().to_string();
@@ -228,6 +236,7 @@ fn test_random_replication() {
         },
     };
     let add_task_body = serde_json::to_string(&task_params).unwrap();
+    let add_task_tolerated_errs = ["replication worker not ready", "start_ts too large"];
     let resp = must_wait_result(
         || {
             // Wait for replication worker to initialize (recover from backup).
@@ -238,7 +247,8 @@ fn test_random_replication() {
                 add_task_body.clone(),
             )
             .map_err(|err| {
-                assert!(err.contains("replication worker not ready"));
+                info!("add task failed: {:?}", err);
+                assert!(add_task_tolerated_errs.iter().any(|x| err.contains(x)),);
                 err
             })
         },
@@ -542,6 +552,7 @@ fn test_random_replication() {
         verify_cluster(&mut cluster, &switches, &tables).await;
     });
 
+    backup_worker.stop();
     cluster.stop();
     let region_number = pd_client.get_regions_number();
     tc.pd.stop_all();

@@ -70,6 +70,7 @@ use tikv_util::{
     time::Instant,
     trace, warn, Either,
 };
+use txn_types::TimeStamp;
 
 use crate::{
     manifest::{Manifest, UncommittedEntries},
@@ -355,14 +356,29 @@ impl MergedEngine {
         let manifest_dir = ctx.local_dir.join("manifest");
         let mut manifest = box_try!(Manifest::open(&manifest_dir));
         let (region_progresses, tombstone_regions) = if manifest.store_progresses.is_empty() {
-            let (region_progresses, store_progresses) =
+            let (region_progresses, store_progresses, backup_meta) =
                 box_try!(Self::recover_from_backup(&ctx, backup_meta, &raft));
             manifest.store_progresses = store_progresses;
+            // Note: If we persist the manifest and restart before sync to the `backup_ts`,
+            // the time span of next target will exceed the
+            // `max_wal_target_time_span`. The exceeded duration should be no more
+            // that an interval of backup, i.e. 1 min in prod env, and should not
+            // be a problem. So we do not handle this condition for easier.
+            manifest.synced_target_ts = TimeStamp::new(backup_meta.backup_ts);
+
             // Note: manifest is not persisted here to avoid saving all entries. If
             // replication worker restart before next loop, we will recover from backup
             // again.
             (region_progresses, HashMap::default())
         } else {
+            if manifest.synced_target_ts.is_zero() {
+                // For backward compatibility. Then `WalProgressFetcher` will get latest
+                // progress from rfengine.
+                let now = TimeStamp::now();
+                warn!("No synced_target_ts in manifest, use now: {}", now);
+                manifest.synced_target_ts = now;
+            }
+
             box_try!(Self::recover_from_merged_raft_engine(
                 &raft,
                 &manifest.uncommitted_entries
@@ -554,13 +570,19 @@ impl MergedEngine {
         ctx: &MergedEngineContext,
         backup_meta: Option<ClusterBackupMeta>,
         merged_raft: &RfEngine,
-    ) -> Result<(HashMap<u64, RegionProgress>, HashMap<u64, StoreProgress>)> {
+    ) -> Result<(
+        HashMap<u64, RegionProgress>,
+        HashMap<u64, StoreProgress>,
+        ClusterBackupMeta,
+    )> {
         let backup_meta = match backup_meta {
             Some(backup_meta) => backup_meta,
             None => box_try!(Self::get_latest_backup(ctx)),
         };
 
         let merged_store_id = ctx.config.merged_store_id;
+        info!("recover_from_backup: {}", backup_meta; "store" => merged_store_id);
+
         let mut region_progresses = HashMap::default();
         let mut regions_raft_progress = RegionsRaftProgress::default();
         let mut store_progresses = HashMap::default();
@@ -764,7 +786,7 @@ impl MergedEngine {
                 warn!("remove raft path failed: {:?}", e; "path" => ?raft_path);
             }
         }
-        Ok((region_progresses, store_progresses))
+        Ok((region_progresses, store_progresses, backup_meta))
     }
 
     fn recover_from_merged_raft_engine(
@@ -1007,6 +1029,10 @@ impl MergedEngine {
             })
     }
 
+    pub fn get_synced_target_ts(&self) -> TimeStamp {
+        self.manifest.synced_target_ts
+    }
+
     pub fn get_keyspace_regions(&self, keyspace_id: u32) -> Vec<u64> {
         let mut regions = Vec::new();
         for (&region_id, progress) in &self.region_progresses {
@@ -1162,7 +1188,11 @@ impl MergedEngine {
         Ok(())
     }
 
-    pub fn sync_merged(&mut self, apply_ctx: &mut ApplyContext) -> Result<()> {
+    pub fn sync_merged(
+        &mut self,
+        apply_ctx: &mut ApplyContext,
+        synced_target_ts: Option<TimeStamp>,
+    ) -> Result<()> {
         // Prepare context.
         let mut raft_wb = rfengine::WriteBatch::new();
         let mut remove_dependents = Vec::new();
@@ -1189,7 +1219,7 @@ impl MergedEngine {
             destroyed_regions: HashMap::default(),
         };
         let updated_regions: Vec<u64> = self.updated_regions.drain().collect();
-        self.sync_merged_with_ctx(&mut ctx, updated_regions)
+        self.sync_merged_with_ctx(&mut ctx, updated_regions, synced_target_ts)
             .map_err(|e| {
                 debug!("sync_merged: clear context on error: {:?}", ctx; "err" => ?e);
                 ctx.clear();
@@ -1201,6 +1231,7 @@ impl MergedEngine {
         &mut self,
         ctx: &mut SyncRegionsContext<'_>,
         updated_regions: Vec<u64>,
+        synced_target_ts: Option<TimeStamp>,
     ) -> Result<()> {
         self.sync_merged_for_regions(ctx, &updated_regions)?;
         self.handle_prepared_msgs(ctx);
@@ -1213,6 +1244,9 @@ impl MergedEngine {
         }
         self.manifest
             .update_region_progresses(&self.region_progresses);
+        if let Some(synced_target_ts) = synced_target_ts {
+            self.manifest.update_synced_target_ts(synced_target_ts);
+        }
         try_force_stop_err!(self);
         self.manifest.persist()?;
         Ok(())

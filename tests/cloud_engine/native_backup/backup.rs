@@ -384,8 +384,8 @@ fn test_batch_backup() {
     let backup_files = runtime.block_on(async {
         let mut backup_files = vec![];
         while let Some(r) = js.join_next().await {
-            let backup_file = r.unwrap();
-            backup_files.push(backup_file.name().to_string());
+            let backup_res = r.unwrap();
+            backup_files.push(backup_res.backup_file.name().to_string());
         }
         backup_files.sort_unstable();
         backup_files.dedup();

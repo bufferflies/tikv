@@ -107,7 +107,7 @@ fn test_backup_on_scaling_up() {
     // Perform backup.
     let backup_name = generate_backup_name();
     thread::scope(|s| {
-        stop_node(&mut cluster, nodes[0], &stores, Offline);
+        let stopped_store_id = stop_node(&mut cluster, nodes[0], &stores, Offline);
 
         let backup_config = backup_config.clone();
         let backup_name = backup_name.clone();
@@ -134,6 +134,7 @@ fn test_backup_on_scaling_up() {
         info!("backup cluster result: {}", backup_meta);
         assert_eq!(backup_meta.get_stores().len(), 3);
         assert_eq!(backup_meta.tolerated_err, 1);
+        assert_eq!(backup_meta.tolerated_err_stores, vec![stopped_store_id]);
     });
 
     // Put another data.
@@ -1006,10 +1007,11 @@ fn stop_node(
     node_id: u16,
     stores: &HashMap<u16, metapb::Store>,
     state: metapb::StoreState,
-) {
+) -> u64 /* store_id */ {
     cluster.stop_node(node_id);
     let store_id = set_store_state(cluster, node_id, stores, state);
     info!("node stopped"; "node" => node_id, "store" => store_id, "state" => ?state);
+    store_id
 }
 
 fn start_node(
@@ -1017,10 +1019,11 @@ fn start_node(
     node_id: u16,
     stores: &HashMap<u16, metapb::Store>,
     state: metapb::StoreState,
-) {
+) -> u64 /* store_id */ {
     let store_id = set_store_state(cluster, node_id, stores, state);
     cluster.start_node(node_id, |_, _| {});
     info!("node started"; "node" => node_id, "store" => store_id, "state" => ?state);
+    store_id
 }
 
 fn set_store_state(

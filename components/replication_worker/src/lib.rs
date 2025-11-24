@@ -96,6 +96,14 @@ pub struct ReplicationWorkerConfig {
     /// The address keywords of stores to be skipped during replication.
     pub skip_store_addr_keywords: Vec<String>,
 
+    /// The min/max time span of a WAL target since the last one. Ref:
+    /// WalProgressFetcher.
+    pub min_wal_target_time_span: ReadableDuration,
+    pub max_wal_target_time_span: ReadableDuration,
+    /// Whether to fetch WAL target from backup. Used to work around broken
+    /// backups or bugs.
+    pub fetch_wal_target_from_backup: bool,
+
     pub merged_engine: MergedEngineConfig,
 }
 
@@ -113,8 +121,11 @@ impl Default for ReplicationWorkerConfig {
             incr_scan_concurrency_limit: 1024,
             sync_interval: ReadableDuration::secs(3),
             report_region_interval: ReadableDuration::secs(60),
-            local_file_gc_timeout: ReadableDuration::secs(600), // 10m
+            local_file_gc_timeout: ReadableDuration::minutes(10),
             skip_store_addr_keywords: vec![],
+            min_wal_target_time_span: ReadableDuration::minutes(5),
+            max_wal_target_time_span: ReadableDuration::minutes(20),
+            fetch_wal_target_from_backup: true,
             merged_engine: Default::default(),
         }
     }

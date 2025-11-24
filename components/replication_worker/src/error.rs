@@ -33,6 +33,8 @@ pub enum Error {
     },
     #[error("register cancelled: {0}")]
     RegisterCancelled(String),
+    #[error("no valid backup")]
+    NoValidBackup,
     #[error("other error {0}")]
     OtherError(#[from] Box<dyn std::error::Error + Sync + Send>),
 

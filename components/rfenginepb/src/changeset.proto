@@ -74,6 +74,7 @@ message ClusterBackupMeta {
     int64 meta_revision = 7;
     bool is_lightweight = 8;
     uint32 tolerated_err = 9;
+    repeated uint64 tolerated_err_stores = 10;
 }
 
 message RaftLogBackupFile {

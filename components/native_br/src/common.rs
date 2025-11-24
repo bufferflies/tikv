@@ -1146,6 +1146,8 @@ pub fn collect_store_wal_rlog_files(
 }
 
 /// Return full path of incremental backups in S3.
+///
+/// Note: The `start_date + start_time` are inclusive.
 pub async fn get_all_incremental_backups(
     s3fs: &S3Fs,
     start_date: &chrono::NaiveDate,
@@ -1153,6 +1155,7 @@ pub async fn get_all_incremental_backups(
     max_count: usize,
 ) -> dfs::Result<(Vec<IncrementalBackupFile>, bool)> {
     let mut files = Vec::with_capacity(std::cmp::min(max_count, 1000));
+    // No ".meta" postfix to make `start_date + start_time` inclusive.
     let mut start_key = format!(
         "{}/{}",
         start_date.format(INCREMENTAL_BACKUP_FOLDER_FORMAT),

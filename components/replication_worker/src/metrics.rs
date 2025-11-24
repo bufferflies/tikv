@@ -56,4 +56,10 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
+    pub static ref REP_FEATCH_WAL_TARGET_COUNTER: IntGaugeVec = register_int_gauge_vec!(
+        "tikv_cdc_rep_fetch_wal_target_counter",
+        "Total number of fetching WAL targets",
+        &["type", "reason"]
+    )
+    .unwrap();
 }

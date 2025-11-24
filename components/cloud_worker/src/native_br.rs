@@ -874,7 +874,7 @@ impl BrContext {
         let (backup_file, truncate_ts) = match restore_source {
             RestoreSource::ExistFile(f, utc_time) => (f, get_truncate_ts(utc_time, restore_type)),
             RestoreSource::InstantBackup(utc_time) => (
-                instant_backup.deref().clone(),
+                instant_backup.deref().backup_file.clone(),
                 get_truncate_ts(Some(utc_time), restore_type),
             ),
         };

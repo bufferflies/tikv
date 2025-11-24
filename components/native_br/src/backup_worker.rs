@@ -35,7 +35,13 @@ pub const DEFAULT_TIMEOUT_INSTANT_BACKUP: ReadableDuration = ReadableDuration::s
 const MIN_BACKUP_INTERVAL: Duration = Duration::from_millis(1050);
 const MIN_BATCH_INTERVAL: Duration = Duration::from_secs(1);
 
-type InstantBackupCallback = Box<dyn FnOnce(SharedResult<Arc<IncrementalBackupFile>>) + Send>;
+#[derive(Debug)]
+pub struct InstantBackupResult {
+    pub backup_file: IncrementalBackupFile,
+    pub backup_ts: u64,
+}
+
+type InstantBackupCallback = Box<dyn FnOnce(SharedResult<Arc<InstantBackupResult>>) + Send>;
 
 enum BackupTask {
     InstantBackup { cb: InstantBackupCallback },
@@ -91,7 +97,7 @@ impl BackupWorker {
         self.worker.stop();
     }
 
-    pub async fn instant_backup(&self) -> Result<Arc<IncrementalBackupFile>> {
+    pub async fn instant_backup(&self) -> Result<Arc<InstantBackupResult>> {
         let (cb, fut) = paired_future_callback();
         self.scheduler
             .schedule(BackupTask::InstantBackup { cb })
@@ -113,7 +119,7 @@ impl BackupWorker {
     pub async fn instant_backup_with_retry(
         &self,
         timeout: Duration,
-    ) -> Result<Arc<IncrementalBackupFile>> {
+    ) -> Result<Arc<InstantBackupResult>> {
         let mut last_err = None;
         let start_time = Instant::now_coarse();
         while start_time.saturating_elapsed() < timeout {
@@ -147,7 +153,7 @@ pub struct BackupWorkerHandle {
 
 #[cfg(feature = "testexport")]
 impl BackupWorkerHandle {
-    pub async fn instant_backup(&self) -> Result<Arc<IncrementalBackupFile>> {
+    pub async fn instant_backup(&self) -> Result<Arc<InstantBackupResult>> {
         let (cb, fut) = paired_future_callback();
         self.scheduler
             .schedule(BackupTask::InstantBackup { cb })
@@ -345,10 +351,13 @@ impl BackupRunner {
 
                 NATIVE_BR_BACKUP_SUCCESS.inc();
                 NATIVE_BR_BACKUP_BATCH_SIZE.observe(batch.reqs.len() as f64);
-                let backup_file =
-                    Arc::new(IncrementalBackupFile::try_from_full_path(&backup_path).unwrap());
+                let backup_file = IncrementalBackupFile::try_from_full_path(&backup_path).unwrap();
+                let backup_result = Arc::new(InstantBackupResult {
+                    backup_file,
+                    backup_ts,
+                });
                 for req in batch.reqs {
-                    req.cb(Ok(backup_file.clone()));
+                    req.cb(Ok(backup_result.clone()));
                 }
             }
             Err(err) => {
@@ -438,7 +447,7 @@ impl BackupRequest {
         Self { cb: None }
     }
 
-    fn cb(mut self, res: SharedResult<Arc<IncrementalBackupFile>>) {
+    fn cb(mut self, res: SharedResult<Arc<InstantBackupResult>>) {
         if let Some(cb) = self.cb.take() {
             cb(res);
         }

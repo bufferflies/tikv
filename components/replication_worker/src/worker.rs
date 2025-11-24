@@ -73,7 +73,7 @@ use crate::{
     ticdc_util::TiCdcError,
     util::{
         build_request_range_for_keyspace, keyspace_prefix_len, post_to_ticdc,
-        send_request_to_store, ResolvedTsStats, DISPATCH_CDC_TIMEOUT,
+        send_request_to_store, ArcTimeStamp, ResolvedTsStats, DISPATCH_CDC_TIMEOUT,
     },
     wal::{
         StoreTargetAndLag, StoreWalProgresses, UpdateWalResult, WalCache, WalProgressFetcher,
@@ -135,6 +135,14 @@ pub struct ReplicationWorker {
     resolved_regions: HashMap<(TimeStamp, RequestKey), Vec<u64 /* region_id */>>,
 
     last_update_ts: TimeStamp,
+
+    /// `synced_target_ts` used for notify `WalProgressFetcher` to get next
+    /// target from rfengine or backup (for the constraint of
+    /// `max_wal_target_time_span`).
+    ///
+    /// `last_update_ts` is not used for the notification because the advance of
+    /// `last_update_ts` depends on WAL targets.
+    synced_target_ts: ArcTimeStamp,
     wal_progress_targets: WalProgressTargets,
     wal_cache: WalCache,
     update_stores_wal_size_limit: u64,
@@ -185,6 +193,7 @@ impl ReplicationWorker {
             .http_client(hyper::Client::builder())
             .unwrap();
         let merged_engine = box_try!(MergedEngine::new(ctx.clone(), None));
+        let synced_target_ts = merged_engine.get_synced_target_ts();
         let keyspace_ids = merged_engine.get_keyspaces();
         let mut keyspaces = HashMap::default();
         let cdc_addrs = Arc::new(dashmap::DashMap::new());
@@ -268,6 +277,7 @@ impl ReplicationWorker {
             region_to_keyspace: Default::default(),
             resolved_regions: Default::default(),
             last_update_ts: TimeStamp::zero(),
+            synced_target_ts: ArcTimeStamp::from(synced_target_ts),
             wal_progress_targets: WalProgressTargets::default(),
             wal_cache: WalCache::default(),
             update_stores_wal_size_limit,
@@ -354,9 +364,11 @@ impl ReplicationWorker {
 
         WalProgressFetcher::run(
             self.ctx.pd.clone(),
+            self.synced_target_ts.clone(),
             TRACK_WAL_PROGRESS_TIMEOUT,
             &self.config,
             self.runtime.handle().clone(),
+            self.ctx.fs.clone(),
             self.wal_progress_targets.clone(),
         );
 
@@ -1115,7 +1127,7 @@ impl ReplicationWorker {
         }
 
         let merged_store_id = self.merged_store_id();
-        info!("send_resolved_ts"; "last_update_time" => self.last_update_ts, "store" => merged_store_id);
+        info!("send_resolved_ts"; "last_update_ts" => self.last_update_ts, "store" => merged_store_id);
         self.resolved_regions.clear();
         let mut stats = ResolvedTsStats::default();
         for (&region_id, delegate) in &mut self.region_delegates {
@@ -1240,21 +1252,25 @@ impl ReplicationWorker {
         let update_stores_res =
             self.update_stores_with_retry(UPDATE_STORES_TIMEOUT, target_progresses)?;
         debug!("maybe_update_merged_engine: update_stores: {:?}", update_stores_res; "store" => self.merged_store_id());
-        self.merged_engine.sync_merged(&mut self.apply_ctx)?;
-        self.apply_ctx.flush_observer();
-
-        match update_stores_res {
-            UpdateWalResult::Finished { .. } => {
-                let target = self.wal_progress_targets.pop_front();
-                debug_assert!(target.is_some_and(|(ts, _)| ts == target_ts));
-                self.last_update_ts = target_ts;
-            }
+        let synced_target_ts = match update_stores_res {
+            UpdateWalResult::Finished { .. } => Some(target_ts),
             UpdateWalResult::NotFinished { wal_size } => {
-                // Skip update `self.last_update_ts`.
                 info!("maybe_update_merged_engine: update_stores not finished";
                     "store" => self.merged_store_id(), "wal_size" => wal_size,
                     "last_update_ts" => self.last_update_ts, "target_ts" => target_ts);
+                None
             }
+        };
+
+        self.merged_engine
+            .sync_merged(&mut self.apply_ctx, synced_target_ts)?;
+        self.apply_ctx.flush_observer();
+
+        if let Some(synced_target_ts) = synced_target_ts {
+            let target = self.wal_progress_targets.pop_front();
+            debug_assert!(target.is_some_and(|(ts, _)| ts == synced_target_ts));
+            self.last_update_ts = synced_target_ts;
+            self.synced_target_ts.set(synced_target_ts);
         }
         Ok(())
     }
@@ -2137,6 +2153,7 @@ impl ReplicationWorker {
         CDC_ENDPOINT_PENDING_TASKS.set(self.rx.len() as i64);
         CDC_CAPTURED_REGION_COUNT.set(self.region_delegates.len() as i64);
 
+        let last_update_physical = self.last_update_ts.physical();
         if let Some(stats) = &self.resolved_ts_stats {
             CDC_REGION_RESOLVE_STATUS_GAUGE_VEC
                 .with_label_values(&["resolved"])
@@ -2147,18 +2164,15 @@ impl ReplicationWorker {
             if !stats.min_ts.is_zero() {
                 CDC_MIN_RESOLVED_TS_REGION.set(stats.min_ts_region_id as i64);
                 CDC_MIN_RESOLVED_TS.set(stats.min_ts.physical() as i64);
-                let lag = self
-                    .last_update_ts
-                    .physical()
-                    .saturating_sub(stats.min_ts.physical());
+                let lag = last_update_physical.saturating_sub(stats.min_ts.physical());
                 CDC_MIN_RESOLVED_TS_LAG.set(lag as i64);
                 let lag_in_secs = lag as f64 / 1000.0;
                 CDC_RESOLVED_TS_GAP_HISTOGRAM.observe(lag_in_secs);
             }
         }
 
-        REP_SYNC_WAL_TS.set(self.last_update_ts.physical() as i64);
-        let lag = TimeStamp::physical_now().saturating_sub(self.last_update_ts.physical());
+        REP_SYNC_WAL_TS.set(last_update_physical as i64);
+        let lag = TimeStamp::physical_now().saturating_sub(last_update_physical);
         REP_SYNC_WAL_TS_LAG.set(lag as i64);
         let lag_in_secs = lag as f64 / 1000.0;
         REP_SYNC_WAL_TS_LAG_HISTOGRAM.observe(lag_in_secs);

@@ -12,7 +12,8 @@ use collections::{HashMap, HashMapExt};
 use protobuf::Message;
 use raft_proto::eraftpb;
 use rfengine::RaftLogOp;
-use tikv_util::{box_err, info};
+use tikv_util::{box_err, codec::number::U64_SIZE, info};
+use txn_types::TimeStamp;
 
 use crate::{Error, RaftLogOpWithCounter, RegionProgress, Result, StoreProgress};
 
@@ -29,6 +30,11 @@ pub(crate) struct Manifest {
     pub(crate) store_progresses: HashMap<u64, StoreProgress>,
     pub(crate) keyspace_states: HashMap<u32, Bytes>,
     pub(crate) uncommitted_entries: UncommittedEntries,
+
+    /// The timestamp of synced target WAL progress.
+    ///
+    /// Used to determine the source of WAL target for next startup.
+    pub(crate) synced_target_ts: TimeStamp,
 }
 
 impl Manifest {
@@ -46,6 +52,7 @@ impl Manifest {
                 store_progresses,
                 keyspace_states,
                 uncommitted_entries: Default::default(),
+                synced_target_ts: TimeStamp::zero(),
             });
         }
         let content_length = file_data_vec.len() - 4;
@@ -82,15 +89,26 @@ impl Manifest {
 
         let uncommitted_entries = UncommittedEntries::decode(&mut content)?;
 
+        let mut synced_target_ts = TimeStamp::zero();
+        if content.remaining() >= U64_SIZE {
+            synced_target_ts = TimeStamp::new(content.get_u64_le());
+        }
+
         Ok(Self {
             file_path,
             store_progresses,
             keyspace_states,
             uncommitted_entries,
+            synced_target_ts,
         })
     }
 
     pub(crate) fn persist(&self) -> Result<()> {
+        self.persist_impl(true)
+    }
+
+    // TODO: remove `with_synced_target_ts` after next upgrade.
+    fn persist_impl(&self, with_synced_target_ts: bool) -> Result<()> {
         let dir = self.file_path.parent().unwrap();
         let tmp_path = self.file_path.with_extension("tmp");
         let tmp_file = File::create(&tmp_path)?;
@@ -108,6 +126,13 @@ impl Manifest {
             progress.encode(&mut buf);
         }
         self.uncommitted_entries.encode(&mut buf);
+
+        if with_synced_target_ts {
+            buf.put_u64_le(self.synced_target_ts.into_inner());
+        } else {
+            assert!(cfg!(test));
+        }
+
         let checksum = crc32fast::hash(&buf);
         buf.put_u32_le(checksum);
 
@@ -141,6 +166,10 @@ impl Manifest {
     ) {
         let uncommited_entries = UncommittedEntries::from_region_progresses(region_progresses);
         self.uncommitted_entries = uncommited_entries;
+    }
+
+    pub(crate) fn update_synced_target_ts(&mut self, synced_target_ts: TimeStamp) {
+        self.synced_target_ts = synced_target_ts;
     }
 
     pub(crate) fn set_keyspace_states(&mut self, keyspace_id: u32, states: Bytes) -> Option<Bytes> {
@@ -235,7 +264,7 @@ mod tests {
     use collections::HashMap;
     use rfengine::RaftLogOp;
 
-    use crate::{manifest::Manifest, RaftLogOpWithCounter, RegionProgress, Result};
+    use crate::{manifest::Manifest, RaftLogOpWithCounter, RegionProgress, Result, StoreProgress};
 
     #[test]
     fn test_manifest() -> Result<()> {
@@ -253,6 +282,7 @@ mod tests {
         manifest.update_store_progress(1, 2, 3);
         manifest.update_region_progresses(&region_progresses);
         manifest.set_keyspace_states(4, "abc".into());
+        manifest.update_synced_target_ts(1000.into());
         manifest.persist()?;
         drop(manifest);
         let manifest = Manifest::open(dir.path())?;
@@ -264,6 +294,51 @@ mod tests {
         assert_eq!(manifest.keyspace_states.len(), 1);
         assert_eq!(manifest.keyspace_states.get(&4).unwrap().chunk(), b"abc");
         assert_eq!(manifest.uncommitted_entries.regions, region_entries);
+        assert_eq!(manifest.synced_target_ts.into_inner(), 1000);
+        Ok(())
+    }
+
+    #[test]
+    fn test_manifest_compat() -> Result<()> {
+        let dir = tempfile::Builder::new().prefix("manifest_test").tempdir()?;
+
+        let expected_store_progress = StoreProgress {
+            store_id: 1,
+            epoch: 2,
+            offset: 3,
+        };
+
+        {
+            let mut manifest = Manifest::open(dir.path())?;
+            manifest.update_store_progress(1, 2, 3);
+            manifest.update_synced_target_ts(1000.into());
+            // Generate old version manifest.
+            manifest.persist_impl(false)?;
+        }
+
+        {
+            let mut manifest = Manifest::open(dir.path())?;
+            assert_eq!(manifest.store_progresses.len(), 1);
+            assert_eq!(
+                manifest.store_progresses.get(&1).unwrap(),
+                &expected_store_progress
+            );
+            assert_eq!(manifest.synced_target_ts.into_inner(), 0);
+
+            manifest.update_synced_target_ts(2000.into());
+            // Generate new version manifest.
+            manifest.persist()?;
+        }
+
+        {
+            let manifest = Manifest::open(dir.path())?;
+            assert_eq!(manifest.store_progresses.len(), 1);
+            assert_eq!(
+                manifest.store_progresses.get(&1).unwrap(),
+                &expected_store_progress
+            );
+            assert_eq!(manifest.synced_target_ts.into_inner(), 2000);
+        }
         Ok(())
     }
 

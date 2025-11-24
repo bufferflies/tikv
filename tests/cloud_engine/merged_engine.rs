@@ -200,7 +200,7 @@ fn update_merged_engine(
     }
     let router = merged_engine.get_router();
     let mut apply_ctx = ApplyContext::new(merged_engine.get_kv(), Some(router));
-    merged_engine.sync_merged(&mut apply_ctx).unwrap();
+    merged_engine.sync_merged(&mut apply_ctx, None).unwrap();
 }
 
 fn update_merged_engine_for_store(

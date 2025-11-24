@@ -1432,12 +1432,15 @@ impl RegionLike for pdpb::Region {
 }
 
 pub fn get_all_stores_except_tiflash(pd_client: &dyn PdClient) -> Result<Vec<Store>> {
-    block_on(get_all_stores_except_tiflash_async(pd_client))
+    block_on(get_all_stores_except_tiflash_async(pd_client, true))
 }
 
-pub async fn get_all_stores_except_tiflash_async(pd_client: &dyn PdClient) -> Result<Vec<Store>> {
+pub async fn get_all_stores_except_tiflash_async(
+    pd_client: &dyn PdClient,
+    exclude_tombstone: bool,
+) -> Result<Vec<Store>> {
     Ok(pd_client
-        .get_all_stores_async(true)
+        .get_all_stores_async(exclude_tombstone)
         .await?
         .into_iter()
         .filter(|s| {
