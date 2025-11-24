@@ -20,7 +20,7 @@ use std::{
 use bytes::{Buf, BufMut};
 use file_system::open_direct_file;
 use tikv_util::{
-    info,
+    error, info,
     mpsc::{Receiver, Sender},
     time::Instant,
     warn,
@@ -300,6 +300,7 @@ pub(crate) struct WalWriter {
     pub(crate) writer_type: WriterType,
     pub(crate) write_throttle_duration: Duration,
     pub(crate) epoch_rotate_len: usize,
+    pub(crate) max_batch_size: usize,
 }
 
 impl WalWriter {
@@ -320,6 +321,7 @@ impl WalWriter {
         let compression_threshold = cfg.batch_compression_threshold.0 as usize;
         let write_throttle_duration = cfg.write_throttle_duration.0;
         let epoch_rotate_len = cfg.epoch_rotate_len;
+        let max_batch_size = cfg.max_batch_size.0 as usize;
         Self {
             dir: dir.to_path_buf(),
             version,
@@ -334,6 +336,7 @@ impl WalWriter {
             writer_type,
             write_throttle_duration,
             epoch_rotate_len,
+            max_batch_size,
         }
     }
 
@@ -464,7 +467,25 @@ impl WalWriter {
         for peer_batch in wb {
             self.append_region_data(peer_batch);
         }
+        if self.batch_buf.len() > self.max_batch_size {
+            // The batch is unexpectedly too large, we reject the write, find the culprit
+            // region and later panic can blacklist it.
+            tikv_util::set_current_region(self.find_largest_region(wb));
+            error!(
+                "write batch size {} exceed max batch size {}",
+                self.batch_buf.len(),
+                self.max_batch_size
+            );
+            return Err(Error::MaxBatchSizeExceeded);
+        }
         self.flush()
+    }
+
+    fn find_largest_region(&self, wb: &[PeerBatch]) -> u64 {
+        wb.iter()
+            .max_by_key(|batch| batch.encoded_len())
+            .map(|batch| batch.region_id)
+            .unwrap_or_default()
     }
 
     fn compress_batch(&mut self) {
@@ -849,17 +870,21 @@ fn write_batch_size(wb: &[PeerBatch]) -> usize {
 mod tests {
     use std::{os::unix::fs::FileExt, sync::atomic::Ordering::SeqCst};
 
+    use bytes::Buf;
     use rand::Rng;
-    use tikv_util::info;
+    use tikv_util::{config::ReadableSize, info};
 
     use super::DmaBuffer;
     use crate::{
         compact_worker::wal_file_name,
         config::Config,
         iterator::WalIterator,
-        test_util::{get_epoch_file_off, init_logger, prepare_rfengine, prepare_rfengine_with_idx},
+        test_util::{
+            get_epoch_file_off, init_logger, make_state_kv, prepare_rfengine,
+            prepare_rfengine_with_idx,
+        },
         writer::Version::V2,
-        RfEngine, WalHeader, BATCH_HEADER_SIZE,
+        Error, RfEngine, WalHeader, WriteBatch, BATCH_HEADER_SIZE,
     };
 
     #[test]
@@ -977,5 +1002,34 @@ mod tests {
             let new_stats = engine.get_engine_stats();
             assert_eq!(new_stats.total_mem_entries, engine_stats.total_mem_entries);
         }
+    }
+
+    #[test]
+    fn test_exceed_max_write_batch() {
+        init_logger();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let wal_size = 512 * 1024_usize;
+        let dir_path = tmp_dir.path();
+        let sync_wal_path = dir_path.join("wal-sync");
+        let mut cfg = Config::new(wal_size);
+        cfg.wal_sync_dir = sync_wal_path.to_str().unwrap().to_owned();
+        cfg.max_batch_size = ReadableSize(256);
+        let engine = RfEngine::open(dir_path, &cfg, None, None).unwrap();
+
+        let mut wb = WriteBatch::new();
+        let largest_region = 5;
+        for peer_id in 1..=10_u64 {
+            let region_id = peer_id + 1;
+            if region_id == largest_region {
+                let (key, val) = make_state_kv(4, 1);
+                wb.set_state(peer_id, region_id, 1, key.chunk(), val.chunk());
+            }
+            let (key, val) = make_state_kv(3, 1);
+            wb.set_state(peer_id, region_id, 1, key.chunk(), val.chunk());
+        }
+        let res = engine.persist(wb);
+        let err = res.unwrap_err();
+        assert!(matches!(err, Error::MaxBatchSizeExceeded));
+        assert_eq!(tikv_util::get_current_region(), largest_region);
     }
 }

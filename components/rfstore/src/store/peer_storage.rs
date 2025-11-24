@@ -243,7 +243,7 @@ impl PeerStorage {
     ) -> Result<PeerStorage> {
         let keyspace_id =
             ApiV2::get_u32_keyspace_id_by_key(region.get_start_key()).unwrap_or_default();
-        let raft_state = init_raft_state(&engines.raft, peer_id, &region, keyspace_id)?;
+        let raft_state = init_raft_state(&engines.raft, peer_id, &region)?;
         let apply_state = init_apply_state(&engines.kv, &region);
         let truncated_state = init_truncated_state(&engines.raft, peer_id, &region);
         let mut shard_meta: Option<ShardMeta> = None;
@@ -589,7 +589,6 @@ fn init_raft_state(
     raft_engine: &rfengine::RfEngine,
     peer_id: u64,
     region: &metapb::Region,
-    keyspace_id: u32,
 ) -> Result<RaftState> {
     let mut rs = RaftState::default();
     if region.peers.is_empty() {
@@ -600,20 +599,8 @@ fn init_raft_state(
     if let Some(val) = rs_val {
         rs.unmarshal(&val);
     } else {
-        // new split region.
-        rs.last_index = RAFT_INIT_LOG_INDEX;
-        rs.term = RAFT_INIT_LOG_TERM;
-        rs.commit = RAFT_INIT_LOG_INDEX;
-        rs.last_preprocessed_index = RAFT_INIT_LOG_INDEX;
-        let mut wb = rfengine::WriteBatch::new();
-        wb.set_state(
-            peer_id,
-            region.id,
-            keyspace_id,
-            rs_key.chunk(),
-            rs.marshal().chunk(),
-        );
-        raft_engine.write(wb)?;
+        // newly split region must have initialized raft state in preprocess.
+        debug_assert!(false);
     }
     Ok(rs)
 }

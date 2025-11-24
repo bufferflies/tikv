@@ -85,6 +85,8 @@ pub enum Error {
     Backup(String),
     #[error("Async writer disabled")]
     AsyncWriterDisabled,
+    #[error("max batch size exceeded")]
+    MaxBatchSizeExceeded,
     #[error("Other error: {0}")]
     Other(String),
 }

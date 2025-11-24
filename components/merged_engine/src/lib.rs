@@ -775,7 +775,7 @@ impl MergedEngine {
                     keyspace_id,
                     region_progress.truncated_index(),
                 );
-                box_try!(merged_raft.write(batch));
+                merged_raft.write(batch).expect("raft write");
             }
         }
         // destroy original raft engines
@@ -1240,7 +1240,7 @@ impl MergedEngine {
         self.destroy_regions(ctx);
         if !ctx.raft_wb.is_empty() {
             try_force_stop_err!(self);
-            self.raft.write(mem::take(ctx.raft_wb))?;
+            self.raft.write(mem::take(ctx.raft_wb)).expect("raft write");
         }
         self.manifest
             .update_region_progresses(&self.region_progresses);
@@ -1248,7 +1248,7 @@ impl MergedEngine {
             self.manifest.update_synced_target_ts(synced_target_ts);
         }
         try_force_stop_err!(self);
-        self.manifest.persist()?;
+        self.manifest.persist().expect("persist manifest");
         Ok(())
     }
 
@@ -1300,7 +1300,7 @@ impl MergedEngine {
         }
 
         if !merged_wb.is_empty() {
-            self.raft.persist(merged_wb)?;
+            self.raft.persist(merged_wb).expect("raft persist");
         }
         Ok(())
     }
@@ -1435,7 +1435,7 @@ impl MergedEngine {
         *merged_wb_estimated_size += wb.estimated_size();
         merged_wb.merge_write_batch(wb);
         if *merged_wb_estimated_size > self.ctx.config.raft_write_batch_size.0 as usize {
-            ctx.raft.persist(mem::take(merged_wb))?;
+            ctx.raft.persist(mem::take(merged_wb)).expect("raft write");
             *merged_wb_estimated_size = 0;
         }
         let shard = self.kv.get_shard(updated_region);
@@ -1725,7 +1725,7 @@ impl MergedEngine {
         }
 
         if !raft_wb.is_empty() {
-            box_try!(raft.write(raft_wb));
+            raft.write(raft_wb).expect("raft write");
         }
         Ok(delay_destroy_regions)
     }

@@ -103,6 +103,10 @@ pub struct Config {
     /// WAL file will be rotated and overwritten on every `epoch_rotate_len`
     /// epoches.
     pub epoch_rotate_len: usize,
+
+    /// modified by test only, skip serde to avoid misconfiguration.
+    #[serde(skip)]
+    pub(crate) max_batch_size: ReadableSize,
 }
 
 impl Default for Config {
@@ -127,6 +131,7 @@ impl Default for Config {
             compact_bytes_per_sec: ReadableSize::mb(200),
             enable_compact_rate_limiter: false,
             epoch_rotate_len: MIN_EPOCH_ROTATE_LEN,
+            max_batch_size: ReadableSize::mb(256),
         }
     }
 }

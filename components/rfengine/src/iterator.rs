@@ -23,7 +23,7 @@ pub struct WalIterator<R: Read> {
     reader: R,
 }
 
-const MAX_BATCH_SIZE: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_BATCH_SIZE: usize = 256 * 1024 * 1024;
 
 impl WalIterator<BufReader<fs::File>> {
     pub(crate) fn new(dir: &Path, epoch_id: u32, epoch_rotate_len: usize) -> std::io::Result<Self> {
