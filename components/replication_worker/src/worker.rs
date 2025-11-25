@@ -31,7 +31,7 @@ use kvproto::{
         create_change_data, ChangeDataRequest, Event, EventLogType, EventRow, EventRowOpType,
         ResolvedTs,
     },
-    metapb,
+    metapb, pdpb,
     pdpb::StoreStats,
     raft_cmdpb::AdminRequest,
     tikvpb::create_tikv,
@@ -44,7 +44,10 @@ use native_br::{
     common::{assemble_wal_chunks, collect_wal_chunks_with_retry, CollectWalChunksContext},
     wal::AssembledWalData,
 };
-use pd_client::{util::get_all_stores_except_tiflash, PdClient, RegionStat};
+use pd_client::{
+    util::{check_resp_header, get_all_stores_except_tiflash},
+    PdClient, RegionStat,
+};
 use rfengine::{RfEngine, MIN_EPOCH_ROTATE_LEN, TRUNCATE_ALL_INDEX};
 use rfstore::store::{ApplyContext, GcRunner};
 use security::{HttpClient, SecurityConfig};
@@ -329,6 +332,33 @@ impl ReplicationWorker {
         }
         if let Some(gc_worker) = self.gc_worker.take() {
             gc_worker.stop()
+        }
+        self.shutdown_report_region_loops();
+    }
+
+    fn shutdown_report_region_loops(&mut self) {
+        let report_loop_handles = self
+            .keyspaces
+            .values_mut()
+            .filter_map(|ks| ks.report_loop.take())
+            .collect::<Vec<_>>();
+        if !report_loop_handles.is_empty() {
+            let mut join_set = tokio::task::JoinSet::new();
+            for h in report_loop_handles {
+                join_set.spawn_on(
+                    async move {
+                        h.abort();
+                        if let Err(err) = h.await
+                            && err.is_panic()
+                        {
+                            panic!("report region loop panic");
+                        }
+                    },
+                    self.runtime.handle(),
+                );
+            }
+            self.runtime
+                .block_on(async { while (join_set.join_next().await).is_some() {} });
         }
     }
 
@@ -1287,6 +1317,13 @@ impl ReplicationWorker {
         rep_pd_cli: Arc<dyn PdClient>,
         interval: Duration,
     ) {
+        let merged_store_id = raft.get_engine_id();
+        let handle_heartbeat_resp =
+            Self::handle_heartbeat_response(merged_store_id, keyspace_id, rep_pd_cli.clone());
+        tikv_util::defer!({
+            handle_heartbeat_resp.abort();
+        });
+
         // run a loop to report regions in case that the rep pd is restarted and lost
         // the region leader.
         loop {
@@ -1334,6 +1371,35 @@ impl ReplicationWorker {
             let elapsed = start.saturating_elapsed();
             tokio::time::sleep(interval.saturating_sub(elapsed)).await;
         }
+    }
+
+    fn handle_heartbeat_response(
+        merged_store_id: u64,
+        keyspace_id: u32,
+        rep_pd_cli: Arc<dyn PdClient>,
+    ) -> tokio::task::JoinHandle<()> {
+        let fut = rep_pd_cli.handle_region_heartbeat_response(
+            merged_store_id,
+            Box::new(move |resp: pdpb::RegionHeartbeatResponse| {
+                if let Err(err) = check_resp_header(resp.get_header()) {
+                    warn!("region heartbeat response error: {:?}", err;
+                        "store" => merged_store_id, "keyspace" => keyspace_id);
+                } else {
+                    debug!("region heartbeat response: {:?}", resp;
+                        "store" => merged_store_id, "keyspace" => keyspace_id);
+                }
+            }),
+        );
+        let f = async move {
+            match fut.await {
+                Ok(_) => {
+                    info!("region heartbeat response handler exit";
+                        "store" => merged_store_id, "keyspace" => keyspace_id);
+                }
+                Err(e) => panic!("unexpected error: {:?}", e),
+            }
+        };
+        tokio::spawn(f)
     }
 
     fn update_stores_with_retry(
