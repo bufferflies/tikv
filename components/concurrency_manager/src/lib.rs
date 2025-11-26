@@ -304,11 +304,11 @@ impl ConcurrencyManager {
         // Only log when max_ts is successfully updated to a larger value
         if new_ts > old_max_ts {
             txn_debug!(
-                tikv_util::logger::TraceCategory::ReqResp,
+                trace_event::types::Category::ReqResp,
                 "ConcurrencyManager::update_max_ts successful";
                 "new_ts" => ?new_ts,
                 "old_max_ts" => ?old_max_ts,
-                "source" => error_source
+                "source" => format!("{}", error_source)
             );
         }
 

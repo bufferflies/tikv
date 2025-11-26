@@ -7,6 +7,7 @@ use std::{
 };
 
 use collections::HashSet;
+use trace_event::types::EventFieldValue;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
@@ -187,6 +188,12 @@ impl TsSet {
             TsSet::Set(set) => set.contains(&ts),
             TsSet::All => true,
         }
+    }
+}
+
+impl trace_event::types::AsEventFieldValue for TimeStamp {
+    fn as_event_field_value(self) -> EventFieldValue {
+        EventFieldValue::U64(self.into_inner())
     }
 }
 

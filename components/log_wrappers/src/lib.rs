@@ -101,6 +101,7 @@ pub fn set_redact_info_log(v: bool) {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Value<'a>(pub &'a [u8]);
 
 impl<'a> Value<'a> {

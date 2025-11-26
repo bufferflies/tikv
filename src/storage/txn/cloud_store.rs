@@ -38,7 +38,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
     #[maybe_async]
     async fn get(&self, user_key: &Key, statistics: &mut Statistics) -> Result<Option<Value>> {
         txn_debug!(
-            tikv_util::logger::TraceCategory::ReadDetails,
+            trace_event::types::Category::ReadDetails,
             "CloudStore::get entry";
             "key" => log_wrappers::Value::key(user_key.as_encoded()),
             "start_ts" => ?self.start_ts,
@@ -62,7 +62,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
         };
 
         txn_debug!(
-            tikv_util::logger::TraceCategory::ReadDetails,
+            trace_event::types::Category::ReadDetails,
             "CloudStore::get result";
             "key" => log_wrappers::Value::key(user_key.as_encoded()),
             "start_ts" => ?self.start_ts,
@@ -77,7 +77,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
     #[maybe_async]
     async fn incremental_get(&mut self, user_key: &Key) -> Result<Option<Value>> {
         txn_debug!(
-            tikv_util::logger::TraceCategory::ReadDetails,
+            trace_event::types::Category::ReadDetails,
             "CloudStore::incremental_get entry";
             "key" => log_wrappers::Value::key(user_key.as_encoded()),
             "start_ts" => ?self.start_ts,
@@ -101,7 +101,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             None
         };
 
-        txn_debug!(tikv_util::logger::TraceCategory::ReadDetails,
+        txn_debug!(trace_event::types::Category::ReadDetails,
             "CloudStore::incremental_get result";
             "key" => log_wrappers::Value::key(user_key.as_encoded()),
             "start_ts" => ?self.start_ts,
@@ -127,7 +127,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
         keys: &[Key],
         statistics: &mut Vec<Statistics>,
     ) -> Result<Vec<Result<Option<Value>>>> {
-        txn_debug!(tikv_util::logger::TraceCategory::ReadDetails,
+        txn_debug!(trace_event::types::Category::ReadDetails,
             "CloudStore::batch_get entry";
             "keys_count" => keys.len(),
             "keys" => ?keys,
@@ -144,7 +144,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
             statistics.push(stats);
         }
 
-        txn_debug!(tikv_util::logger::TraceCategory::ReadDetails,
+        txn_debug!(trace_event::types::Category::ReadDetails,
             "CloudStore::batch_get result";
             "keys_count" => keys.len(),
             "start_ts" => ?self.start_ts,
@@ -171,7 +171,7 @@ impl<S: Snapshot> super::Store for CloudStore<S> {
         lower_bound: Option<Key>,
         upper_bound: Option<Key>,
     ) -> Result<Self::Scanner> {
-        txn_debug!(tikv_util::logger::TraceCategory::ReadDetails,
+        txn_debug!(trace_event::types::Category::ReadDetails,
             "CloudStore::scanner entry";
             "desc" => desc,
             "start_ts" => ?self.start_ts,
@@ -800,7 +800,7 @@ impl super::Scanner for CloudStoreScanner {
             .await?
             .map(|(key, _user_meta, val)| (key, val));
 
-        txn_debug!(tikv_util::logger::TraceCategory::ReadDetails,
+        txn_debug!(trace_event::types::Category::ReadDetails,
             "CloudStoreScanner::next";
             "start_ts" => ?self.start_ts,
             "keyspace_id" => self.snap.get_keyspace_id(),

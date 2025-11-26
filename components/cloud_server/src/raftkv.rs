@@ -58,9 +58,10 @@ use tikv::{
 use tikv_kv::{OnAppliedCb, TrackerToken, WriteEvent};
 use tikv_util::{
     callback::must_call, codec::number::NumberEncoder, future::paired_must_called_future_callback,
-    logger, time::Instant,
+    time::Instant,
 };
-use tracker::{set_tls_trace_id, TraceId};
+use trace_event::types::TraceContext;
+use tracker::set_tls_trace_ctx;
 use txn_types::{
     Key, Lock, LockType, ReqType, TimeStamp, TxnExtra, TxnExtraScheduler, WriteBatchFlags,
     WriteRef, WriteType,
@@ -402,30 +403,31 @@ impl Engine for RaftKv {
 
         self.schedule_txn_extra(txn_extra);
 
+        let trace_ctx = TraceContext::from_proto(ctx.get_trace_id(), ctx.get_trace_control_flags());
+
         let (tx, rx) = WriteResFeed::pair();
         if res.is_ok() {
             let region_id = ctx.get_region_id();
-            let txn_info_logs = logger::txn_info_logging_enabled();
+            let create_cb_for_logging =
+                trace_ctx.category_enabled(trace_event::types::Category::WriteDetails);
             let proposed_cb = if WriteEvent::subscribed_proposed(subscribed) {
-                let trace_id = TraceId::new(ctx.get_trace_id(), ctx.get_trace_control_flags());
                 let tx = tx.clone();
+                let trace_ctx1 = trace_ctx.clone();
                 Some(Box::new(move || {
-                    set_tls_trace_id(trace_id);
-                    txn_debug!(tikv_util::logger::TraceCategory::WriteDetails,
+                    txn_debug!(trace_ctx: trace_ctx1, trace_event::types::Category::WriteDetails,
                         "RaftKv::async_write proposed_cb executed";
                         "region_id" => region_id, "tracker" => ?tracker
                     );
                     tx.notify_proposed()
                 }) as store::ExtCallback)
-            } else if txn_info_logs {
-                txn_debug!(tikv_util::logger::TraceCategory::WriteDetails,
+            } else if create_cb_for_logging {
+                txn_debug!(trace_ctx: trace_ctx.clone(), trace_event::types::Category::WriteDetails,
                     "RaftKv::async_write proposed_cb created (logging-only)";
                     "region_id" => region_id, "tracker" => ?tracker
                 );
-                let trace_id = TraceId::new(ctx.get_trace_id(), ctx.get_trace_control_flags());
+                let trace_ctx1 = trace_ctx.clone();
                 Some(Box::new(move || {
-                    set_tls_trace_id(trace_id);
-                    txn_debug!(tikv_util::logger::TraceCategory::WriteDetails,
+                    txn_debug!(trace_ctx: trace_ctx1, trace_event::types::Category::WriteDetails,
                         "RaftKv::async_write proposed_cb executed (logging-only)";
                         "region_id" => region_id, "tracker" => ?tracker
                     );
@@ -434,25 +436,23 @@ impl Engine for RaftKv {
                 None
             };
             let committed_cb = if WriteEvent::subscribed_committed(subscribed) {
-                let trace_id = TraceId::new(ctx.get_trace_id(), ctx.get_trace_control_flags());
                 let tx = tx.clone();
+                let trace_ctx1 = trace_ctx.clone();
                 Some(Box::new(move || {
-                    set_tls_trace_id(trace_id);
-                    txn_debug!(tikv_util::logger::TraceCategory::WriteDetails,
+                    txn_debug!(trace_ctx: trace_ctx1, trace_event::types::Category::WriteDetails,
                         "RaftKv::async_write committed_cb executed";
                         "region_id" => region_id, "tracker" => ?tracker
                     );
                     tx.notify_committed()
                 }) as store::ExtCallback)
-            } else if txn_info_logs {
-                let trace_id = TraceId::new(ctx.get_trace_id(), ctx.get_trace_control_flags());
-                txn_debug!(tikv_util::logger::TraceCategory::WriteDetails,
+            } else if create_cb_for_logging {
+                txn_debug!(trace_ctx: trace_ctx.clone(), trace_event::types::Category::WriteDetails,
                     "RaftKv::async_write committed_cb created (logging-only)";
                     "region_id" => region_id, "tracker" => ?tracker
                 );
+                let trace_ctx1 = trace_ctx.clone();
                 Some(Box::new(move || {
-                    set_tls_trace_id(trace_id);
-                    txn_debug!(tikv_util::logger::TraceCategory::WriteDetails,
+                    txn_debug!(trace_ctx: trace_ctx1, trace_event::types::Category::WriteDetails,
                         "RaftKv::async_write committed_cb executed (logging-only)";
                         "region_id" => region_id, "tracker" => ?tracker
                     );
@@ -461,15 +461,15 @@ impl Engine for RaftKv {
                 None
             };
             let applied_tx = tx.clone();
-            txn_debug!(tikv_util::logger::TraceCategory::WriteDetails,
+            txn_debug!(trace_event::types::Category::WriteDetails,
                 "RaftKv::async_write applied_cb created";
                 "region_id" => region_id, "tracker" => ?tracker
             );
-            let trace_id = TraceId::new(ctx.get_trace_id(), ctx.get_trace_control_flags());
             let applied_cb = must_call(
                 Box::new(move |resp: WriteResponse| {
-                    set_tls_trace_id(trace_id);
-                    txn_debug!(tikv_util::logger::TraceCategory::WriteDetails,
+                    // Set trace_ctx to tls so that it's possible to be retrieved in the inner cb.
+                    set_tls_trace_ctx(trace_ctx);
+                    txn_debug!(trace_event::types::Category::WriteDetails,
                         "RaftKv::async_write applied_cb executed";
                         "region_id" => region_id, "resp" => ?resp, "tracker" => ?tracker
                     );

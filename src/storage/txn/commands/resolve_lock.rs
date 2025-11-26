@@ -104,7 +104,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLock {
                 .expect("txn status not found");
 
             let released = if commit_ts.is_zero() {
-                tikv_util::txn_info!(
+                tikv_util::txn_info!(trace_event::types::Category::WriteDetails,
                     "resolve_lock rolling back transaction";
                     "key" => %current_key,
                     "start_ts" => current_lock.ts,
@@ -127,7 +127,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for ResolveLock {
                 // Continue to resolve locks if the not found committed locks are pessimistic
                 // type. They could be left if the transaction is finally committed and
                 // pessimistic conflict retry happens during execution.
-                tikv_util::txn_info!(
+                tikv_util::txn_info!(trace_event::types::Category::WriteDetails,
                     "resolve_lock committing transaction";
                     "key" => %current_key,
                     "start_ts" => current_lock.ts,

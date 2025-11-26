@@ -54,7 +54,7 @@ use tikv_util::{
     time::{nanos_to_secs, Instant},
     worker::Scheduler,
 };
-use tracker::{set_tls_trace_id, TraceId, TrackedFuture};
+use tracker::{set_tls_trace_ctx, TrackedFuture};
 use txn_types::{self, Key};
 
 use super::batch::{BatcherBuilder, ReqBatcher};
@@ -1505,7 +1505,7 @@ fn future_get<L: LockManager, F: KvFormat>(
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
     let ctx = req.get_context();
-    set_tls_trace_id(TraceId::new(
+    set_tls_trace_ctx(TraceContext::from_proto(
         ctx.get_trace_id(),
         ctx.get_trace_control_flags(),
     ));
@@ -1570,7 +1570,7 @@ fn future_scan<L: LockManager, F: KvFormat>(
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
     let ctx = req.get_context();
-    set_tls_trace_id(TraceId::new(
+    set_tls_trace_ctx(TraceContext::from_proto(
         ctx.get_trace_id(),
         ctx.get_trace_control_flags(),
     ));
@@ -1638,7 +1638,7 @@ fn future_batch_get<L: LockManager, F: KvFormat>(
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
     let ctx = req.get_context();
-    set_tls_trace_id(TraceId::new(
+    set_tls_trace_ctx(TraceContext::from_proto(
         ctx.get_trace_id(),
         ctx.get_trace_control_flags(),
     ));
@@ -1685,7 +1685,7 @@ fn future_scan_lock<L: LockManager, F: KvFormat>(
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
     let ctx = req.get_context();
-    set_tls_trace_id(TraceId::new(
+    set_tls_trace_ctx(TraceContext::from_proto(
         ctx.get_trace_id(),
         ctx.get_trace_control_flags(),
     ));
@@ -1730,7 +1730,7 @@ fn future_delete_range<L: LockManager, F: KvFormat>(
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
     let ctx = req.get_context();
-    set_tls_trace_id(TraceId::new(
+    set_tls_trace_ctx(TraceContext::from_proto(
         ctx.get_trace_id(),
         ctx.get_trace_control_flags(),
     ));
@@ -1768,7 +1768,7 @@ fn future_copr<E: Engine>(
         return future::ready(Err(box_err!("rejected in recovery mode"))).boxed();
     }
     let ctx = req.get_context();
-    set_tls_trace_id(TraceId::new(
+    set_tls_trace_ctx(TraceContext::from_proto(
         ctx.get_trace_id(),
         ctx.get_trace_control_flags(),
     ));
@@ -1784,7 +1784,7 @@ macro_rules! txn_command_future {
         ) -> impl Future<Output = ServerResult<$resp_ty>> {
             $prelude
             let ctx = $req.get_context();
-            set_tls_trace_id(TraceId::new(ctx.get_trace_id(), ctx.get_trace_control_flags()));
+            set_tls_trace_ctx(TraceContext::from_proto(ctx.get_trace_id(), ctx.get_trace_control_flags()));
             let (cb, f) = paired_future_callback();
             let res = storage.sched_txn_command($req.into(), cb);
 
@@ -1944,6 +1944,7 @@ use rfstore::store::StoreMsg;
 use tikv::server::service::{GrpcRequestDuration, MeasuredBatchResponse, MeasuredSingleResponse};
 use tikv_alloc::MemoryTraceGuard;
 use tikv_util::timer::GLOBAL_TIMER_HANDLE;
+use trace_event::types::TraceContext;
 
 use crate::RaftKv;
 

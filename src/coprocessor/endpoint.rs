@@ -669,7 +669,7 @@ impl<E: Engine> Endpoint<E> {
                 .get_ranges()
                 .last()
                 .map(|r| (r.get_start().to_vec(), r.get_end().to_vec()));
-            txn_debug!(tikv_util::logger::TraceCategory::ReqResp,
+            txn_debug!(trace_event::types::Category::ReqResp,
                 "Coprocessor request entry";
                 "start_ts" => req.start_ts,
                 "keyspace_id" => keyspace_id,

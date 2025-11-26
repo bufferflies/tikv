@@ -594,7 +594,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         key: Key,
         start_ts: TimeStamp,
     ) -> impl Future<Output = Result<(Option<Value>, KvGetStatistics)>> {
-        txn_debug!(tikv_util::logger::TraceCategory::ReqResp,
+        txn_debug!(trace_event::types::Category::ReqResp,
             "Storage::get entry";
             "key" => %key,
             "start_ts" => ?start_ts,
@@ -734,7 +734,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         tracker.metrics.read_pool_schedule_wait_nanos =
                             schedule_wait_time.as_nanos() as u64;
                     });
-                    txn_debug!(tikv_util::logger::TraceCategory::ReqResp,
+                    txn_debug!(trace_event::types::Category::ReqResp,
                         "Storage::get result";
                         "key" => %key,
                         "start_ts" => ?start_ts,
@@ -979,7 +979,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         start_ts: TimeStamp,
     ) -> impl Future<Output = Result<(Vec<Result<KvPair>>, KvGetStatistics)>> {
         let keys_count = keys.len();
-        txn_debug!(tikv_util::logger::TraceCategory::ReqResp,
+        txn_debug!(trace_event::types::Category::ReqResp,
             "Storage::batch_get entry";
             "keys_count" => keys_count,
             "start_ts" => ?start_ts,
@@ -1139,7 +1139,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         wait_wall_time_ns: wait_wall_time.as_nanos() as u64,
                         process_wall_time_ns: process_wall_time.as_nanos() as u64,
                     };
-                    txn_debug!(tikv_util::logger::TraceCategory::ReqResp,
+                    txn_debug!(trace_event::types::Category::ReqResp,
                         "Storage::batch_get result";
                         "keys_count" => keys_count,
                         "start_ts" => ?start_ts,
@@ -1194,7 +1194,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
     ) -> impl Future<Output = Result<Vec<Result<KvPair>>>> {
         let start_key_clone = start_key.clone();
         let end_key_clone = end_key.clone();
-        txn_debug!(tikv_util::logger::TraceCategory::ReqResp,
+        txn_debug!(trace_event::types::Category::ReqResp,
             "Storage::scan entry";
             "start_key" => ?start_key,
             "end_key" => ?end_key,
@@ -1370,7 +1370,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         final_results
                     });
 
-                    txn_debug!(tikv_util::logger::TraceCategory::ReqResp,
+                    txn_debug!(trace_event::types::Category::ReqResp,
                         "Storage::scan result";
                         "start_key" => ?start_key_clone,
                         "end_key" => ?end_key_clone,
@@ -1413,7 +1413,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         end_key: Option<Key>,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LockInfo>>> {
-        txn_debug!(tikv_util::logger::TraceCategory::ReqResp,
+        txn_debug!(trace_event::types::Category::ReqResp,
             "Storage::scan_lock entry";
             "max_ts" => ?max_ts,
             "start_key" => ?start_key,
@@ -1556,7 +1556,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                     Ok(locks)
                 });
 
-                txn_debug!(tikv_util::logger::TraceCategory::ReqResp,
+                txn_debug!(trace_event::types::Category::ReqResp,
                     "Storage::scan_lock result";
                     "max_ts" => ?max_ts,
                     "start_key" => ?start_key,

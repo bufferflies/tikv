@@ -15,6 +15,7 @@ use tikv_util::{
     },
     memory::HeapSize,
 };
+use trace_event::types::EventFieldValue;
 
 use super::timestamp::TimeStamp;
 
@@ -278,6 +279,13 @@ impl Display for Key {
         write!(f, "{:?}", &log_wrappers::Value::key(&self.0))
     }
 }
+
+impl trace_event::types::AsEventFieldValue for &Key {
+    fn as_event_field_value(self) -> EventFieldValue {
+        EventFieldValue::String(format!("{}", &log_wrappers::Value::key(&self.0)))
+    }
+}
+
 impl HeapSize for Key {
     fn approximate_heap_size(&self) -> usize {
         self.0.approximate_heap_size()

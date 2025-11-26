@@ -137,7 +137,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatu
                 // Log state-changing operations
                 match &result.0 {
                     TxnStatus::TtlExpire => {
-                        tikv_util::txn_info!(
+                        tikv_util::txn_info!(trace_event::types::Category::WriteDetails,
                             "check_txn_status rolled back expired lock";
                             "key" => %self.primary_key,
                             "lock_ts" => self.lock_ts,
@@ -153,7 +153,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatu
                         );
                     }
                     TxnStatus::PessimisticRollBack => {
-                        tikv_util::txn_info!(
+                        tikv_util::txn_info!(trace_event::types::Category::WriteDetails,
                             "check_txn_status pessimistic rolled back expired lock";
                             "key" => %self.primary_key,
                             "lock_ts" => self.lock_ts,
@@ -186,7 +186,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckTxnStatu
 
                 // Log if rollback was written
                 if matches!(result, TxnStatus::LockNotExist) && self.rollback_if_not_exist {
-                    tikv_util::txn_info!(
+                    tikv_util::txn_info!(trace_event::types::Category::WriteDetails,
                         "check_txn_status wrote rollback for missing lock";
                         "key" => %self.primary_key,
                         "lock_ts" => self.lock_ts,

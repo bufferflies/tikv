@@ -170,6 +170,7 @@ tokio-metrics = "0.2"
 tokio-openssl = "0.6"
 tokio-timer = { workspace = true }
 toml = "0.5"
+trace_event = { workspace = true }
 tracker = { workspace = true }
 txn_types = { workspace = true }
 url = "2"
@@ -297,6 +298,7 @@ members = [
   "components/tikv_kv",
   "components/tikv_util",
   "components/tipb_helper",
+  "components/trace_event",
   "components/tracker",
   "components/txn_types",
   "fuzz",
@@ -400,6 +402,7 @@ tikv_alloc = { path = "components/tikv_alloc" }
 tikv_kv = { path = "components/tikv_kv", default-features = false }
 tikv_util = { path = "components/tikv_util" }
 tipb_helper = { path = "components/tipb_helper" }
+trace_event = { path = "components/trace_event" }
 tracker = { path = "components/tracker" }
 txn_types = { path = "components/txn_types" }
 # External libs

@@ -308,64 +308,6 @@ pub fn txn_info_logging_enabled() -> bool {
     TXN_INFO_LOGGING.load(Ordering::Relaxed)
 }
 
-/// Trace control flag bits (matching kvproto
-/// kvrpcpb.Context.trace_control_flags)
-pub const FLAG_IMMEDIATE_LOG: u64 = 1 << 0;
-pub const FLAG_CATEGORY_REQ_RESP: u64 = 1 << 1;
-pub const FLAG_CATEGORY_WRITE_DETAILS: u64 = 1 << 2;
-pub const FLAG_CATEGORY_READ_DETAILS: u64 = 1 << 3;
-
-/// Trace categories for txn_debug! logs, matching kvproto trace_control_flags
-/// bits
-/// The names and definitions can be improved for clarity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TraceCategory {
-    /// Request/response struct-unitategory (bit 1)
-    /// The input and output below RPC layer, which is most frequently needed.
-    ReqResp,
-    /// Write details category (bit 2)
-    /// The details inside write commands: details inside txn cmd, async_write
-    /// flow, etc.
-    WriteDetails,
-    /// Read details category (bit 3)
-    /// Detailed content and values read by read requests.
-    ReadDetails,
-}
-
-impl TraceCategory {
-    /// Get the flag bit value for this category
-    #[inline]
-    pub fn flag_bit(self) -> u64 {
-        match self {
-            TraceCategory::ReqResp => FLAG_CATEGORY_REQ_RESP,
-            TraceCategory::WriteDetails => FLAG_CATEGORY_WRITE_DETAILS,
-            TraceCategory::ReadDetails => FLAG_CATEGORY_READ_DETAILS,
-        }
-    }
-}
-
-/// Check if immediate logging is enabled in the given control flags
-#[inline]
-pub fn is_immediate_log_enabled(control_flags: u64) -> bool {
-    control_flags & FLAG_IMMEDIATE_LOG != 0
-}
-
-/// Check if a specific category is enabled in the given control flags.
-/// When flags are 0, default to enabling REQ_RESP category (matching client-go
-/// behavior).
-#[inline]
-pub fn is_category_enabled(control_flags: u64, category_flag: u64) -> bool {
-    if control_flags == 0 {
-        // Default: enable REQ_RESP category when no flags are set
-        // When flags is not set, we don't know its source is tidb or not.
-        // So Request level tracing is needed.
-        // TODO: refine this logic. We should dinsinguish 0 and unknown flag
-        category_flag == FLAG_CATEGORY_REQ_RESP
-    } else {
-        control_flags & category_flag != 0
-    }
-}
-
 pub struct TikvFormat<D>
 where
     D: Decorator,
@@ -1146,37 +1088,5 @@ mod tests {
                 );
             }
         });
-    }
-
-    #[test]
-    fn test_trace_control_flags() {
-        // Test default behavior: flags=0 enables only ReqResp
-        assert!(is_category_enabled(0, FLAG_CATEGORY_REQ_RESP));
-        assert!(!is_category_enabled(0, FLAG_CATEGORY_WRITE_DETAILS));
-        assert!(!is_category_enabled(0, FLAG_CATEGORY_READ_DETAILS));
-
-        // Test immediate_log flag
-        assert!(!is_immediate_log_enabled(0));
-        assert!(is_immediate_log_enabled(FLAG_IMMEDIATE_LOG));
-        assert!(is_immediate_log_enabled(
-            FLAG_IMMEDIATE_LOG | FLAG_CATEGORY_WRITE_DETAILS
-        ));
-
-        // Test category flags
-        let flags = FLAG_CATEGORY_WRITE_DETAILS | FLAG_CATEGORY_READ_DETAILS;
-        assert!(!is_category_enabled(flags, FLAG_CATEGORY_REQ_RESP));
-        assert!(is_category_enabled(flags, FLAG_CATEGORY_WRITE_DETAILS));
-        assert!(is_category_enabled(flags, FLAG_CATEGORY_READ_DETAILS));
-
-        // Test TraceCategory mapping
-        assert_eq!(TraceCategory::ReqResp.flag_bit(), FLAG_CATEGORY_REQ_RESP);
-        assert_eq!(
-            TraceCategory::WriteDetails.flag_bit(),
-            FLAG_CATEGORY_WRITE_DETAILS
-        );
-        assert_eq!(
-            TraceCategory::ReadDetails.flag_bit(),
-            FLAG_CATEGORY_READ_DETAILS
-        );
     }
 }

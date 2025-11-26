@@ -87,7 +87,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckSecondar
                         let use_async_commit = lock.use_async_commit;
                         let min_commit_ts = lock.min_commit_ts;
                         released_lock = txn.unlock_key(key.clone(), true, TimeStamp::zero());
-                        tikv_util::txn_info!(
+                        tikv_util::txn_info!(trace_event::types::Category::WriteDetails,
                             "check_secondary_locks rolled back pessimistic lock";
                             "key" => %key,
                             "start_ts" => self.start_ts,
@@ -143,7 +143,7 @@ impl<S: Snapshot + 'static, L: LockManager> WriteCommand<S, L> for CheckSecondar
                 // acquire_pessimistic_lock and prewrite succeed again.
                 let has_overlapped_write = rollback_overlapped_write.is_some();
                 if let Some(write) = make_rollback(self.start_ts, true, rollback_overlapped_write) {
-                    tikv_util::txn_info!(
+                    tikv_util::txn_info!(trace_event::types::Category::WriteDetails,
                         "check_secondary_locks wrote protected rollback";
                         "key" => %key,
                         "start_ts" => self.start_ts,

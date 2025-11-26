@@ -17,6 +17,7 @@ slog = "2.3"
 thiserror = "1.0"
 tikv_alloc = { workspace = true }
 tikv_util = { workspace = true }
+trace_event = { workspace = true }
 
 [dev-dependencies]
 panic_hook = { workspace = true }

@@ -173,44 +173,31 @@ macro_rules! impl_display_as_debug {
 ///
 /// Otherwise logs go to DEBUG level and may be filtered out.
 ///
-/// This macro supports both slog-style structured logging and standard format
-/// strings:
+/// This macro supports only slog-style structured logging.
 ///
-/// slog style: txn_debug!(tikv_util::logger::TraceCategory::ReqResp, "message";
-/// "key1" => value1, "key2" => ?value2) standard style:
-/// txn_debug!(tikv_util::logger::TraceCategory::WriteDetails, "message: {},
-/// key2: {:?}", value1, value2)
+/// slog style: txn_debug!(trace_event::types::Category::ReqResp, "message";
+/// "key1" => value1, "key2" => ?value2)
 #[macro_export]
 macro_rules! txn_debug {
-    // slog-style: category, message; key-value pairs
-    ($category:expr, $msg:expr; $($args:tt)*) => {
+    // slog-style: trace_ctx, category, message; key-value pairs
+    (trace_ctx: $trace_ctx:expr, $category:expr, $msg:expr; $($args:tt)*) => {
         {
-            let __trace_id = tracker::get_tls_trace_id();
-            let __control_flags = __trace_id.control_flags();
-            let __category_flag = $category.flag_bit();
-            if $crate::logger::is_category_enabled(__control_flags, __category_flag) {
-                if $crate::logger::is_immediate_log_enabled(__control_flags) {
-                    info!($msg; "trace_id" => __trace_id, $($args)*);
+            let __trace_ctx = $trace_ctx;
+            let __control_flags = __trace_ctx.control_flags();
+            if __trace_ctx.category_enabled($category) {
+                if __trace_ctx.immediate_log_enabled() {
+                    info!($msg; "trace_id" => &__trace_ctx.trace_id, $($args)*);
                 } else {
-                    debug!($msg; "trace_id" => __trace_id, $($args)*);
+                    debug!($msg; "trace_id" => &__trace_ctx.trace_id, $($args)*);
                 }
+                $crate::txn_log_helper!(record __trace_ctx, $category, $msg; $($args)*)
             }
         }
     };
-    // Standard format string style: category, message with format args
-    ($category:expr, $($arg:tt)+) => {
-        {
-            let __trace_id = tracker::get_tls_trace_id();
-            let __control_flags = __trace_id.control_flags();
-            let __category_flag = $category.flag_bit();
-            if $crate::logger::is_category_enabled(__control_flags, __category_flag) {
-                if $crate::logger::is_immediate_log_enabled(__control_flags) {
-                    log::info!($($arg)+);
-                } else {
-                    log::debug!($($arg)+);
-                }
-            }
-        }
+
+    // slog-style: category, message; key-value pairs
+    ($category:expr, $msg:expr; $($args:tt)*) => {
+        txn_debug!(trace_ctx: tracker::get_tls_trace_ctx(), $category, $msg; $($args)*);
     };
 }
 
@@ -219,15 +206,58 @@ macro_rules! txn_debug {
 /// Only supports slog-style syntax: message; key-value pairs
 #[macro_export]
 macro_rules! txn_info {
-    ($msg:expr; $($args:tt)*) => {
+    (trace_ctx: $trace_ctx:expr, $category:expr, $msg:expr; $($args:tt)*) => {
         {
-            let __trace_id = tracker::get_tls_trace_id();
-            let __control_flags = __trace_id.control_flags();
-            if $crate::logger::is_immediate_log_enabled(__control_flags) || $crate::logger::txn_info_logging_enabled() {
-                info!($msg; "trace_id" => __trace_id, $($args)*);
+            let __trace_ctx = $trace_ctx;
+            let __control_flags = __trace_ctx.control_flags();
+            if __trace_ctx.immediate_log_enabled() || $crate::logger::txn_info_logging_enabled() {
+                info!($msg; "trace_id" => &__trace_ctx.trace_id, $($args)*);
+            }
+            if __trace_ctx.category_enabled($category) {
+                $crate::txn_log_helper!(record __trace_ctx, $category, $msg; $($args)*)
             }
         }
     };
+    ($category:expr, $msg:expr; $($args:tt)*) => {
+        txn_info!(trace_ctx: tracker::get_tls_trace_ctx(), $category, $msg; $($args)*);
+    };
+}
+
+#[macro_export]
+macro_rules! txn_log_helper {
+    (record $trace_ctx:expr, $category:expr, $msg:expr; $($args:tt)*) => {
+        {
+            let __r = trace_event::flight_recorder::get_global_flight_recorder();
+            if let Some(__r) = __r.as_ref() {
+                let mut __events = Vec::with_capacity($crate::txn_log_helper!(count_fields $($args)*,));
+                $crate::txn_log_helper!(push_events __events; $($args)*,);
+                __r.record(trace_event::types::Event {
+                    category: $category,
+                    name: $msg,
+                    trace_ctx: $trace_ctx,
+                    time: std::time::SystemTime::now(),
+                    fields: __events,
+                });
+            }
+        }
+    };
+
+    // Recursively calculate the number of fields.
+    (count_fields $($ctl:ident)? $name:expr => $(?)? $(%)? $value:expr, $($rem:tt)*) => {
+        1 + $crate::txn_log_helper!(count_fields $($rem)*)
+    };
+    (count_fields $(,)?) => { 0 };
+
+    // Recursively make EventField out from the fields.
+    (push_events $events:ident; $name:expr => $(%)? $value:expr, $($rem:tt)*) => {
+        $events.push(trace_event::types::EventField::new($name, &($value)));
+        $crate::txn_log_helper!(push_events $events; $($rem)*);
+    };
+    (push_events $events:ident; $name:expr => ?$value:expr, $($rem:tt)*) => {
+        $events.push(trace_event::types::EventField::new_with_owned_string($name, format!("{:?}", $value)));
+        $crate::txn_log_helper!(push_events $events; $($rem)*);
+    };
+    (push_events $events:ident; $(,)?) => {}
 }
 
 /// Macro to consume Arc runtimes and call shutdown_background() if the Arc
@@ -247,6 +277,15 @@ macro_rules! shutdown_runtimes {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+
+    use trace_event::{
+        flight_recorder::{
+            get_global_flight_recorder, set_global_flight_recorder,
+            DEFAULT_GLOBAL_FLIGHT_RECORDER_CAPACITY,
+        },
+        types::{Category, ControlFlags, TraceContext, TraceId},
+    };
+
     #[test]
     fn test_box_error() {
         let file_name = file!();
@@ -272,5 +311,58 @@ mod tests {
             panic!("first panic");
         });
         res.unwrap_err();
+    }
+
+    #[test]
+    fn test_txn_debug_recording_events() {
+        tracker::set_tls_trace_ctx(TraceContext::from_proto(
+            b"id1",
+            ControlFlags::ENABLE_CATEGORY_REQ_RESP.bits(),
+        ));
+
+        set_global_flight_recorder(10);
+        txn_debug!(Category::ReqResp, "test event";
+            "k1" => 1u64,
+            "k2" => "v2",
+            "k3" => ?vec![1, 2, 3]
+        );
+
+        let mut collected_event = None;
+        {
+            let r = get_global_flight_recorder();
+            r.as_ref().unwrap().for_each_event_by_trace_id(
+                &Some(TraceId::from(b"id1".as_slice())),
+                |e| {
+                    collected_event = Some(e.clone());
+                },
+            );
+        }
+        let collected_event = collected_event.unwrap();
+        assert_eq!(
+            collected_event
+                .trace_ctx
+                .trace_id
+                .as_ref()
+                .unwrap()
+                .0
+                .as_ref(),
+            b"id1"
+        );
+        assert_eq!(
+            collected_event.trace_ctx.control_flags,
+            ControlFlags::ENABLE_CATEGORY_REQ_RESP
+        );
+        assert_eq!(collected_event.category, Category::ReqResp);
+        assert_eq!(collected_event.name, "test event");
+
+        assert_eq!(collected_event.fields.len(), 3);
+        assert_eq!(collected_event.fields[0].name(), "k1");
+        assert_eq!(collected_event.fields[0].value().to_string(), "1");
+        assert_eq!(collected_event.fields[1].name(), "k2");
+        assert_eq!(collected_event.fields[1].value().to_string(), "v2");
+        assert_eq!(collected_event.fields[2].name(), "k3");
+        assert_eq!(collected_event.fields[2].value().to_string(), "[1, 2, 3]");
+
+        set_global_flight_recorder(DEFAULT_GLOBAL_FLIGHT_RECORDER_CAPACITY);
     }
 }
