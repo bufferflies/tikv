@@ -21,7 +21,10 @@ use kube::{
     api::{Api, AttachParams, AttachedProcess, ListParams, PostParams, ResourceExt},
     Client as KubeClient,
 };
-use load_data::task::LoadTaskStates;
+use load_data::{
+    checkpoint::{CANCELLED_TASK_EXPIRE_SEC, FINISHED_TASK_EXPIRE_SEC, IDLE_TASK_EXPIRE_SEC},
+    task::LoadTaskStates,
+};
 use security::SecurityManager;
 use serde_json::json;
 use tikv_util::{box_err, config::ReadableSize, error, info, time::Instant, warn};
@@ -39,11 +42,11 @@ const DEFAULT_MAX_SIZE: ReadableSize = ReadableSize::gb(1024);
 const DEFAULT_SPAWN_DATA_SIZE: ReadableSize = ReadableSize::gb(2);
 const DEFAULT_SPAWN_RUNNING_TASKS: usize = 8;
 const DEFAULT_WORKER_MAX_CORES: f64 = 4.0;
-const DEFAULT_EXPIRE_SECONDS: i64 = 60 * 10;
 const DEFAULT_NAMESPACE: &str = "tidb-serverless";
 const DEFAULT_TEMPLATE_STS_NAME: &str = "tikv-api";
 const DEFAULT_WORKER_COUNT_LIMIT: usize = 1024;
 const DEFAULT_WAIT_POD_READY_TIMEOUT: u64 = 60 * 5;
+const DEFAULT_POD_WARM_UP_SECCONDS: i64 = 60 * 10;
 
 const APP_LABEL: &str = "app";
 const K8S_LABEL_NAME: &str = "app.kubernetes.io/name";
@@ -98,7 +101,10 @@ pub struct WorkerScalerConfig {
     pub spawn_data_size: ReadableSize,
     pub spawn_running_tasks: usize,
     pub worker_max_cores: f64,
-    pub expire_seconds: i64,
+    pub pod_warm_up_sec: i64,
+    pub cancelled_task_expire_sec: i64,
+    pub finished_task_expire_sec: i64,
+    pub idle_task_expire_sec: i64,
     pub worker_min_storage_gb: usize,
     pub worker_count_limit: usize,
     pub sts_configs: Vec<StsConfig>,
@@ -116,7 +122,10 @@ impl Default for WorkerScalerConfig {
             spawn_data_size: DEFAULT_SPAWN_DATA_SIZE,
             spawn_running_tasks: DEFAULT_SPAWN_RUNNING_TASKS,
             worker_max_cores: DEFAULT_WORKER_MAX_CORES,
-            expire_seconds: DEFAULT_EXPIRE_SECONDS,
+            pod_warm_up_sec: DEFAULT_POD_WARM_UP_SECCONDS,
+            cancelled_task_expire_sec: CANCELLED_TASK_EXPIRE_SEC,
+            finished_task_expire_sec: FINISHED_TASK_EXPIRE_SEC,
+            idle_task_expire_sec: IDLE_TASK_EXPIRE_SEC,
             worker_min_storage_gb: DEFAULT_LOAD_DATA_WORKER_MIN_STORAGE_GB,
             sts_configs: vec![],
             worker_count_limit: DEFAULT_WORKER_COUNT_LIMIT,
@@ -183,8 +192,9 @@ pub(crate) struct WorkerPod {
     started_at: i64,
     updated_at: i64,
     svc_name: String,
-    canceled: bool,
-    finished_at: i64,
+    cleanup: bool,
+    finished: bool,
+    stopped_at: i64,
     flushed_files: usize,
     created_files: usize,
     ingested_regions: usize,
@@ -220,33 +230,29 @@ impl WorkerPod {
         &mut self,
         tasks: Option<Vec<LoadTaskStates>>,
         now_timestamp: i64,
-        expire_seconds: i64,
+        pod_warm_up_sec: i64,
+        cancelled_task_expire_sec: i64,
+        finished_task_expire_sec: i64,
+        idle_task_expire_sec: i64,
     ) {
-        if self.started_at == 0 {
+        if self.started_at == 0 || (now_timestamp - self.started_at < pod_warm_up_sec) {
             return;
         }
-        if self.started_at > 0 {
-            let start_duration_secs = now_timestamp - self.started_at;
-            if start_duration_secs < expire_seconds {
-                return;
-            }
-        }
+
         if let Some(tasks) = tasks {
             if tasks.is_empty() {
                 // the task is cleaned up by client and GCed by the load data worker.
                 info!("task {} is GCed by the load data worker", self.name);
-                self.canceled = true;
+                self.cleanup = true;
             } else {
                 let task = &tasks[0];
-                if task.canceled {
+                if task.canceled && self.stopped_at == 0 {
                     // the task is cleaned up by client.
                     info!("task {} is cleaned up by the client", self.name);
-                    self.canceled = true;
+                    self.stopped_at = now_timestamp;
                 }
-                if task.finished && self.finished_at == 0 {
-                    info!("task {} is finished", self.name);
-                    self.finished_at = now_timestamp;
-                }
+
+                self.finished = task.finished;
                 if self.flushed_files != task.flushed_files
                     || self.created_files != task.created_files
                     || self.ingested_regions != task.ingested_regions
@@ -275,34 +281,31 @@ impl WorkerPod {
                 .inc();
             self.query_failures += 1;
             if self.query_failures > WORKER_SCALER_QUERY_FAILURES_LIMIT {
-                self.canceled = true;
+                self.cleanup = true;
             }
         }
-        if self.finished_at > 0 {
-            let finished_duration = now_timestamp - self.finished_at;
-            if finished_duration > expire_seconds {
-                // The client finished the task but failed to explicit clean up.
-                warn!(
-                    "task {} is finished but the client failed to explicit clean up",
-                    self.name
-                );
-                self.canceled = true;
+
+        if self.stopped_at > 0 {
+            let duration = now_timestamp - self.stopped_at;
+            if (self.finished && duration > finished_task_expire_sec)
+                || duration > cancelled_task_expire_sec
+            {
+                let log_msg = if self.finished {
+                    "finished"
+                } else {
+                    "canceled"
+                };
+                info!("clean up {} task {}", log_msg, self.name);
+                self.cleanup = true
             }
         } else {
             let updated_duration = now_timestamp - self.updated_at;
-            if updated_duration > expire_seconds {
-                // The client didn't finish the task and no progress for a long time.
+            if updated_duration > idle_task_expire_sec {
                 warn!(
-                    "pod {} no progress for {} seconds",
-                    &self.name, updated_duration
+                    "pod {} is cleanuped up for no progress for {} seconds",
+                    self.name, updated_duration
                 );
-                if updated_duration > expire_seconds * 30 {
-                    warn!(
-                        "pod {} canceled for no progress for {} seconds",
-                        &self.name, updated_duration
-                    );
-                    self.canceled = true;
-                }
+                self.cleanup = true;
             }
         }
     }
@@ -347,7 +350,7 @@ impl WorkerScaler {
         info!("worker scaler started");
         let interval = Duration::from_secs(CLEAN_UP_WORKER_TICK_INTERVAL);
         let mut timer = tokio::time::interval(interval);
-        let pvc_ticks = self.config.expire_seconds as u64 / CLEAN_UP_WORKER_TICK_INTERVAL;
+        let pvc_ticks = 10;
         let mut tick_cnt = 0;
         loop {
             timer.tick().await;
@@ -761,7 +764,7 @@ impl WorkerScaler {
         // `canceled` flag will be set. We did not clean up the task
         // immediately, this way we can ensure that the pod can survive for
         // `CLEAN_UP_WORKER_TICK_INTERVAL` after completion.
-        if worker_pod.canceled {
+        if worker_pod.cleanup {
             self.clean_up_task(task_id).await;
             return;
         }
@@ -780,7 +783,14 @@ impl WorkerScaler {
         let now_timestamp = chrono::Utc::now().timestamp();
 
         let mut worker_pod = locked_worker_pod.write().await;
-        worker_pod.update_task_states(tasks, now_timestamp, self.config.expire_seconds);
+        worker_pod.update_task_states(
+            tasks,
+            now_timestamp,
+            self.config.pod_warm_up_sec,
+            self.config.cancelled_task_expire_sec,
+            self.config.finished_task_expire_sec,
+            self.config.idle_task_expire_sec,
+        );
     }
 
     async fn clean_up_task(&self, task_id: &str) {
@@ -1056,66 +1066,97 @@ mod tests {
         assert_eq!(worker_pod.updated_at, now_ts);
         assert_eq!(worker_pod.svc_name, new_worker_svc_name(task_id));
 
-        // worker pod is not canceled if no task states and not expired.
-        worker_pod.update_task_states(None, now_ts + 40, 60);
-        assert!(!worker_pod.canceled);
+        // worker pod is not canceled if no task states and pod don't warn up.
+        worker_pod.update_task_states(None, now_ts + 40, 50, 150, 50, 200);
+        assert!(!worker_pod.cleanup);
 
         // worker pod is not canceled if no task states and expired,
         // and retry retry count is less than the limit
         for _i in 0..WORKER_SCALER_QUERY_FAILURES_LIMIT {
-            worker_pod.update_task_states(None, now_ts + 100, 60);
-            assert!(!worker_pod.canceled);
+            worker_pod.update_task_states(None, now_ts + 100, 50, 150, 50, 200);
+            assert!(!worker_pod.cleanup);
         }
 
-        // worker pod is canceled if no task states and expired.
-        worker_pod.update_task_states(None, now_ts + 100, 60);
-        assert!(worker_pod.canceled);
+        // worker pod is canceled if no task states and pod warn up.
+        worker_pod.update_task_states(None, now_ts + 100, 50, 150, 50, 200);
+        assert!(worker_pod.cleanup);
 
         // worker pod is canceled if task is empty and expired.
         worker_pod = WorkerPod::new(pod_name.clone());
         worker_pod.init(task_id, &pod);
-        worker_pod.update_task_states(Some(vec![]), now_ts + 100, 60);
-        assert!(worker_pod.canceled);
+        worker_pod.update_task_states(Some(vec![]), now_ts + 100, 50, 150, 50, 200);
+        assert!(worker_pod.cleanup);
 
         // worker pod is canceled if task is canceled.
         let mut task_states = LoadTaskStates::default();
         task_states.canceled = true;
         worker_pod = WorkerPod::new(pod_name.clone());
         worker_pod.init(task_id, &pod);
-        worker_pod.update_task_states(Some(vec![task_states]), now_ts + 100, 60);
-        assert!(worker_pod.canceled);
+        worker_pod.update_task_states(
+            Some(vec![task_states.clone()]),
+            now_ts + 100,
+            50,
+            150,
+            50,
+            300,
+        );
+        assert!(!worker_pod.cleanup);
+        worker_pod.update_task_states(Some(vec![task_states]), now_ts + 260, 50, 150, 50, 300);
+        assert!(worker_pod.cleanup);
 
-        // worker pod is canceled if task is finished and not canceled, expired after
+        // worker pod is canceled if task is finished and canceled, expired after
         // finish time.
         let mut task_states = LoadTaskStates::default();
         task_states.finished = true;
+        task_states.canceled = true;
         worker_pod = WorkerPod::new(pod_name.clone());
         worker_pod.init(task_id, &pod);
-        worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 100, 60);
+        worker_pod.update_task_states(
+            Some(vec![task_states.clone()]),
+            now_ts + 120,
+            50,
+            200,
+            100,
+            300,
+        );
         // worker pod is not canceled if task finished duration not exceed expire time.
-        assert!(!worker_pod.canceled);
-        worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 180, 60);
+        assert!(!worker_pod.cleanup);
+        worker_pod.update_task_states(Some(vec![task_states]), now_ts + 240, 50, 200, 100, 300);
         // worker pod is canceled if task finished duration exceed expire time.
-        assert!(worker_pod.canceled);
+        assert!(worker_pod.cleanup);
 
         // worker pod is canceled if not finished and no progress for a long time.
         worker_pod = WorkerPod::new(pod_name);
         worker_pod.init(task_id, &pod);
         task_states = LoadTaskStates::default();
         task_states.created_files = 1;
-        worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 100, 60);
+        worker_pod.update_task_states(
+            Some(vec![task_states.clone()]),
+            now_ts + 100,
+            50,
+            200,
+            100,
+            300,
+        );
         assert_eq!(worker_pod.created_files, 1);
         assert_eq!(worker_pod.updated_at, now_ts + 100);
-        assert!(!worker_pod.canceled);
+        assert!(!worker_pod.cleanup);
         task_states.created_files = 2;
-        worker_pod.update_task_states(Some(vec![task_states.clone()]), now_ts + 180, 60);
+        worker_pod.update_task_states(
+            Some(vec![task_states.clone()]),
+            now_ts + 180,
+            50,
+            150,
+            100,
+            300,
+        );
         assert_eq!(worker_pod.created_files, 2);
         assert_eq!(worker_pod.updated_at, now_ts + 180);
-        assert!(!worker_pod.canceled);
-        worker_pod.update_task_states(Some(vec![task_states]), now_ts + 2000, 60);
+        assert!(!worker_pod.cleanup);
+        worker_pod.update_task_states(Some(vec![task_states]), now_ts + 500, 50, 150, 100, 300);
         assert_eq!(worker_pod.created_files, 2);
         assert_eq!(worker_pod.updated_at, now_ts + 180);
-        assert!(worker_pod.canceled);
+        assert!(worker_pod.cleanup);
     }
 
     #[test]
