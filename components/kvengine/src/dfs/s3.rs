@@ -118,27 +118,17 @@ impl CloudProvider {
         format!("{}{}", self.header_prefix(), key)
     }
 
-    /// Always set AWS headers, and for non-AWS providers, additionally set the
-    /// corresponding cloud-specific headers.
+    /// Set the corresponding cloud-specific headers.
     pub fn add_provider_header(&self, req: &mut SignedRequest, key: &str, value: &str) {
-        assert!(key.starts_with(CloudProvider::Aws.header_prefix()));
         let value = if key.ends_with("storage-class") {
-            CloudProvider::Aws.storage_class_str(StorageClass::from_str(value))
+            self.storage_class_str(StorageClass::from_str(value))
         } else {
             value
         };
-        req.add_header(key, value);
-        if *self != CloudProvider::Aws {
-            let value = if key.ends_with("storage-class") {
-                self.storage_class_str(StorageClass::from_str(value))
-            } else {
-                value
-            };
-            let key_suffix = key
-                .strip_prefix(CloudProvider::Aws.header_prefix())
-                .unwrap_or(key);
-            req.add_header(self.build_header_key(key_suffix), value);
-        }
+        let key_suffix = key
+            .strip_prefix(CloudProvider::Aws.header_prefix())
+            .unwrap_or(key);
+        req.add_header(self.build_header_key(key_suffix), value);
     }
 
     /// Convert to the provider-specific storage class string.
