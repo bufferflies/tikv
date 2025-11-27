@@ -1531,6 +1531,9 @@ impl Applier {
             let cs_pb = cs.change_set.clone();
             let result = if cs.has_snapshot() {
                 PEER_WRITE_CMD_COUNTER.ingest_shard.inc();
+                // The lock may already committed in the snapshot.
+                // clear_caches to avoid memory leak.
+                self.clear_caches();
                 self.apply_state = RaftApplyState::from_snapshot(cs.get_snapshot());
                 ctx.engine.ingest(cs, false)
             } else {
