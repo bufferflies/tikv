@@ -578,6 +578,24 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         unimplemented!()
     }
 
+    fn update_keyspace_service_safe_point(
+        &self,
+        _keyspace_id: u32,
+        _name: String,
+        _safepoint: TimeStamp,
+        _ttl: Duration, // Set `Duration::ZERO` to remove the safe point
+    ) -> PdFuture<u64 /* current_min_safe_point */> {
+        unimplemented!()
+    }
+
+    fn remove_keyspace_service_safe_point(
+        &self,
+        keyspace_id: u32,
+        name: String,
+    ) -> PdFuture<u64 /* current_min_safe_point */> {
+        self.update_keyspace_service_safe_point(keyspace_id, name, TimeStamp::max(), Duration::ZERO)
+    }
+
     /// Gets the internal `FeatureGate`.
     fn feature_gate(&self) -> &FeatureGate {
         unimplemented!()
@@ -747,6 +765,19 @@ pub fn take_peer_address(store: &mut metapb::Store) -> String {
 
 fn check_update_service_safe_point_resp(
     resp: &pdpb::UpdateServiceGcSafePointResponse,
+    required_safepoint: u64,
+) -> Result<()> {
+    if resp.min_safe_point > required_safepoint {
+        return Err(Error::UnsafeServiceGcSafePoint {
+            requested: required_safepoint.into(),
+            current_minimal: resp.min_safe_point.into(),
+        });
+    }
+    Ok(())
+}
+
+fn check_update_keyspace_service_safe_point_resp(
+    resp: &pdpb::UpdateServiceSafePointV2Response,
     required_safepoint: u64,
 ) -> Result<()> {
     if resp.min_safe_point > required_safepoint {

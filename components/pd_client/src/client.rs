@@ -636,9 +636,7 @@ impl PdClient for RpcClient {
     }
 
     fn get_all_stores_async(&self, exclude_tombstone: bool) -> PdFuture<Vec<metapb::Store>> {
-        let _timer = PD_REQUEST_HISTOGRAM_VEC
-            .with_label_values(&["get_all_stores"])
-            .start_coarse_timer();
+        let timer = Instant::now();
 
         let mut req = pdpb::GetAllStoresRequest::default();
         req.set_header(self.header());
@@ -660,6 +658,9 @@ impl PdClient for RpcClient {
 
             Box::pin(async move {
                 let mut resp = handler.await?;
+                PD_REQUEST_HISTOGRAM_VEC
+                    .with_label_values(&["get_all_stores_async"])
+                    .observe(duration_to_sec(timer.saturating_elapsed()));
                 check_resp_header(resp.get_header())?;
                 Ok(resp.take_stores().into())
             }) as PdFuture<_>
@@ -1233,6 +1234,58 @@ impl PdClient for RpcClient {
                 check_resp_header(resp.get_header())?;
                 crate::check_update_service_safe_point_resp(&resp, safe_point.into_inner())?;
                 Ok(())
+            }) as PdFuture<_>
+        };
+        self.pd_client
+            .request(req, executor, LEADER_CHANGE_RETRY)
+            .execute()
+    }
+
+    fn update_keyspace_service_safe_point(
+        &self,
+        keyspace_id: u32,
+        name: String,
+        safe_point: TimeStamp,
+        ttl: Duration,
+    ) -> PdFuture<u64 /* current_min_safe_point */> {
+        let begin = Instant::now();
+        let ttl_secs = if ttl.is_zero() {
+            // Use -1 to remove the keyspace.
+            // Ref: https://github.com/pingcap/kvproto/blob/master/proto/pdpb.proto, UpdateServiceSafePointV2Request
+            -1
+        } else {
+            ttl.as_secs() as i64
+        };
+        let mut req = pdpb::UpdateServiceSafePointV2Request::default();
+        req.set_header(self.header());
+        req.set_keyspace_id(keyspace_id);
+        req.set_service_id(name.into());
+        req.set_ttl(ttl_secs);
+        req.set_safe_point(safe_point.into_inner());
+        let executor = move |client: &Client, r: pdpb::UpdateServiceSafePointV2Request| {
+            let handler = {
+                let inner = client.inner.rl();
+                inner
+                    .client_stub
+                    .update_service_safe_point_v2_async_opt(&r, call_option_inner(&inner))
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "fail to request PD {} err {:?}",
+                            "update_service_safe_point_v2_async", e
+                        )
+                    })
+            };
+            Box::pin(async move {
+                let resp = handler.await?;
+                PD_REQUEST_HISTOGRAM_VEC
+                    .with_label_values(&["update_service_safe_point_v2_async"])
+                    .observe(duration_to_sec(begin.saturating_elapsed()));
+                check_resp_header(resp.get_header())?;
+                crate::check_update_keyspace_service_safe_point_resp(
+                    &resp,
+                    safe_point.into_inner(),
+                )?;
+                Ok(resp.min_safe_point)
             }) as PdFuture<_>
         };
         self.pd_client

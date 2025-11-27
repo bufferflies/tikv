@@ -906,18 +906,22 @@ impl PdCluster {
             }
         }
 
+        let new_safe_point = self.refresh_gc_safe_point();
+        info!(
+            "update_gc_service_safe_point: new gc_safe_point {}",
+            new_safe_point
+        );
+        Ok(new_safe_point)
+    }
+
+    fn refresh_gc_safe_point(&mut self) -> u64 {
         self.gc_safe_point = self
             .gc_service_safe_points
             .values()
             .map(|x| x.safe_point)
             .min()
             .unwrap_or(0);
-        let new_safe_point = self.get_gc_safe_point();
-        info!(
-            "update_gc_service_safe_point: new gc_safe_point {}",
-            new_safe_point
-        );
-        Ok(new_safe_point)
+        self.gc_safe_point
     }
 
     pub fn get_gc_service_safe_points(&self) -> Vec<GcServiceSafePoint> {
