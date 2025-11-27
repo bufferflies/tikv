@@ -35,6 +35,8 @@ pub enum Error {
     RegisterCancelled(String),
     #[error("no valid backup")]
     NoValidBackup,
+    #[error("start_ts before safepoint ({start_ts} < {gc_safe_point})")]
+    StartTsBeforeSafepoint { start_ts: u64, gc_safe_point: u64 },
     #[error("other error {0}")]
     OtherError(#[from] Box<dyn std::error::Error + Sync + Send>),
 

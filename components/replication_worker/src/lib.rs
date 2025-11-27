@@ -9,6 +9,7 @@ mod error;
 mod kube;
 mod metrics;
 mod provisioned;
+mod safepoint;
 mod scheduler;
 mod ticdc_util;
 mod util;
@@ -104,6 +105,7 @@ pub struct ReplicationWorkerConfig {
     /// backups or bugs.
     pub fetch_wal_target_from_backup: bool,
 
+    pub safepoint: SafepointConfig,
     pub merged_engine: MergedEngineConfig,
 }
 
@@ -126,6 +128,7 @@ impl Default for ReplicationWorkerConfig {
             min_wal_target_time_span: ReadableDuration::minutes(5),
             max_wal_target_time_span: ReadableDuration::minutes(20),
             fetch_wal_target_from_backup: true,
+            safepoint: Default::default(),
             merged_engine: Default::default(),
         }
     }
@@ -148,6 +151,30 @@ impl ReplicationWorkerConfig {
             && !self.cdc_sts_name.is_empty()
             && !self.namespace.is_empty()
             && std::env::var(K8S_SERVICE_HOST).is_ok()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct SafepointConfig {
+    /// The time-to-live when replication worker set service safepoint during
+    /// creating changefeed to ensure that the `start_ts` of the changefeed is
+    /// available during changefeed initialization.
+    ///
+    /// The value should not be too small, or the safepoint will expire before
+    /// changefeed initialized.
+    ///
+    /// And the value should not be too large, as we do not remove the safepoint
+    /// for easier.
+    pub create_changefeed_gc_ttl: ReadableDuration,
+}
+
+impl Default for SafepointConfig {
+    fn default() -> Self {
+        Self {
+            create_changefeed_gc_ttl: ReadableDuration::minutes(10),
+        }
     }
 }
 

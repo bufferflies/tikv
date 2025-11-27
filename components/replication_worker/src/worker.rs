@@ -72,6 +72,7 @@ use crate::{
     kube::{KeyspaceKubeService, KubeApi},
     metrics::*,
     provisioned::KeyspaceProvisionedService,
+    safepoint::ServiceSafepointManager,
     scheduler::get_cdc_status,
     ticdc_util::TiCdcError,
     util::{
@@ -120,6 +121,7 @@ pub struct ReplicationWorker {
     kube_api: Option<Arc<KubeApi>>,
     runtime: Arc<tokio::runtime::Runtime>,
     gc_worker: Option<worker::Worker>,
+    safepoint_mgr: Option<ServiceSafepointManager>,
 
     keyspaces: HashMap<u32, Keyspace>,
     cdc_addrs: Arc<dashmap::DashMap<u32, String>>,
@@ -241,6 +243,13 @@ impl ReplicationWorker {
         let gc_worker = worker::Builder::new("rep-gc-worker").create();
         gc_worker.start_with_timer("rep-gc-worker", gc_runner);
 
+        let safepoint_mgr = box_try!(ServiceSafepointManager::new(
+            ctx.config.merged_store_id,
+            ctx.pd.clone(),
+            &config,
+            runtime.handle().clone(),
+        ));
+
         let interval = config.report_region_interval.0;
         let update_stores_wal_size_limit = config.update_stores_wal_size_limit.as_memory_size();
         let incr_scan_concurrency_limit =
@@ -269,6 +278,7 @@ impl ReplicationWorker {
             health_service: None,
             kube_api,
             gc_worker: Some(gc_worker),
+            safepoint_mgr: Some(safepoint_mgr),
             keyspaces,
             cdc_addrs,
             conns: Default::default(),
@@ -332,6 +342,9 @@ impl ReplicationWorker {
         }
         if let Some(gc_worker) = self.gc_worker.take() {
             gc_worker.stop()
+        }
+        if let Some(sp_mgr) = self.safepoint_mgr.take() {
+            sp_mgr.shutdown();
         }
         self.shutdown_report_region_loops();
     }
@@ -577,15 +590,15 @@ impl ReplicationWorker {
         &mut self,
         keyspace_id: u32,
         changefeed_id: String,
-        start_ts: u64,
+        origin_start_ts: u64,
         origin_body: Bytes,
         cb: Box<dyn FnOnce(Result<(StatusCode, Bytes)>) + Send>,
     ) {
         let tag = format!("{keyspace_id}:new_task");
 
-        let body = match Self::handle_start_ts(
+        let (start_ts, body) = match Self::handle_start_ts(
             &tag,
-            start_ts,
+            origin_start_ts,
             origin_body,
             self.last_update_ts.into_inner(),
         ) {
@@ -602,6 +615,18 @@ impl ReplicationWorker {
             cb(Err(Error::OtherError("keyspace not found".into())));
             return;
         }
+
+        let Some(sp_mgr) = self.safepoint_mgr.as_mut() else {
+            cb(Err(Error::OtherError("replication worker stopped".into())));
+            return;
+        };
+        if let Err(err) =
+            sp_mgr.ensure_changefeed_start_ts_safety(keyspace_id, &changefeed_id, start_ts)
+        {
+            cb(Err(err));
+            return;
+        }
+
         let merged_store_id = self.merged_store_id();
         let ks = self.keyspaces.get_mut(&keyspace_id).unwrap();
         let pd_client = ks.get_pd_client();
@@ -614,7 +639,6 @@ impl ReplicationWorker {
         let states = ks.get_states_mut();
         let req_body = match states.feeds.entry(changefeed_id) {
             Entry::Vacant(e) => {
-                // Consider as a retry request.
                 // TODO: verify the request parameter.
                 e.insert(body_string);
                 self.merged_engine
@@ -623,8 +647,10 @@ impl ReplicationWorker {
                 body
             }
             Entry::Occupied(e) => {
+                // Consider as a retry request.
                 // Use the saved body, to ensure that the request between replication worker &
                 // TiCDC are the same.
+                // TODO: verify the request parameter not changed.
                 Bytes::copy_from_slice(e.get().as_bytes())
             }
         };
@@ -650,30 +676,33 @@ impl ReplicationWorker {
 
     fn handle_start_ts(
         tag: &str,
-        start_ts: u64,
-        body: Bytes,
+        origin_start_ts: u64,
+        origin_body: Bytes,
         last_update_ts: u64,
-    ) -> Result<Bytes> {
+    ) -> Result<(u64 /* new_start_ts */, Bytes /* new_body */)> {
         if last_update_ts == 0 {
             return Err(Error::OtherError("replication worker not ready".into()));
         }
-        if start_ts > 0 {
-            if start_ts <= last_update_ts {
-                Ok(body)
+        if origin_start_ts > 0 {
+            if origin_start_ts <= last_update_ts {
+                Ok((origin_start_ts, origin_body))
             } else {
-                error!("{}: start_ts too large", tag; "start_ts" => start_ts, "last_update_ts" => last_update_ts);
+                error!("{}: start_ts too large", tag; "start_ts" => origin_start_ts, "last_update_ts" => last_update_ts);
                 Err(Error::OtherError(
                     format!("start_ts too large (> {})", last_update_ts).into(),
                 ))
             }
         } else {
-            let Ok(Value::Object(mut js_value)) = serde_json::from_slice(&body) else {
+            let Ok(Value::Object(mut js_value)) = serde_json::from_slice(&origin_body) else {
                 // The format has been verified in scheduler.
                 unreachable!();
             };
             debug!("{}: set start_ts as {}", tag, last_update_ts);
             js_value.insert("start_ts".into(), json!(last_update_ts));
-            Ok(serde_json::to_vec(&json!(js_value)).unwrap().into())
+            Ok((
+                last_update_ts,
+                serde_json::to_vec(&json!(js_value)).unwrap().into(),
+            ))
         }
     }
 
@@ -2652,8 +2681,9 @@ mod tests {
                 "b": "b",
             });
             let req_body = serde_json::to_vec(&req).unwrap();
-            let updated_body =
+            let (updated_start_ts, updated_body) =
                 ReplicationWorker::handle_start_ts("tag", 0, req_body.into(), 1000).unwrap();
+            assert_eq!(updated_start_ts, 1000);
             assert_eq!(
                 String::from_utf8_lossy(&updated_body),
                 r#"{"changefeed_id":"cf1","sink_uri":"sink","a":1,"b":"b","start_ts":1000}"#
@@ -2673,8 +2703,9 @@ mod tests {
                 .unwrap_err();
             assert!(err.to_string().contains("start_ts too large"));
 
-            let updated_body =
+            let (updated_start_ts, updated_body) =
                 ReplicationWorker::handle_start_ts("tag", 500, req_body.into(), 1000).unwrap();
+            assert_eq!(updated_start_ts, 500);
             assert_eq!(
                 String::from_utf8_lossy(&updated_body),
                 r#"{"changefeed_id":"cf1","sink_uri":"sink","a":1,"b":"b","start_ts":500}"#

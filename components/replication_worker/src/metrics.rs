@@ -56,10 +56,16 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
-    pub static ref REP_FEATCH_WAL_TARGET_COUNTER: IntGaugeVec = register_int_gauge_vec!(
+    pub static ref REP_FEATCH_WAL_TARGET_COUNTER: IntCounterVec = register_int_counter_vec!(
         "tikv_cdc_rep_fetch_wal_target_counter",
         "Total number of fetching WAL targets",
         &["type", "reason"]
+    )
+    .unwrap();
+    pub static ref REP_SAFEPOINT_EVENTS_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "tikv_cdc_rep_safepoint_events_counter",
+        "Total number of changefeed safepoint events",
+        &["type", "keyspace", "reason"]
     )
     .unwrap();
 }
