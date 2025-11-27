@@ -26,6 +26,8 @@ pub enum Error {
     StoreTimeout(String),
     #[error(transparent)]
     TiCdcError(#[from] TiCdcError),
+    #[error("request TiCDC timeout")]
+    TiCdcTimeout,
     #[error("duplicated register, conn: {conn_id:?}, request: {request_id}")]
     DuplicatedRegister {
         conn_id: ConnId,
