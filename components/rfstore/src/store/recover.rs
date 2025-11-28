@@ -22,6 +22,7 @@ use rfengine::{
 };
 use slog_global::info;
 use tikv_util::{debug, warn};
+use trace_event::types::TraceContext;
 
 use crate::store::{
     is_change_set_affect_mem_table, is_property_change_set, load_raft_truncated_state,
@@ -265,7 +266,9 @@ impl RecoverHandler {
                     None
                 };
                 if cs.as_ref().map_or(true, is_change_set_affect_mem_table) {
-                    if let Err(err) = applier.exec_custom_log(ctx, &custom, cs) {
+                    if let Err(err) =
+                        applier.exec_custom_log(ctx, TraceContext::default(), &custom, cs)
+                    {
                         // Only duplicated pre-split may fail, we can ignore this error.
                         warn!("{} failed to execute custom log {:?}", tag, err);
                     }
@@ -531,6 +534,6 @@ pub fn apply_custom_log_in_recover(
     ctx.exec_log_index = applied_index + 1;
     ctx.exec_log_term = applied_index_term;
     debug!("{} apply_custom_log_in_recover", shard.tag(); "log_index" => ctx.exec_log_index);
-    let _ = applier.exec_custom_log(&mut ctx, &custom, None)?;
+    let _ = applier.exec_custom_log(&mut ctx, TraceContext::default(), &custom, None)?;
     Ok(())
 }

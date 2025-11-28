@@ -1414,7 +1414,7 @@ impl<T: Simulator> Cluster<T> {
         req.mut_header()
             .set_flags(WriteBatchFlags::FLASHBACK.bits());
         let router = self.sim.rl().get_router(store_id).unwrap();
-        router.send_command(req, cb);
+        router.send_command(req, Default::default(), cb);
     }
 
     pub fn must_split(&mut self, region: &metapb::Region, split_key: &[u8]) {

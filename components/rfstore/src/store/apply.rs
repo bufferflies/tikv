@@ -63,7 +63,7 @@ use tikv_util::{
     store::{find_peer, find_peer_mut, remove_peer},
     sys::thread::StdThreadBuildWrapper,
     time::{duration_to_sec, Instant},
-    warn,
+    txn_debug, warn,
 };
 use time::Timespec;
 use txn_types::{Key, LockType, Write, WriteType};
@@ -216,6 +216,8 @@ pub(crate) struct Proposal {
     pub(crate) index: u64,
     pub(crate) term: u64,
     pub(crate) cb: Callback,
+
+    pub(crate) trace_ctx: TraceContext,
 
     /// `propose_time` is set to the last time when a peer starts to renew
     /// lease.
@@ -757,6 +759,7 @@ impl Applier {
     pub fn exec_custom_log(
         &mut self,
         ctx: &mut ApplyContext,
+        trace_ctx: TraceContext,
         cl: &CustomRaftLog<'_>,
         cs: Option<kvenginepb::ChangeSet>,
     ) -> Result<(RaftCmdResponse, ApplyResult, Vec<Request>)> {
@@ -771,6 +774,16 @@ impl Applier {
             self.last_property_term = ctx.exec_log_term;
         }
         inc_apply_custom_log_metric(cl.get_type());
+        txn_debug!(trace_ctx: trace_ctx, trace_event::types::Category::WriteDetails,
+            "Applier::exec_custom_log called";
+            "region_id" => self.region_id(),
+            "region_ver" => self.region.get_region_epoch().version,
+            "region_conf_ver" => self.region.get_region_epoch().conf_ver,
+            "term" => self.term,
+            "log_index" => log_index,
+            "log_type" => ?cl.get_type(),
+            "log" => format!("{}", cl)
+        );
         let timer = Instant::now();
         match cl.get_type() {
             CustomRaftLogType::Prewrite => cl.iterate_lock(|k, v| {
@@ -903,6 +916,7 @@ impl Applier {
     fn apply_raft_log(
         &mut self,
         ctx: &mut ApplyContext,
+        trace_ctx: TraceContext,
         mut req: RaftCmdRequest,
         index: u64,
         term: u64,
@@ -925,7 +939,7 @@ impl Applier {
             self.exec_admin_cmd(ctx, &req)
         } else {
             let custom = rlog::get_custom_log(&req).unwrap();
-            self.exec_custom_log(ctx, &custom, None)
+            self.exec_custom_log(ctx, trace_ctx, &custom, None)
                 .map(|(resp, res, requests)| {
                     req.set_requests(requests.into());
                     (resp, res)
@@ -1036,6 +1050,7 @@ impl Applier {
     fn handle_raft_entry_normal(
         &mut self,
         ctx: &mut ApplyContext,
+        trace_ctx: TraceContext,
         entry: &eraftpb::Entry,
     ) -> ApplyResult {
         // fail_point!(
@@ -1052,7 +1067,7 @@ impl Applier {
             assert!(index > 0);
             // if pending remove, apply should be aborted already.
             assert!(!self.pending_remove);
-            let (resp, result) = self.apply_raft_log(ctx, cmd, index, term);
+            let (resp, result) = self.apply_raft_log(ctx, trace_ctx, cmd, index, term);
             self.handle_apply_result(ctx, resp, &result, false);
             return result;
         }
@@ -1160,6 +1175,7 @@ impl Applier {
     fn handle_raft_entry_conf_change(
         &mut self,
         ctx: &mut ApplyContext,
+        trace_ctx: TraceContext,
         entry: &eraftpb::Entry,
     ) -> ApplyResult {
         // Although conf change can't yield in normal case, it is convenient to
@@ -1170,7 +1186,7 @@ impl Applier {
         let index = entry.get_index();
         let term = entry.get_term();
         let (cmd, conf_change) = parse_conf_change_cmd(entry, &self.tag());
-        let (resp, result) = self.apply_raft_log(ctx, cmd, index, term);
+        let (resp, result) = self.apply_raft_log(ctx, trace_ctx, cmd, index, term);
         self.handle_apply_result(ctx, resp, &result, true);
         match result {
             ApplyResult::None => {
@@ -1383,6 +1399,7 @@ impl Applier {
         &mut self,
         ctx: &mut ApplyContext,
         committed_entries_drainer: Drain<'_, eraftpb::Entry>,
+        trace_ctxs: Vec<(u64, TraceContext)>,
     ) {
         if committed_entries_drainer.len() == 0 {
             return;
@@ -1392,11 +1409,28 @@ impl Applier {
                 .push(CmdBatch::new(&self.observe_info, self.region_id()));
         }
 
+        let mut trace_ctxs = trace_ctxs.into_iter().peekable();
+
         // If we send multiple ConfChange commands, only first one will be proposed
         // correctly, others will be saved as a normal entry with no data, so we
         // must re-propose these commands again.
         let mut results = VecDeque::<ExecResult>::new();
         for entry in committed_entries_drainer {
+            let mut trace_ctx = None;
+            while let Some(next_trace_ctx) = trace_ctxs.peek() {
+                // Defensive logic for the case that trance_ctxs containing redundant elements.
+                if next_trace_ctx.0 < entry.get_index() {
+                    trace_ctxs.next();
+                    continue;
+                }
+
+                if next_trace_ctx.0 == entry.get_index() {
+                    trace_ctx = trace_ctxs.next().map(|(_, trace_ctx)| trace_ctx);
+                }
+                break;
+            }
+            let trace_ctx = trace_ctx.unwrap_or_default();
+
             if self.pending_remove {
                 // This peer is about to be destroyed, skip everything.
                 break;
@@ -1413,9 +1447,11 @@ impl Applier {
             ctx.exec_log_index = entry.index;
             ctx.exec_log_term = entry.term;
             let result = match entry.get_entry_type() {
-                eraftpb::EntryType::EntryNormal => self.handle_raft_entry_normal(ctx, &entry),
+                eraftpb::EntryType::EntryNormal => {
+                    self.handle_raft_entry_normal(ctx, trace_ctx, &entry)
+                }
                 eraftpb::EntryType::EntryConfChange | eraftpb::EntryType::EntryConfChangeV2 => {
-                    self.handle_raft_entry_conf_change(ctx, &entry)
+                    self.handle_raft_entry_conf_change(ctx, trace_ctx, &entry)
                 }
             };
             match result {
@@ -1482,8 +1518,13 @@ impl Applier {
             self.buckets = Some(BucketStat::new(meta, bucket_stats));
         }
         self.term = apply.term;
+        let trace_ctxs = apply
+            .cbs
+            .iter()
+            .map(|cb| (cb.index, cb.trace_ctx.clone()))
+            .collect();
         self.append_proposal(apply.cbs.drain(..));
-        self.handle_raft_committed_entries(ctx, apply.entries.drain(..));
+        self.handle_raft_committed_entries(ctx, apply.entries.drain(..), trace_ctxs);
         self.snap.take();
         if let Some(state) = apply.new_role {
             self.on_role_changed(state);
@@ -1752,7 +1793,7 @@ impl Applier {
             ctx.router
                 .as_ref()
                 .unwrap()
-                .send_command(req, Callback::None);
+                .send_command(req, TraceContext::default(), Callback::None);
             self.mut_mem_table_state(&ctx.engine).proposed_time = Some(now);
 
             STORE_PROPOSE_SWITCH_MEM_TABLE_COUNTER.inc();
@@ -2628,6 +2669,7 @@ pub(crate) fn region_apply_conf_change(
 pub(crate) struct ApplyRouter {}
 
 pub use kvengine::shard::TERM_KEY;
+use trace_event::types::TraceContext;
 
 pub trait ApplyObserver: Send {
     fn on_apply(&mut self, region_id: u64, log_index: u64, wb: &WriteBatch);
@@ -3199,6 +3241,7 @@ mod tests {
                     index,
                     term: 0,
                     cb: Callback::None,
+                    trace_ctx: TraceContext::default(),
                     propose_time: None,
                     must_pass_epoch_check: false,
                 })

@@ -54,6 +54,7 @@ slog_derive = "0.2"
 tempfile = "3.0"
 thiserror = "1.0"
 tikv_util = { workspace = true }
+trace_event = { workspace = true }
 tracker = { workspace = true }
 txn_types = { workspace = true }
 

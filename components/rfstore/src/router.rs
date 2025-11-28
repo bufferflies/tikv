@@ -8,6 +8,7 @@ use std::{
 use kvproto::{metapb, raft_cmdpb::RaftCmdRequest, raft_serverpb::RaftMessage};
 use raftstore::store::fsm::ChangeObserver;
 use tikv_util::{deadline::Deadline, mpsc::Sender, time::ThreadReadId, warn};
+use trace_event::types::TraceContext;
 
 use crate::{
     store::{
@@ -37,12 +38,18 @@ pub trait RaftStoreRouter: StoreRouter + ProposalRouter + CasualRouter + Send + 
     }
 
     /// Sends RaftCmdRequest to local store.
-    fn send_command(&self, req: RaftCmdRequest, cb: Callback) {
-        send_command_impl(self, req, cb, None)
+    fn send_command(&self, req: RaftCmdRequest, trace_ctx: TraceContext, cb: Callback) {
+        send_command_impl(self, req, trace_ctx, cb, None)
     }
 
-    fn send_command_with_deadline(&self, req: RaftCmdRequest, cb: Callback, deadline: Deadline) {
-        send_command_impl(self, req, cb, Some(deadline))
+    fn send_command_with_deadline(
+        &self,
+        req: RaftCmdRequest,
+        trace_ctx: TraceContext,
+        cb: Callback,
+        deadline: Deadline,
+    ) {
+        send_command_impl(self, req, trace_ctx, cb, Some(deadline))
     }
 
     /// Reports the peer being unreachable to the Region.
@@ -202,10 +209,11 @@ impl RaftStoreRouter for RaftRouter {
 fn send_command_impl(
     router: &impl ProposalRouter,
     req: RaftCmdRequest,
+    trace_ctx: TraceContext,
     cb: Callback,
     _deadline: Option<Deadline>,
 ) {
-    let cmd = RaftCommand::new(req, cb);
+    let cmd = RaftCommand::new(req, trace_ctx, cb);
     // TODO(x) handle deadline
     router.send(cmd)
 }

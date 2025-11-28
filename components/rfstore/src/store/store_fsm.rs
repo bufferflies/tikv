@@ -60,6 +60,7 @@ use tikv_util::{
     RingQueue, GLOBAL_SERVER_READINESS,
 };
 use time::Timespec;
+use trace_event::types::TraceContext;
 
 use super::{Config, *};
 use crate::{
@@ -2120,7 +2121,7 @@ impl<'a> StoreMsgHandler<'a> {
         let raft_ctx = &mut self.ctx.raft_ctx;
         let mut store_meta = self.ctx.store_meta.lock().unwrap();
         let mut handler = PeerMsgHandler::new(&mut peer_fsm, raft_ctx);
-        handler.propose_raft_command(req, cb, Some(&mut *store_meta));
+        handler.propose_raft_command(req, TraceContext::default(), cb, Some(&mut *store_meta));
     }
 
     fn on_prepare_merge_result(&mut self, region: Region) {

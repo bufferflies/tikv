@@ -18,6 +18,7 @@ use raft_proto::eraftpb;
 use raftstore::store::{fsm::ChangeObserver, util::KeysInfoFormatter};
 use strum::{EnumCount, EnumVariantNames};
 use tikv_util::time::Instant;
+use trace_event::types::TraceContext;
 
 use super::{Peer, RaftApplyState};
 use crate::store::{
@@ -329,13 +330,15 @@ pub(crate) struct IoTask {
 pub struct RaftCommand {
     pub send_time: Instant,
     pub request: RaftCmdRequest,
+    pub trace_ctx: TraceContext,
     pub callback: Callback,
 }
 
 impl RaftCommand {
-    pub fn new(request: RaftCmdRequest, callback: Callback) -> Self {
+    pub fn new(request: RaftCmdRequest, trace_ctx: TraceContext, callback: Callback) -> Self {
         Self {
             request,
+            trace_ctx,
             callback,
             send_time: Instant::now(),
         }

@@ -209,7 +209,7 @@ impl Simulator for NodeCluster {
         let is_store_msg = request.has_admin_request()
             && request.get_admin_request().get_cmd_type() == AdminCmdType::PrepareMerge;
         if !is_store_msg {
-            router.send_command(request, cb);
+            router.send_command(request, Default::default(), cb);
         } else {
             router.send_store_msg(StoreMsg::PrepareMerge {
                 region_id: request.get_header().region_id,

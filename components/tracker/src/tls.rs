@@ -14,7 +14,9 @@ use crate::{slab::TrackerToken, Tracker, GLOBAL_TRACKERS, INVALID_TRACKER_TOKEN}
 
 thread_local! {
     static TLS_TRACKER_TOKEN: Cell<TrackerToken> = Cell::new(INVALID_TRACKER_TOKEN);
-    static TLS_TRACE_CTX: Cell<TraceContext> = Cell::new(TraceContext::from_proto(&[], 0));
+    // TODO: This might be better to be moved to trace_event module and properly referenced by the
+    //   `TrackedFuture`.
+    static TLS_TRACE_CTX: Cell<TraceContext> = Cell::new(TraceContext::default());
 }
 
 pub fn set_tls_tracker_token(token: TrackerToken) {

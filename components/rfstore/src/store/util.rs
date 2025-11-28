@@ -32,6 +32,7 @@ use tikv_util::{
     time::{Instant, InstantExt},
     timer::GLOBAL_TIMER_HANDLE,
 };
+use trace_event::types::EventFieldValue;
 
 use crate::{
     store::{ProposalContext, StoreMsg, SPLIT_FLAG_ENCRYPTION_METAS},
@@ -278,6 +279,12 @@ impl slog::Value for PeerTag {
         serializer: &mut dyn Serializer,
     ) -> slog::Result {
         serializer.emit_str(key, &self.to_string())
+    }
+}
+
+impl trace_event::types::AsEventFieldValue for PeerTag {
+    fn as_event_field_value(self) -> EventFieldValue {
+        EventFieldValue::String(format!("{}", self))
     }
 }
 

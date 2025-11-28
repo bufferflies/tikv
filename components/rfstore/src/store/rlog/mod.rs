@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::mem;
+use std::{fmt::Formatter, mem};
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut};
@@ -224,6 +224,118 @@ impl<'a> CustomRaftLog<'a> {
         let mut txn_file_ref = kvenginepb::TxnFileRef::new();
         txn_file_ref.merge_from_bytes(&self.data[HEADER_SIZE..])?;
         Ok(txn_file_ref)
+    }
+}
+
+impl std::fmt::Display for CustomRaftLog<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.get_type() {
+            CustomRaftLogType::Prewrite => f
+                .debug_struct("Prewrite")
+                .field_with("kv_pairs", |f| {
+                    let mut list = f.debug_list();
+                    self.iterate_lock(|k, v| {
+                        list.entry(&(log_wrappers::Value::key(k), log_wrappers::Value::value(v)));
+                    });
+                    list.finish()
+                })
+                .finish(),
+            CustomRaftLogType::Commit => f
+                .debug_struct("Commit")
+                .field_with("items", |f| {
+                    let mut list = f.debug_list();
+                    self.iterate_commit(|k, commit_ts| {
+                        list.entry_with(|f| {
+                            f.debug_struct("Item")
+                                .field("key", &log_wrappers::Value::key(k))
+                                .field("commit_ts", &commit_ts)
+                                .finish()
+                        });
+                    });
+                    list.finish()
+                })
+                .finish(),
+            CustomRaftLogType::Rollback => f
+                .debug_struct("Rollback")
+                .field_with("items", |f| {
+                    let mut list = f.debug_list();
+                    self.iterate_rollback(|k, start_ts, del| {
+                        list.entry_with(|f| {
+                            f.debug_struct("Item")
+                                .field("key", &log_wrappers::Value::key(k))
+                                .field("start_ts", &start_ts)
+                                .field("del_lock", &del)
+                                .finish()
+                        });
+                    });
+                    list.finish()
+                })
+                .finish(),
+            CustomRaftLogType::PessimisticLock => f
+                .debug_struct("PessimisticLock")
+                .field_with("kv_pairs", |f| {
+                    let mut list = f.debug_list();
+                    self.iterate_lock(|k, v| {
+                        list.entry(&(log_wrappers::Value::key(k), log_wrappers::Value::value(v)));
+                    });
+                    list.finish()
+                })
+                .finish(),
+            CustomRaftLogType::PessimisticRollback => f
+                .debug_struct("PessimisticRollback")
+                .field_with("keys", |f| {
+                    let mut list = f.debug_list();
+                    self.iterate_del_lock(|k| {
+                        list.entry(&log_wrappers::Value::key(k));
+                    });
+                    list.finish()
+                })
+                .finish(),
+            CustomRaftLogType::OnePc => f
+                .debug_struct("OnePc")
+                .field_with("items", |f| {
+                    let mut list = f.debug_list();
+                    self.iterate_one_pc(|k, v, is_extra, del_lock, start_ts, commit_ts| {
+                        list.entry_with(|f| {
+                            f.debug_struct("Item")
+                                .field("key", &log_wrappers::Value::key(k))
+                                .field("value", &log_wrappers::Value::value(v))
+                                .field("is_extra", &is_extra)
+                                .field("del_lock", &del_lock)
+                                .field("start_ts", &start_ts)
+                                .field("commit_ts", &commit_ts)
+                                .finish()
+                        });
+                    });
+                    list.finish()
+                })
+                .finish(),
+            CustomRaftLogType::EngineMeta => f.write_str("EngineMeta"),
+            CustomRaftLogType::ResolveLock => f
+                .debug_struct("ResolveLock")
+                .field_with("items", |f| {
+                    let mut list = f.debug_list();
+                    self.iterate_resolve_lock(|tp, k, ts, del| {
+                        list.entry_with(|f| {
+                            let name = match tp {
+                                CustomRaftLogType::Commit => "Commit",
+                                CustomRaftLogType::Rollback => "Rollback",
+                                _ => unreachable!(),
+                            };
+                            f.debug_struct(name)
+                                .field("key", &log_wrappers::Value::key(k))
+                                .field("ts", &ts)
+                                .field("del_lock", &del)
+                                .finish()
+                        });
+                    });
+                    list.finish()
+                })
+                .finish(),
+            CustomRaftLogType::SwitchMemTable => f.write_str("SwitchMemTable"),
+            CustomRaftLogType::TriggerTrimOverBound => f.write_str("TriggerTrimOverBound"),
+            CustomRaftLogType::TxnFileRef => f.write_str("TxnFileRef"),
+        }
     }
 }
 
@@ -497,5 +609,91 @@ mod tests {
             });
             assert!(result.is_err());
         }
+    }
+
+    #[test]
+    fn test_custom_raft_log_display() {
+        let mut b = CustomBuilder::new();
+        b.set_type(CustomRaftLogType::Prewrite);
+        b.append_lock(b"k1", b"v1");
+        b.append_lock(b"k2", b"v2");
+        let req = b.build();
+        let cl = CustomRaftLog::new_from_data(req.get_data());
+        assert_eq!(
+            format!("{}", cl),
+            "Prewrite { kv_pairs: [(6B31, 7631), (6B32, 7632)] }"
+        );
+
+        let mut b = CustomBuilder::new();
+        b.set_type(CustomRaftLogType::Commit);
+        b.append_commit(b"k3", 100);
+        b.append_commit(b"k4", 100);
+        let req = b.build();
+        let cl = CustomRaftLog::new_from_data(req.get_data());
+        assert_eq!(
+            format!("{}", cl),
+            "Commit { items: [Item { key: 6B33, commit_ts: 100 }, \
+            Item { key: 6B34, commit_ts: 100 }] }"
+        );
+
+        let mut b = CustomBuilder::new();
+        b.set_type(CustomRaftLogType::Rollback);
+        b.append_rollback(b"k5", 110, true);
+        b.append_rollback(b"k6", 110, false);
+        let req = b.build();
+        let cl = CustomRaftLog::new_from_data(req.get_data());
+        assert_eq!(
+            format!("{}", cl),
+            "Rollback { items: [Item { key: 6B35, start_ts: 110, del_lock: true }, \
+            Item { key: 6B36, start_ts: 110, del_lock: false }] }"
+        );
+
+        let mut b = CustomBuilder::new();
+        b.set_type(CustomRaftLogType::PessimisticLock);
+        b.append_lock(b"k7", b"v7");
+        b.append_lock(b"k8", b"v8");
+        let req = b.build();
+        let cl = CustomRaftLog::new_from_data(req.get_data());
+        assert_eq!(
+            format!("{}", cl),
+            "PessimisticLock { kv_pairs: [(6B37, 7637), (6B38, 7638)] }"
+        );
+
+        let mut b = CustomBuilder::new();
+        b.set_type(CustomRaftLogType::PessimisticRollback);
+        b.append_del_lock(b"k9");
+        b.append_del_lock(b"k10");
+        let req = b.build();
+        let cl = CustomRaftLog::new_from_data(req.get_data());
+        assert_eq!(
+            format!("{}", cl),
+            "PessimisticRollback { keys: [6B39, 6B3130] }"
+        );
+
+        let mut b = CustomBuilder::new();
+        b.set_type(CustomRaftLogType::OnePc);
+        b.append_one_pc(b"k11", b"v11", false, true, 120, 130);
+        b.append_one_pc(b"k12", b"v12", true, false, 120, 130);
+        let req = b.build();
+        let cl = CustomRaftLog::new_from_data(req.get_data());
+        assert_eq!(
+            format!("{}", cl),
+            "OnePc { items: [Item { key: 6B3131, value: 763131, is_extra: false, del_lock: true, start_ts: 120, commit_ts: 130 }, \
+            Item { key: 6B3132, value: 763132, is_extra: true, del_lock: false, start_ts: 120, commit_ts: 130 }] }"
+        );
+
+        let mut b = CustomBuilder::new();
+        b.set_type(CustomRaftLogType::ResolveLock);
+        b.append_type(CustomRaftLogType::Commit);
+        b.append_commit(b"k13", 140);
+        b.append_type(CustomRaftLogType::Rollback);
+        b.append_rollback(b"k14", 150, false);
+        let req = b.build();
+        let cl = CustomRaftLog::new_from_data(req.get_data());
+        assert_eq!(
+            format!("{}", cl),
+            "ResolveLock { items: [Commit { key: 6B3133, ts: 140, del_lock: true }, \
+            Rollback { key: 6B3134, ts: 150, del_lock: false }] }"
+        );
     }
 }

@@ -708,10 +708,14 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         cmd.set_requests(vec![inner_req].into());
 
         let (cb, f) = paired_future_callback();
+        let trace_ctx = TraceContext::from_proto(
+            req.get_context().get_trace_id(),
+            req.get_context().get_trace_control_flags(),
+        );
 
         // We must deal with all requests which acquire read-quorum in raftstore-thread,
         // so just send it as an command.
-        self.ch.send_command(cmd, Callback::Read(cb));
+        self.ch.send_command(cmd, trace_ctx, Callback::Read(cb));
 
         let task = async move {
             let mut res = f.await?;

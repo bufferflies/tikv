@@ -500,9 +500,11 @@ impl Engine for RaftKv {
             );
 
             let cb = StoreCallback::write_ext(applied_cb, proposed_cb, committed_cb);
+            let trace_ctx =
+                TraceContext::from_proto(ctx.get_trace_id(), ctx.get_trace_control_flags());
 
             // TODO: do we need to support deadline?
-            self.router.send_command(cmd, cb);
+            self.router.send_command(cmd, trace_ctx, cb);
         }
         if res.is_err() {
             // Note that `on_applied` is not called in this case. We send a message to the

@@ -347,7 +347,7 @@ fn test_propose_raft_command() {
                 .has_region_not_found()
         );
     }));
-    handler.propose_raft_command(RaftCmdRequest::default(), cb, None);
+    handler.propose_raft_command(RaftCmdRequest::default(), TraceContext::default(), cb, None);
 }
 
 // Waits for the PD task to be processed.
@@ -570,6 +570,7 @@ fn test_validate_split_region() {
 
 use kvengine::table::columnar::build_schema_file;
 use rstest::rstest;
+use trace_event::types::TraceContext;
 
 fn callback_expect_no_error() -> Callback {
     Callback::write(Box::new(|resp| {

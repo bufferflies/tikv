@@ -30,6 +30,7 @@ use tikv_util::{
     box_err, box_try,
     worker::{Runnable, Scheduler, Worker},
 };
+use trace_event::types::TraceContext;
 use txn_types::Key;
 
 use crate::modifies_to_requests;
@@ -73,7 +74,12 @@ impl TestApplier {
         self.apply_ctx.exec_log_index += 1;
         let custom_log = CustomRaftLog::new_from_data(req.get_data());
         self.applier
-            .exec_custom_log(&mut self.apply_ctx, &custom_log, None)
+            .exec_custom_log(
+                &mut self.apply_ctx,
+                TraceContext::default(),
+                &custom_log,
+                None,
+            )
             .unwrap();
     }
 }

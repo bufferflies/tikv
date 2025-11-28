@@ -51,6 +51,7 @@ use tikv_util::{
     worker::{Runnable, Scheduler},
     Either, GLOBAL_SERVER_READINESS,
 };
+use trace_event::types::TraceContext;
 use txn_types::{Key, NULL_KEYSPACE_ID};
 use yatp::Remote;
 
@@ -599,7 +600,7 @@ impl PdRunner {
                 let header = req.mut_header();
                 header.set_flag_data(encode_split_flag_encryption_metas(encryption_metas));
             }
-            router.send_command(req, callback);
+            router.send_command(req, TraceContext::default(), callback);
         };
         remote.spawn(f);
     }
@@ -1781,7 +1782,7 @@ fn send_admin_request(
     callback: Callback,
 ) {
     let req = new_admin_command(region_id, epoch, peer, request);
-    router.send_command(req, callback);
+    router.send_command(req, TraceContext::default(), callback);
 }
 
 /// Sends a raft message to destroy the specified stale Peer

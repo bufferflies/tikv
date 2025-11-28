@@ -24,6 +24,7 @@ use tikv_util::{
     time::{monotonic_raw_now, ThreadReadId},
 };
 use time::Timespec;
+use trace_event::types::TraceContext;
 
 use crate::{
     store::{
@@ -403,6 +404,7 @@ impl LocalReader {
         &mut self,
         mut read_id: Option<ThreadReadId>,
         req: RaftCmdRequest,
+        trace_ctx: TraceContext,
         cb: Callback,
     ) {
         match self.pre_propose_raft_command(&req) {
@@ -423,7 +425,7 @@ impl LocalReader {
                         };
                         if !delegate.is_in_leader_lease(snapshot_ts) {
                             // Forward to raftstore.
-                            self.redirect(RaftCommand::new(req, cb));
+                            self.redirect(RaftCommand::new(req, trace_ctx, cb));
                             return;
                         }
                         self.execute(&req, &delegate.region, None, read_id)
@@ -440,7 +442,7 @@ impl LocalReader {
                 cb.invoke_read(response);
             }
             // Forward to raftstore.
-            Ok(None) => self.redirect(RaftCommand::new(req, cb)),
+            Ok(None) => self.redirect(RaftCommand::new(req, trace_ctx, cb)),
             Err(e) => {
                 let mut response = cmd_resp::new_error(e);
                 if let Some(delegate) = self.delegates.get(&req.get_header().get_region_id()) {
@@ -464,7 +466,8 @@ impl LocalReader {
     /// sequence.
     #[inline]
     pub fn read(&mut self, read_id: Option<ThreadReadId>, req: RaftCmdRequest, cb: Callback) {
-        self.propose_raft_command(read_id, req, cb);
+        // TODO: Pass a proper trace context here.
+        self.propose_raft_command(read_id, req, TraceContext::default(), cb);
         maybe_tls_local_read_metrics_flush();
     }
 }

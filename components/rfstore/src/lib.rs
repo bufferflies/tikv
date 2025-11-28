@@ -2,6 +2,7 @@
 
 #![feature(cell_update)]
 #![feature(let_chains)]
+#![feature(debug_closure_helpers)]
 
 #[allow(unused_extern_crates)]
 extern crate tikv_alloc;

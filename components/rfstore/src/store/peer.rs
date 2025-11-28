@@ -65,6 +65,7 @@ use tikv_util::{
     Either,
 };
 use time::Timespec;
+use trace_event::types::TraceContext;
 use txn_types::Key;
 use uuid::Uuid;
 
@@ -2691,7 +2692,8 @@ impl Peer {
                 let (mut req, cb, _) = read.take_cmds().pop().unwrap();
                 assert_eq!(req.requests.len(), 1);
                 req.requests[0].set_read_index(*read_index);
-                let read_cmd = RaftCommand::new(req, cb);
+                // TODO: Pass a proper trace context here.
+                let read_cmd = RaftCommand::new(req, TraceContext::default(), cb);
                 info!(
                     "re-propose read index request because the response is lost";
                     "tag" => self.tag(),
@@ -2894,6 +2896,7 @@ impl Peer {
     pub fn propose(
         &mut self,
         ctx: &mut RaftContext,
+        trace_ctx: TraceContext,
         mut cb: Callback,
         req: RaftCmdRequest,
         mut err_resp: RaftCmdResponse,
@@ -2963,6 +2966,7 @@ impl Peer {
                     index: idx,
                     term: self.term(),
                     cb,
+                    trace_ctx,
                     propose_time: None,
                     must_pass_epoch_check: has_applied_to_current_term,
                 };
@@ -3383,6 +3387,8 @@ impl Peer {
                     index,
                     term: self.term(),
                     cb: Callback::None,
+                    // TODO: Pass a proper trace context here.
+                    trace_ctx: TraceContext::default(),
                     propose_time: Some(now),
                     must_pass_epoch_check: false,
                 };

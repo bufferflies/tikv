@@ -7425,6 +7425,8 @@ dependencies = [
  "time 0.1.43",
  "tokio",
  "toml",
+ "trace_event",
+ "tracker",
  "txn_types",
  "uuid 0.8.2",
  "yatp",
@@ -10118,6 +10120,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tikv_util",
+ "trace_event",
  "tracker",
  "txn_types",
 ]

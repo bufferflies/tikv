@@ -401,7 +401,9 @@ impl ServerCluster {
                     cb(res);
                 }));
 
-                server.get_raft_router().send_command(cmd, callback);
+                server
+                    .get_raft_router()
+                    .send_command(cmd, Default::default(), callback);
 
                 return match block_on(fut) {
                     Ok(res) => {

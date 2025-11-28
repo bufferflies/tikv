@@ -40,6 +40,7 @@ use tikv_util::{
     time::{Instant, Limiter},
 };
 use tokio::{runtime::Runtime, time::sleep};
+use trace_event::types::TraceContext;
 
 /// ImportSstService provides tikv-server with the ability to ingest SST files.
 ///
@@ -125,6 +126,7 @@ where
     }
 
     async fn async_snapshot(
+        trace_ctx: TraceContext,
         router: Router,
         header: RaftRequestHeader,
     ) -> std::result::Result<SnapshotResult, errorpb::Error> {
@@ -134,7 +136,7 @@ where
         cmd.set_header(header);
         cmd.set_requests(vec![req].into());
         let (cb, future) = paired_future_callback();
-        router.send_command(cmd, Callback::Read(cb));
+        router.send_command(cmd, trace_ctx, Callback::Read(cb));
         let mut res = future.await.map_err(|_| {
             let mut err = errorpb::Error::default();
             let err_str = "too many sst files are ingesting";
@@ -160,8 +162,11 @@ where
         label: &'static str,
         ssts: Vec<SstMeta>,
     ) -> impl Future<Output = Result<IngestResponse>> {
+        let trace_ctx =
+            TraceContext::from_proto(context.get_trace_id(), context.get_trace_control_flags());
         let header = make_request_header(context);
-        let snapshot_res = Self::async_snapshot(self.router.clone(), header.clone());
+        let snapshot_res =
+            Self::async_snapshot(trace_ctx.clone(), self.router.clone(), header.clone());
         let router = self.router.clone();
         let importer = self.importer.clone();
         async move {
@@ -212,7 +217,7 @@ where
             }
 
             let (cb, future) = paired_future_callback();
-            router.send_command(cmd, Callback::write(cb));
+            router.send_command(cmd, trace_ctx, Callback::write(cb));
             let mut res = future.await.map_err(Error::from)?;
             let mut header = res.response.take_header();
             if header.has_error() {
@@ -627,7 +632,9 @@ where
             Some(request.take_end_key())
         };
         let key_only = request.get_key_only();
-        let snap_res = Self::async_snapshot(router, make_request_header(context));
+        let trace_ctx =
+            TraceContext::from_proto(context.get_trace_id(), context.get_trace_control_flags());
+        let snap_res = Self::async_snapshot(trace_ctx, router, make_request_header(context));
         let handle_task = async move {
             let res = snap_res.await;
             let snapshot = match res {

@@ -50,12 +50,13 @@ use tikv_util::{
     store::{find_peer, is_learner, region_on_same_stores},
     sys::thread::StdThreadBuildWrapper,
     time::{duration_to_sec, SlowTimer},
-    trace, warn,
+    trace, txn_debug, warn,
     worker::Scheduler,
 };
+use trace_event::types::TraceContext;
 use txn_types::{Key, WriteBatchFlags};
 
-use super::{write_engine_meta, PeerStat, RequestInspector, SchemaTask};
+use super::{write_engine_meta, CustomRaftLog, PeerStat, RequestInspector, SchemaTask};
 use crate::{
     store::{
         cmd_resp::{bind_term, message_error, new_error, new_with_key_error},
@@ -277,7 +278,7 @@ impl<'a> PeerMsgHandler<'a> {
                         .raft_metrics
                         .propose_wait_time
                         .observe(duration_to_sec(cmd.send_time.saturating_elapsed()));
-                    self.propose_raft_command(cmd.request, cmd.callback, None);
+                    self.propose_raft_command(cmd.request, cmd.trace_ctx, cmd.callback, None);
                 }
                 PeerMsg::Tick => self.on_tick(),
                 PeerMsg::ApplyResult(res) => {
@@ -414,7 +415,7 @@ impl<'a> PeerMsgHandler<'a> {
             self.region().get_region_epoch().clone(),
             self.fsm.peer.peer.clone(),
         );
-        self.propose_raft_command(msg, cb, None);
+        self.propose_raft_command(msg, TraceContext::default(), cb, None);
     }
 
     fn on_capture_change(
@@ -447,6 +448,7 @@ impl<'a> PeerMsgHandler<'a> {
         let raft_router = self.ctx.global.router.clone();
         self.propose_raft_command(
             msg,
+            TraceContext::default(),
             Callback::Read(Box::new(move |resp| {
                 // Return the error
                 if resp.response.get_header().has_error() {
@@ -1193,12 +1195,33 @@ impl<'a> PeerMsgHandler<'a> {
     pub(crate) fn propose_raft_command(
         &mut self,
         msg: RaftCmdRequest,
+        trace_ctx: TraceContext,
         cb: Callback,
         store_meta: Option<&mut StoreMeta>,
     ) {
         if self.fsm.peer.pending_remove {
             notify_req_region_removed(self.region_id(), cb);
             return;
+        }
+
+        if let Callback::Write { .. } = &cb {
+            let tag = self.peer.tag();
+            let peer_id = self.fsm.peer_id();
+
+            txn_debug!(trace_ctx: trace_ctx.clone(), trace_event::types::Category::WriteDetails,
+                "PeerMsgHandler::propose_raft_command called";
+                "tag" => tag,
+                "peer_id" => peer_id,
+                "custom_req" => msg.custom_request
+                    .as_ref()
+                    .and_then(|r| {
+                        if r.data.is_empty() {
+                            None
+                        } else {
+                            Some(format!("{}", CustomRaftLog::new_from_data(&r.data)))
+                        }
+                    }).unwrap_or_default()
+            );
         }
 
         match self.pre_propose_raft_command(&msg) {
@@ -1232,7 +1255,7 @@ impl<'a> PeerMsgHandler<'a> {
             return;
         }
         if !msg.get_requests().is_empty() && msg.get_requests()[0].has_ingest_sst() {
-            self.propose_ingest_sst(msg, cb);
+            self.propose_ingest_sst(msg, trace_ctx.clone(), cb);
             return;
         }
 
@@ -1245,13 +1268,13 @@ impl<'a> PeerMsgHandler<'a> {
         let mut resp = RaftCmdResponse::default();
         let term = self.fsm.peer.term();
         bind_term(&mut resp, term);
-        self.fsm.peer.propose(self.ctx, cb, msg, resp);
+        self.fsm.peer.propose(self.ctx, trace_ctx, cb, msg, resp);
 
         // TODO: add timeout, if the command is not applied after timeout,
         // we will call the callback with timeout error.
     }
 
-    fn propose_ingest_sst(&mut self, msg: RaftCmdRequest, cb: Callback) {
+    fn propose_ingest_sst(&mut self, msg: RaftCmdRequest, trace_ctx: TraceContext, cb: Callback) {
         // This is a ingest sst request, we need to redirect to worker thread and
         // convert it to cloud engine format.
         let importer = self.ctx.global.importer.clone();
@@ -1271,7 +1294,7 @@ impl<'a> PeerMsgHandler<'a> {
                     let mut custom_builder = CustomBuilder::new();
                     custom_builder.set_change_set(&cs);
                     cmd.set_custom_request(custom_builder.build());
-                    router.send_command(cmd, cb);
+                    router.send_command(cmd, trace_ctx, cb);
                 }
                 Err(e) => {
                     cb.invoke_with_response(new_error(e));
@@ -1659,7 +1682,7 @@ impl<'a> PeerMsgHandler<'a> {
         let mut custom_builder = CustomBuilder::new();
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());
-        self.propose_raft_command(cmd, callback, None);
+        self.propose_raft_command(cmd, TraceContext::default(), callback, None);
     }
 
     pub(crate) fn on_manual_major_compact(&mut self, major_compact: bool, callback: Callback) {
@@ -1679,7 +1702,7 @@ impl<'a> PeerMsgHandler<'a> {
         let mut custom_builder = CustomBuilder::new();
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());
-        self.propose_raft_command(cmd, callback, None);
+        self.propose_raft_command(cmd, TraceContext::default(), callback, None);
     }
 
     pub(crate) fn on_update_schema_file(&mut self, schema_file: SchemaFile) {
@@ -1879,7 +1902,7 @@ impl<'a> PeerMsgHandler<'a> {
         let mut custom_builder = CustomBuilder::new();
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());
-        self.propose_raft_command(cmd, callback, None);
+        self.propose_raft_command(cmd, TraceContext::default(), callback, None);
     }
 
     fn trigger_trim_over_bound(&mut self, shard_ver: u64, parameter: TrimOverBoundParameter) {
@@ -1908,7 +1931,7 @@ impl<'a> PeerMsgHandler<'a> {
                 );
             }
         }));
-        self.propose_raft_command(cmd, cb, None);
+        self.propose_raft_command(cmd, TraceContext::default(), cb, None);
     }
 
     fn on_trigger_refresh_shard_states(&mut self) {
@@ -1962,7 +1985,7 @@ impl<'a> PeerMsgHandler<'a> {
                 info!("{} proposed meta change event", tag);
             }
         }));
-        self.propose_raft_command(req, cb, None);
+        self.propose_raft_command(req, TraceContext::default(), cb, None);
         self.ctx.raft_metrics.propose.change_set.inc();
     }
 
@@ -2630,7 +2653,11 @@ impl<'a> PeerMsgHandler<'a> {
         // proposal forwarding.
         self.ctx.global.router.send(
             target_id,
-            PeerMsg::RaftCommand(RaftCommand::new(request, Callback::None)),
+            PeerMsg::RaftCommand(RaftCommand::new(
+                request,
+                TraceContext::default(),
+                Callback::None,
+            )),
         );
         Ok(())
     }
@@ -2649,7 +2676,7 @@ impl<'a> PeerMsgHandler<'a> {
             request.set_admin_request(admin);
             request
         };
-        self.propose_raft_command(req, Callback::None, None);
+        self.propose_raft_command(req, TraceContext::default(), Callback::None, None);
     }
 
     pub(crate) fn on_check_merge(&mut self, store_meta: &mut StoreMeta) {
@@ -2792,7 +2819,7 @@ impl<'a> PeerMsgHandler<'a> {
         let mut custom_builder = CustomBuilder::new();
         custom_builder.set_change_set(&cs);
         cmd.set_custom_request(custom_builder.build());
-        self.propose_raft_command(cmd, callback, None);
+        self.propose_raft_command(cmd, TraceContext::default(), callback, None);
     }
 
     fn check_gc_tombstones(&self) {
