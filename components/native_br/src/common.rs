@@ -47,7 +47,10 @@ use crate::{
     backup::IncrementalBackupFile,
     error::{Error, HttpRequestError, Result},
     metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
-    wal::{AssembledWalData, LocalWalChunks, WalChunkData, WalOnlineChunk},
+    wal::{
+        assemble_wal_chunks_to_wal_file, AssembledWalData, LocalWal, LocalWalChunks, WalChunkData,
+        WalOnlineChunk,
+    },
 };
 
 const MAX_S3_REQ_BATCH_SIZE: usize = 1024;
@@ -435,7 +438,8 @@ fn replay_wal_logs_from_archive(
 
     let wal_addrs = get_archived_wal_addresses(&store_meta)?;
     for (epoch, addrs) in wal_addrs {
-        let chunks = get_archived_wals_from_addresses(&ctx.dfs, date, addrs)?;
+        let chunks =
+            get_archived_wals_from_addresses(&ctx.dfs, date, addrs, ctx.cache_dir.clone())?;
         replay_wal_chunks(tag, ctx, chunks, None, epoch, backup_epoch, backup_offset)?;
     }
 
@@ -846,11 +850,21 @@ pub fn assemble_wal_chunks(
             AssembledWalData::LocalChunks(LocalWalChunks::new(wal_chunks))
         }
         (false, _) => {
-            let wal_chunks = chunks
-                .into_iter()
-                .map(|x| x.must_into_local_file())
-                .collect::<Vec<_>>();
-            AssembledWalData::LocalChunks(LocalWalChunks::new(wal_chunks))
+            let without_meta = chunks.first().unwrap().without_meta();
+            if without_meta {
+                let wal_chunks = chunks
+                    .into_iter()
+                    .map(|x| x.must_into_local_file_without_meta())
+                    .collect::<Vec<_>>();
+                let local_wal = assemble_wal_chunks_to_wal_file(wal_chunks)?;
+                AssembledWalData::Local(LocalWal::new(local_wal))
+            } else {
+                let wal_chunks = chunks
+                    .into_iter()
+                    .map(|x| x.must_into_local_file())
+                    .collect::<Vec<_>>();
+                AssembledWalData::LocalChunks(LocalWalChunks::new(wal_chunks))
+            }
         }
     })
 }

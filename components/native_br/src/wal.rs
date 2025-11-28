@@ -1,6 +1,12 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{fmt, io, io::Read, os::unix::fs::FileExt, sync::Arc};
+use std::{
+    fmt, io,
+    io::{Read, Write},
+    ops::Deref,
+    os::unix::fs::FileExt,
+    sync::Arc,
+};
 
 use bytes::{Buf, Bytes, BytesMut};
 use rfengine::WalChunkMeta;
@@ -22,6 +28,7 @@ pub enum WalChunkData {
         meta: WalChunkMeta,
         local_obj: TempLocalObject,
     },
+    LocalFileWithoutMeta(TempLocalObject),
 }
 
 impl WalChunkData {
@@ -29,11 +36,16 @@ impl WalChunkData {
         matches!(self, Self::Memory(_) | Self::MemoryWithMeta { .. })
     }
 
+    pub fn without_meta(&self) -> bool {
+        matches!(self, Self::Memory(_) | Self::LocalFileWithoutMeta { .. })
+    }
+
     pub fn must_get_bytes(&self) -> Bytes {
         match self {
             Self::Memory(bytes) => bytes.clone(),
             Self::MemoryWithMeta { bytes, .. } => bytes.clone(),
             Self::LocalFile { .. } => unreachable!(),
+            Self::LocalFileWithoutMeta { .. } => unreachable!(),
         }
     }
 
@@ -44,6 +56,7 @@ impl WalChunkData {
                 (meta.clone(), WalChunkDataHolder::Memory(bytes.clone()))
             }
             Self::LocalFile { .. } => unreachable!(),
+            Self::LocalFileWithoutMeta { .. } => unreachable!(),
         }
     }
 
@@ -54,6 +67,16 @@ impl WalChunkData {
             Self::LocalFile { meta, local_obj } => {
                 (meta.clone(), WalChunkDataHolder::LocalObject(local_obj))
             }
+            Self::LocalFileWithoutMeta { .. } => unreachable!(),
+        }
+    }
+
+    pub fn must_into_local_file_without_meta(&self) -> LocalObject {
+        match self {
+            Self::Memory(_) => unreachable!(),
+            Self::MemoryWithMeta { .. } => unreachable!(),
+            Self::LocalFile { local_obj, .. } => local_obj.clone_inner(),
+            Self::LocalFileWithoutMeta(local_obj) => local_obj.clone_inner(),
         }
     }
 }
@@ -75,6 +98,7 @@ pub enum AssembledWalData {
     BytesMut(BytesMut),
     Bytes(Bytes),
     LocalChunks(LocalWalChunks),
+    Local(LocalWal),
 }
 
 impl AssembledWalData {
@@ -83,6 +107,7 @@ impl AssembledWalData {
             Self::BytesMut(bytes_mut) => bytes_mut.len() as u64,
             Self::Bytes(bytes) => bytes.len() as u64,
             Self::LocalChunks(chunks) => chunks.len(),
+            Self::Local(wal) => wal.len(),
         }
     }
 
@@ -91,6 +116,7 @@ impl AssembledWalData {
             Self::BytesMut(bytes_mut) => bytes_mut.is_empty(),
             Self::Bytes(bytes) => bytes.is_empty(),
             Self::LocalChunks(chunks) => chunks.is_empty(),
+            Self::Local(wal) => wal.is_empty(),
         }
     }
 
@@ -99,6 +125,7 @@ impl AssembledWalData {
             Self::BytesMut(_) => unreachable!(),
             Self::Bytes(_) => unreachable!(),
             Self::LocalChunks(chunks) => chunks,
+            Self::Local(_) => unreachable!(),
         }
     }
 
@@ -111,6 +138,7 @@ impl AssembledWalData {
             Self::LocalChunks(chunks) => {
                 chunks.close();
             }
+            Self::Local(wal) => wal.close(),
         }
     }
 
@@ -125,6 +153,8 @@ impl AssembledWalData {
                 }
                 chunks.online_chunk.replace(online_chunk);
             }
+            Self::Local(_) => unreachable!(), /* Reading WAL from the archive does not check the
+                                               * online WAL chunk. */
         }
     }
 
@@ -133,6 +163,7 @@ impl AssembledWalData {
             Self::BytesMut(_) => unreachable!(),
             Self::Bytes(bytes) => Box::new(bytes.clone().reader()),
             Self::LocalChunks(chunks) => Box::new(chunks.reader()),
+            Self::Local(wal) => Box::new(wal.reader()),
         }
     }
 
@@ -147,6 +178,87 @@ impl AssembledWalData {
                 Box::new(bytes.slice(start as usize..end as usize).reader())
             }
             Self::LocalChunks(chunks) => Box::new(chunks.range_reader(start, end)),
+            Self::Local(_) => unreachable!(), /* Reading WAL file from the archive always starts
+                                               * from the beginning of the file and does not read
+                                               * only a partial range in the middle. */
+        })
+    }
+}
+
+// Assemble WAL chunk files into a original WAL file.
+pub fn assemble_wal_chunks_to_wal_file(
+    mut chunks: Vec<LocalObject>,
+) -> rfengine::Result<TempLocalObject> {
+    let mut path = chunks.first().unwrap().path.deref().clone();
+    let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+    path.set_file_name(format!("{}.wal", file_name)); // append suffix
+    let mut wal_obj =
+        TempLocalObject::create(path).map_err(|e| rfengine::Error::Other(e.to_string()))?;
+    for local_object in &mut chunks {
+        let mut buf = vec![0; local_object.len as usize];
+        local_object
+            .file(true)?
+            .read_exact_at(buf.as_mut(), 0)
+            .map_err(|e| rfengine::Error::Other(e.to_string()))?;
+        let chunk_data = rfengine::decompress_wal_chunk(&Bytes::from(buf))
+            .map_err(|e| rfengine::Error::Other(e.to_string()))?;
+        wal_obj
+            .write(&chunk_data)
+            .map_err(|e| rfengine::Error::Other(e.to_string()))?;
+    }
+    wal_obj
+        .flush()
+        .map_err(|e| rfengine::Error::Other(e.to_string()))?;
+    wal_obj.close();
+    Ok(wal_obj)
+}
+
+pub struct LocalWal {
+    local_obj: TempLocalObject,
+}
+
+impl LocalWal {
+    pub fn new(local_obj: TempLocalObject) -> Self {
+        Self { local_obj }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn len(&self) -> u64 {
+        self.local_obj.len
+    }
+
+    pub fn close(&mut self) {
+        self.local_obj.close()
+    }
+
+    pub fn reader(&self) -> LocalWalReader {
+        LocalWalReader {
+            local_obj: self.local_obj.clone_inner(),
+        }
+    }
+}
+
+pub struct LocalWalReader {
+    local_obj: LocalObject,
+}
+
+impl fmt::Debug for LocalWalReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalWalReader")
+            .field("len", &self.local_obj.len)
+            .finish()
+    }
+}
+
+impl io::Read for LocalWalReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.local_obj.file(true)?.read(buf).map_err(|e| {
+            error!("LocalWalReader: read failed: {:?}", e; "reader" => ?self);
+            debug_assert!(false, "err: {:?}", e);
+            e
         })
     }
 }

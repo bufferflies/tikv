@@ -1,6 +1,12 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    io,
+    io::BufWriter,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use bstr::ByteSlice;
 use bytes::{Buf, BufMut, Bytes};
@@ -12,13 +18,13 @@ use pd_client::PdClient;
 use protobuf::Message;
 use rfenginepb::ClusterBackupMeta;
 use security::SecurityConfig;
-use tikv_util::{error, info, mpsc::Receiver, time::Instant, warn};
+use tikv_util::{box_try, error, info, mpsc::Receiver, time::Instant, warn};
 
 use crate::{
     backup::{backup_file_full_path, IncrementalBackupFile},
     common::{
         collect_store_wal_rlog_files, create_pd_client, get_all_incremental_backups, StoreRlog,
-        StoreWalRlog, TableFile, INCREMENTAL_BACKUP_FOLDER_FORMAT,
+        StoreWalRlog, TableFile, TempLocalObject, INCREMENTAL_BACKUP_FOLDER_FORMAT,
     },
     error::{Error, Result},
     restore::RestoreConfig,
@@ -605,6 +611,7 @@ fn get_cluster_backup_files_and_shards_count(
 
     let restore_conf = RestoreConfig {
         security: security_conf,
+        lower_memory: true,
         ..Default::default()
     };
     let cluster = BackupCluster::new(
@@ -826,6 +833,46 @@ pub async fn get_archived_object(s3fs: &S3Fs, archive_addr: ArchiveAddress) -> R
         })
 }
 
+pub async fn get_archived_object_to_file(
+    s3fs: &S3Fs,
+    archive_addr: ArchiveAddress,
+    dir: &Path,
+) -> Result<TempLocalObject> {
+    let package_key = archive_package_key(
+        s3fs.get_prefix(),
+        archive_addr.date.clone(),
+        archive_addr.object_addr.package_id,
+    );
+    let opts = GetObjectOptions {
+        start_off: Some(archive_addr.object_addr.offset),
+        end_off: Some(archive_addr.object_addr.offset + archive_addr.object_addr.length),
+    };
+    let path = dir.join(package_key.replace('/', "_"));
+    let build_writer = move || -> io::Result<_> {
+        let temp_obj = TempLocalObject::create(path.clone())?;
+        Ok(BufWriter::new(temp_obj))
+    };
+    match s3fs
+        .get_object_to_writer(package_key.clone(), package_key, opts, build_writer)
+        .await
+    {
+        Ok((writer, len)) => {
+            let mut temp_obj = box_try!(writer.into_inner()); // Writer will flush here.
+            temp_obj.close();
+            debug_assert_eq!(temp_obj.len, len);
+            Ok(temp_obj)
+        }
+        Err(err) => {
+            error!(
+                "failed to get archived object to file with archive addr {:?}, err {}",
+                archive_addr,
+                err.to_string()
+            );
+            Err(Error::DfsError(err))
+        }
+    }
+}
+
 pub fn get_archived_wal_addresses(
     store_meta: &StoreMeta,
 ) -> Result<Vec<(u32, Vec<ObjectAddress>)>> {
@@ -865,6 +912,7 @@ pub fn get_archived_wals_from_addresses(
     s3fs: &S3Fs,
     date: &str,
     addrs: Vec<ObjectAddress>,
+    cache_dir: Option<PathBuf>,
 ) -> Result<Vec<WalChunkData>> {
     let runtime = s3fs.get_runtime();
     let addrs_len = addrs.len();
@@ -876,9 +924,18 @@ pub fn get_archived_wals_from_addresses(
     for addr in addrs {
         let wal_chunk_archive_addr = ArchiveAddress::new(date.to_string(), addr);
         let fs = s3fs.clone();
-        handles.push(
-            runtime.spawn(async move { get_archived_object(&fs, wal_chunk_archive_addr).await }),
-        );
+        let dir = cache_dir.clone();
+        handles.push(runtime.spawn(async move {
+            if let Some(dir) = &dir {
+                get_archived_object_to_file(&fs, wal_chunk_archive_addr, dir)
+                    .await
+                    .map(|local_obj| WalChunkData::LocalFileWithoutMeta(local_obj))
+            } else {
+                get_archived_object(&fs, wal_chunk_archive_addr)
+                    .await
+                    .map(|data| WalChunkData::Memory(data))
+            }
+        }));
     }
 
     let mut wal_chunks = Vec::with_capacity(addrs_len);
@@ -886,9 +943,8 @@ pub fn get_archived_wals_from_addresses(
     // `join_all` will keep the order.
     for res in runtime.block_on(futures::future::join_all(handles)) {
         match res.unwrap() {
-            Ok(data) => {
-                // TODO: use `ChunkData::LocalFile`.
-                wal_chunks.push(WalChunkData::Memory(data));
+            Ok(chunk_data) => {
+                wal_chunks.push(chunk_data);
             }
             Err(err) => {
                 errs.push(err);
@@ -905,11 +961,12 @@ pub fn get_archived_wals(
     s3fs: &S3Fs,
     date: &str,
     store_meta: &StoreMeta,
+    cache_dir: Option<PathBuf>,
 ) -> Result<Vec<(u32, Vec<WalChunkData>)>> {
     let wal_addrs = get_archived_wal_addresses(store_meta)?;
     let mut wals = Vec::with_capacity(wal_addrs.len());
     for (epoch, addrs) in wal_addrs {
-        let wal_chunks = get_archived_wals_from_addresses(s3fs, date, addrs)?;
+        let wal_chunks = get_archived_wals_from_addresses(s3fs, date, addrs, cache_dir.clone())?;
         wals.push((epoch, wal_chunks));
     }
     Ok(wals)
@@ -1701,7 +1758,7 @@ pub fn parse_index_date(index_key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{fs, io::Read, sync::Arc};
 
     use bytes::Bytes;
     use protobuf::Message;
@@ -1841,7 +1898,9 @@ mod tests {
         const CLUSTER_ID: u64 = 1;
         const NUM_DATES: u64 = 8;
 
-        let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_archive_reader_");
+        let (temp_dir, mut oss, dfs_config) = prepare_dfs("test_archive_reader_");
+        let cache_dir = temp_dir.path().join("cache");
+        fs::create_dir_all(cache_dir.clone()).unwrap();
         let s3fs = Arc::new(S3Fs::new_from_config(dfs_config));
         let first_date = chrono::Utc::now().date_naive() - chrono::Duration::days(NUM_DATES as i64);
         let get_date = |j: u64| first_date + chrono::Duration::days(j as i64);
@@ -1935,11 +1994,33 @@ mod tests {
                 assert_eq!(store_backup_meta.store_id, store_id);
                 assert_eq!(store_rlog.snap_rlog, get_snap_rlog(store_id));
 
-                let wals =
-                    get_archived_wals(&reader.s3fs, reader.get_start_date(), &store_meta).unwrap();
-                assert_eq!(wals.len(), 1);
-                assert_eq!(wals[0].0, get_wal_epoch(store_id));
-                assert_eq!(wals[0].1[0].must_get_bytes(), get_wal_chunk(store_id));
+                {
+                    let wals =
+                        get_archived_wals(&reader.s3fs, reader.get_start_date(), &store_meta, None)
+                            .unwrap();
+                    assert_eq!(wals.len(), 1);
+                    assert_eq!(wals[0].0, get_wal_epoch(store_id));
+                    assert_eq!(wals[0].1[0].must_get_bytes(), get_wal_chunk(store_id));
+                }
+                {
+                    let wals = get_archived_wals(
+                        &reader.s3fs,
+                        reader.get_start_date(),
+                        &store_meta,
+                        Some(cache_dir.clone()),
+                    )
+                    .unwrap();
+                    assert_eq!(wals.len(), 1);
+                    assert_eq!(wals[0].0, get_wal_epoch(store_id));
+                    let mut buffer = Vec::new();
+                    let mut local_obj = wals[0].1[0].must_into_local_file_without_meta();
+                    local_obj
+                        .file(true)
+                        .unwrap()
+                        .read_to_end(&mut buffer)
+                        .unwrap();
+                    assert_eq!(buffer, get_wal_chunk(store_id));
+                }
             }
         }
         for j in 0..NUM_DATES {
