@@ -1369,6 +1369,8 @@ impl PdRunner {
                         "keyspace_gc_safe_points" => ?cluster_gc_states
                             .keyspace_gc_states
                             .iter()
+                            // Do not print null keyspace as it's actually never used in next gen.
+                            .filter(|(id, _)| **id != NULL_KEYSPACE_ID)
                             .map(|(k, v)| (*k, v.gc_safe_point))
                             .collect::<Vec<_>>(),
                     );
