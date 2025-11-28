@@ -847,7 +847,13 @@ pub async fn get_archived_object_to_file(
         start_off: Some(archive_addr.object_addr.offset),
         end_off: Some(archive_addr.object_addr.offset + archive_addr.object_addr.length),
     };
-    let path = dir.join(package_key.replace('/', "_"));
+    let tmp_key = format!(
+        "{}-{}-{}",
+        package_key,
+        opts.start_off.unwrap(),
+        opts.end_off.unwrap()
+    );
+    let path = dir.join(tmp_key.replace('/', "_"));
     let build_writer = move || -> io::Result<_> {
         let temp_obj = TempLocalObject::create(path.clone())?;
         Ok(BufWriter::new(temp_obj))
