@@ -3,7 +3,8 @@
 set -euo pipefail
 root_dir=$(realpath "$(dirname "$(realpath "$0")")/..")
 
-docker build -t tikv-dashboard-gen -f - . <<EOF
+# Use host network to avoid DNS issues in restricted environments.
+docker build --network host -t tikv-dashboard-gen -f - . <<EOF
 FROM pyfound/black:23.11.0
 
 RUN pip install isort==5.13.2 grafanalib==v0.7.0

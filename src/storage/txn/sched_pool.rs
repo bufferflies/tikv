@@ -22,7 +22,7 @@ use tikv_util::{
 
 use crate::storage::{
     kv::{destroy_tls_engine, set_tls_engine, Engine, FlowStatsReporter, Statistics},
-    metrics::*,
+    metrics::{SCHED_POOL_RUNNING_TASKS_GAUGE, *},
     test_util::latest_feature_gate,
 };
 
@@ -173,16 +173,23 @@ impl SchedPool {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        // Wrap future to track running tasks
+        let tracked_future = async move {
+            SCHED_POOL_RUNNING_TASKS_GAUGE.inc();
+            future.await;
+            SCHED_POOL_RUNNING_TASKS_GAUGE.dec();
+        };
+
         // TODO: queue depth based backpressure
         // We want consistent behavior as the merged pool.
         // We rely solely on the running_write_bytes based backpressure.
         match self {
-            SchedPool::Yatp { pool } => pool.spawn(future),
+            SchedPool::Yatp { pool } => pool.spawn(tracked_future),
             SchedPool::Tokio {
                 handle,
                 task_monitor,
             } => {
-                let future = async move { tikv_util::init_task_local(future).await };
+                let future = async move { tikv_util::init_task_local(tracked_future).await };
                 // Instrument with tokio-metrics to track schedule wait time
                 let instrumented = task_monitor.instrument(future);
                 handle.spawn(instrumented);

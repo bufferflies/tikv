@@ -958,7 +958,7 @@ def Server() -> RowPanel:
             ),
             graph_panel(
                 title="Average Thread Pool Schedule Wait Duration",
-                description="The average rate of written keys to Regions per TiKV instance",
+                description="The average schedule wait duration for thread pools",
                 yaxes=yaxes(left_format=UNITS.SECONDS, log_base=2),
                 targets=[
                     target(
@@ -968,6 +968,19 @@ def Server() -> RowPanel:
                         ),
                         legend_format="{{name}}-{{priority}}",
                         additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_simple(
+                            "tikv_scheduler_tokio_pool_mean_first_poll_delay_seconds",
+                        ),
+                        legend_format="sched-tokio-pool-mean",
+                    ),
+                    target(
+                        expr=expr_simple(
+                            "tikv_tokio_pool_mean_first_poll_delay_seconds",
+                            label_selectors=['name="unified-read-pool"'],
+                        ),
+                        legend_format="unified-read-pool-tokio-mean",
                     ),
                 ],
                 thresholds=[GraphThreshold(value=1.0)],
@@ -1344,14 +1357,25 @@ def ThreadCPU() -> RowPanel:
     layout.row(
         [
             graph_panel(
-                title="KvEngine worker CPU",
+                title="Scheduler pool CPU",
+                description="The CPU utilization of the scheduler pools",
                 yaxes=yaxes(left_format=UNITS.PERCENT_UNIT),
                 targets=[
                     target(
                         expr=expr_sum_rate(
                             "tikv_thread_cpu_seconds_total",
-                            label_selectors=['name=~"txn-chunk-worker.*"'],
+                            label_selectors=[
+                                'name=~"sched_tokio_pool.*|sched_yatp_pool.*"'
+                            ],
                         ),
+                        legend_format="{{instance}}-scheduler",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_thread_cpu_seconds_total",
+                            label_selectors=['name=~"sched_background.*"'],
+                        ),
+                        legend_format="{{instance}}-background",
                     ),
                 ],
             ),
@@ -1554,6 +1578,18 @@ def ThreadCPU() -> RowPanel:
     )
     layout.row(
         [
+            graph_panel(
+                title="KvEngine worker CPU",
+                yaxes=yaxes(left_format=UNITS.PERCENT_UNIT),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_thread_cpu_seconds_total",
+                            label_selectors=['name=~"txn_chunk_worker.*"'],
+                        ),
+                    ),
+                ],
+            ),
             graph_panel(
                 title="Busy Threads (>80%)",
                 yaxes=yaxes(left_format=UNITS.PERCENT_UNIT),
@@ -3005,12 +3041,126 @@ def LocalReader() -> RowPanel:
 
 
 def UnifiedReadPool() -> RowPanel:
-    return YatpPool(
-        title="Unified Read Pool",
-        pool_name_prefix="unified-read",
-        running_task_metric="tikv_unified_read_pool_running_tasks",
-        running_task_metric_label="priority",
+    layout = Layout(title="Unified Read Pool")
+
+    # Row 1: Wait/Schedule Duration + Running Tasks
+    layout.row(
+        [
+            graph_panel(
+                title="Schedule Wait Duration",
+                description="Time from task spawn to first poll",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_histogram_avg(
+                            "tikv_yatp_pool_schedule_wait_duration",
+                            label_selectors=['name=~"unified-read.*"'],
+                        ),
+                        legend_format="mean-yatp",
+                    ),
+                    target(
+                        expr=expr_simple(
+                            "tikv_tokio_pool_mean_first_poll_delay_seconds",
+                            label_selectors=['name="unified-read-pool"'],
+                        ),
+                        legend_format="mean-tokio",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Running Tasks",
+                description="Number of concurrently running tasks",
+                targets=[
+                    target(
+                        expr=expr_sum_aggr_over_time(
+                            "tikv_unified_read_pool_running_tasks",
+                            "avg",
+                            "1m",
+                            by_labels=["priority"],
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
     )
+
+    # Row 2: Poll Duration + Scheduled Duration
+    layout.row(
+        [
+            graph_panel(
+                title="Task Poll Duration",
+                description="Time tasks spend executing (being polled)",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_histogram_avg(
+                            "tikv_yatp_task_poll_duration",
+                            label_selectors=['name=~"unified-read.*"'],
+                        ),
+                        legend_format="mean-yatp",
+                    ),
+                    target(
+                        expr=expr_simple(
+                            "tikv_tokio_pool_mean_poll_duration_seconds",
+                            label_selectors=['name="unified-read-pool"'],
+                        ),
+                        legend_format="mean-tokio",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Task Scheduled Duration",
+                description="Time tasks wait to be polled after being woken",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_simple(
+                            "tikv_tokio_pool_mean_scheduled_duration_seconds",
+                            label_selectors=['name="unified-read-pool"'],
+                        ),
+                        legend_format="mean-tokio",
+                    ),
+                ],
+            ),
+        ]
+    )
+
+    # Row 3: Idle Duration + First Poll Count
+    layout.row(
+        [
+            graph_panel(
+                title="Task Idle Duration",
+                description="Time tasks spend idle waiting on external events (I/O)",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_simple(
+                            "tikv_tokio_pool_mean_idle_duration_seconds",
+                            label_selectors=['name="unified-read-pool"'],
+                        ),
+                        legend_format="mean-tokio",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="First Poll Count",
+                description="Rate of tasks polled for first time",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_tokio_pool_first_poll_total",
+                            label_selectors=['name="unified-read-pool"'],
+                        ),
+                        legend_format="tokio",
+                    ),
+                ],
+            ),
+        ]
+    )
+
+    return layout.row_panel
 
 
 def YatpPool(
@@ -3602,19 +3752,19 @@ def Scheduler() -> RowPanel:
                 targets=[
                     target(
                         expr=expr_sum(
-                            "tikv_scheduler_contex_total",
+                            "tikv_scheduler_context_total",
                         ),
                     ),
                 ],
             ),
             graph_panel(
-                title="Scheduler running commands",
-                description="The count of running commands per TiKV instance",
+                title="Scheduler running tasks",
+                description="Number of tasks being executed in the scheduler pool (excludes tasks not yet polled)",
                 yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
                 targets=[
                     target(
                         expr=expr_sum(
-                            "tikv_scheduler_running_commands",
+                            "tikv_scheduler_pool_running_tasks",
                         ),
                     ),
                 ],
@@ -3659,11 +3809,25 @@ def Scheduler() -> RowPanel:
     )
     layout.row(
         [
-            heatmap_panel(
-                title="Txn Scheduler Pool Wait Duration",
-                yaxis=yaxis(format=UNITS.SECONDS),
-                metric="tikv_yatp_pool_schedule_wait_duration_bucket",
-                label_selectors=['name=~"sched-worker.*"'],
+            graph_panel(
+                title="Scheduler Pool Wait Duration",
+                description="Time tasks wait to be scheduled (YATP or Tokio backend)",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_histogram_avg(
+                            "tikv_yatp_pool_schedule_wait_duration",
+                            label_selectors=['name=~"sched-yatp-pool.*"'],
+                        ),
+                        legend_format="mean-yatp",
+                    ),
+                    target(
+                        expr=expr_simple(
+                            "tikv_scheduler_tokio_pool_mean_first_poll_delay_seconds",
+                        ),
+                        legend_format="mean-tokio",
+                    ),
+                ],
             ),
         ]
     )
@@ -3671,12 +3835,121 @@ def Scheduler() -> RowPanel:
 
 
 def SchedulerWorkerPool() -> RowPanel:
-    return YatpPool(
-        title="Scheduler Worker Pool",
-        pool_name_prefix="sched-worker",
-        running_task_metric="tikv_scheduler_running_commands",
-        running_task_metric_label="instance",
+    layout = Layout(title="Scheduler Worker Pool")
+
+    # Row 1: Wait/Schedule Duration + Running Tasks
+    layout.row(
+        [
+            graph_panel(
+                title="Schedule Wait Duration",
+                description="Time from task spawn to first poll",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_histogram_avg(
+                            "tikv_yatp_pool_schedule_wait_duration",
+                            label_selectors=['name=~"sched-yatp-pool.*"'],
+                        ),
+                        legend_format="mean-yatp",
+                    ),
+                    target(
+                        expr=expr_simple(
+                            "tikv_scheduler_tokio_pool_mean_first_poll_delay_seconds",
+                        ),
+                        legend_format="mean-tokio",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Running Tasks",
+                description="Number of tasks being executed in the scheduler pool (excludes tasks not yet polled)",
+                targets=[
+                    target(
+                        expr=expr_sum_aggr_over_time(
+                            "tikv_scheduler_pool_running_tasks",
+                            "avg",
+                            "1m",
+                            by_labels=["instance"],
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
     )
+
+    # Row 2: Poll/Execution Duration
+    layout.row(
+        [
+            graph_panel(
+                title="Task Poll Duration",
+                description="Time tasks spend executing (being polled)",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_histogram_avg(
+                            "tikv_yatp_task_poll_duration",
+                            label_selectors=['name=~"sched-yatp-pool.*"'],
+                        ),
+                        legend_format="mean-yatp",
+                    ),
+                    target(
+                        expr=expr_simple(
+                            "tikv_scheduler_tokio_pool_mean_poll_duration_seconds",
+                        ),
+                        legend_format="mean-tokio",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Task Scheduled Duration",
+                description="Time tasks wait to be polled after being woken",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_simple(
+                            "tikv_scheduler_tokio_pool_mean_scheduled_duration_seconds",
+                        ),
+                        legend_format="mean-tokio",
+                    ),
+                ],
+            ),
+        ]
+    )
+
+    # Row 3: Idle Duration and First Poll Count
+    layout.row(
+        [
+            graph_panel(
+                title="Task Idle Duration",
+                description="Time tasks spend idle waiting on external events (I/O)",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_simple(
+                            "tikv_scheduler_tokio_pool_mean_idle_duration_seconds",
+                        ),
+                        legend_format="mean-tokio",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="First Poll Count",
+                description="Rate of tasks polled for first time",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_scheduler_tokio_pool_first_poll_total",
+                        ),
+                        legend_format="tokio",
+                    ),
+                ],
+            ),
+        ]
+    )
+
+    return layout.row_panel
 
 
 def GC() -> RowPanel:

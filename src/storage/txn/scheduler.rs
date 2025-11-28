@@ -371,7 +371,7 @@ impl<L: LockManager> SchedulerInner<L> {
             .running_write_bytes
             .fetch_add(tctx.write_bytes, Ordering::AcqRel) as i64;
         SCHED_WRITING_BYTES_GAUGE.set(running_write_bytes + tctx.write_bytes as i64);
-        SCHED_CONTEX_GAUGE.inc();
+        SCHED_CONTEXT_GAUGE.inc();
         tctx
     }
 
@@ -382,7 +382,7 @@ impl<L: LockManager> SchedulerInner<L> {
             .running_write_bytes
             .fetch_sub(tctx.write_bytes, Ordering::AcqRel) as i64;
         SCHED_WRITING_BYTES_GAUGE.set(running_write_bytes - tctx.write_bytes as i64);
-        SCHED_CONTEX_GAUGE.dec();
+        SCHED_CONTEXT_GAUGE.dec();
 
         tctx
     }

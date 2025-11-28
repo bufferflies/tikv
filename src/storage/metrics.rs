@@ -412,8 +412,8 @@ lazy_static! {
         "Total number of writing kv."
     )
     .unwrap();
-    pub static ref SCHED_CONTEX_GAUGE: IntGauge = register_int_gauge!(
-        "tikv_scheduler_contex_total",
+    pub static ref SCHED_CONTEXT_GAUGE: IntGauge = register_int_gauge!(
+        "tikv_scheduler_context_total",
         "Total number of pending commands."
     )
     .unwrap();
@@ -663,6 +663,12 @@ lazy_static! {
     pub static ref SCHED_BACKGROUND_POOL_RUNNING_TASKS_GAUGE: IntGauge = register_int_gauge!(
         "tikv_scheduler_background_pool_running_tasks",
         "Number of running tasks in the scheduler background pool"
+    )
+    .unwrap();
+
+    pub static ref SCHED_POOL_RUNNING_TASKS_GAUGE: IntGauge = register_int_gauge!(
+        "tikv_scheduler_pool_running_tasks",
+        "Number of tasks being executed in the scheduler pool (excludes tasks not yet polled)"
     )
     .unwrap();
 }

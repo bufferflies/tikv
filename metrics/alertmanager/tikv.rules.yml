@@ -218,12 +218,12 @@ groups:
       summary: TiKV_raft_process_tick_duration_secs
 
   - alert: TiKV_scheduler_context_total
-    expr: abs(delta( tikv_scheduler_contex_total[5m])) > 1000
+    expr: abs(delta( tikv_scheduler_context_total[5m])) > 1000
     for: 1m
     labels:
       env: ENV_LABELS_ENV
       level: warning
-      expr:  abs(delta( tikv_scheduler_contex_total[5m])) > 1000
+      expr:  abs(delta( tikv_scheduler_context_total[5m])) > 1000
     annotations:
       description: 'cluster: ENV_LABELS_ENV, instance: {{ $labels.instance }}, values:{{ $value }}'
       value: '{{ $value }}'
