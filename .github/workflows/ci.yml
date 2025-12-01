@@ -37,7 +37,7 @@ jobs:
       - name: Install `rust` toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2023-12-10
+          toolchain: nightly-2023-12-28
           components: clippy, rustfmt
       - name: Set crates.io mirror # https://developer.aliyun.com/mirror/crates.io-index
         run: |

@@ -1599,7 +1599,7 @@ mod tests {
             offsets.pop().unwrap();
             for (idx, offset) in offsets.iter().enumerate() {
                 if idx == 0 || idx == offsets.len() / 2 || idx == offsets.len() - 1 {
-                    for pos in &vec![0, 4, 8, 12] {
+                    for pos in &[0, 4, 8, 12] {
                         let fd = OpenOptions::new()
                             .read(true)
                             .write(true)

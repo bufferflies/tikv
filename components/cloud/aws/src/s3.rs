@@ -467,7 +467,7 @@ impl<'client> S3Uploader<'client> {
         part_number: i64,
         data: &[u8],
     ) -> Result<CompletedPart, RusotoError<UploadPartError>> {
-        match timeout(Self::get_timeout(), async {
+        let timeout_res = timeout(Self::get_timeout(), async {
             let start = Instant::now();
             let r = self
                 .client
@@ -487,8 +487,8 @@ impl<'client> S3Uploader<'client> {
                 .observe(start.saturating_elapsed().as_secs_f64());
             r
         })
-        .await
-        {
+        .await;
+        match timeout_res {
             Ok(part) => Ok(CompletedPart {
                 e_tag: part?.e_tag,
                 part_number: Some(part_number),

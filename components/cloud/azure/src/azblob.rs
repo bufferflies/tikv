@@ -290,7 +290,7 @@ impl AzureUploader {
     /// This should be used only when the data is known to be short, and thus
     /// relatively cheap to retry the entire upload.
     async fn upload(&self, data: &[u8]) -> Result<(), RequestError> {
-        match timeout(Self::get_timeout(), async {
+        let timeout_res = timeout(Self::get_timeout(), async {
             self.client_builder
                 .get_client()
                 .await
@@ -302,8 +302,8 @@ impl AzureUploader {
                 .await?;
             Ok(())
         })
-        .await
-        {
+        .await;
+        match timeout_res {
             Ok(res) => match res {
                 Ok(_) => Ok(()),
                 Err(err) => {

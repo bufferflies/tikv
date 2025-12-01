@@ -139,7 +139,7 @@ export TIKV_ENABLE_FEATURES := ${ENABLE_FEATURES}
 export TIKV_BUILD_RUSTC_VERSION := $(shell rustc --version 2> /dev/null || echo ${BUILD_INFO_RUSTC_FALLBACK})
 export TIKV_BUILD_RUSTC_TARGET := $(shell rustc -vV | awk '/host/ { print $$2 }')
 export TIKV_BUILD_GIT_HASH ?= $(shell git rev-parse HEAD 2> /dev/null || echo ${BUILD_INFO_GIT_FALLBACK})
-export TIKV_BUILD_GIT_TAG ?= $(shell git describe --tag || echo ${BUILD_INFO_GIT_FALLBACK})
+export TIKV_BUILD_GIT_TAG ?= $(shell git describe --tags --dirty='-dev' --always || echo ${BUILD_INFO_GIT_FALLBACK})
 export TIKV_BUILD_GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2> /dev/null || echo ${BUILD_INFO_GIT_FALLBACK})
 
 export DOCKER_IMAGE_NAME ?= "pingcap/tikv"
@@ -164,12 +164,14 @@ endif
 # Almost all the rules in this Makefile are PHONY
 # Declaring a rule as PHONY could improve correctness
 # But probably instead just improves performance by a little bit
-.PHONY: audit check-protobuf clippy format pre-format pre-clippy pre-audit unset-override pre-test
+.PHONY: audit check-protobuf clippy format pre-format pre-clippy pre-audit unset-override
 .PHONY: all build clean dev check-udeps doc error-code fuzz run test
 .PHONY: docker docker-tag docker-tag-with-git-hash docker-tag-with-git-tag
 .PHONY: ctl dist_artifacts dist_tarballs x-build-dist
 .PHONY: build_dist_release dist_release dist_unportable_release
 .PHONY: fail_release prof_release release unportable_release
+.PHONY: pre-test test-cloud-engine test-cloud-engine-integration
+.PHONY: pre-coverage-report test-with-coverage post-coverage-report coverage-report
 
 
 default: release
@@ -378,7 +380,7 @@ audit: pre-audit
 	cargo audit
 
 check-udeps:
-	which cargo-udeps &>/dev/null || cargo install cargo-udeps && cargo udeps
+	(which cargo-udeps &>/dev/null || cargo install cargo-udeps) && cargo udeps
 
 FUZZER ?= Honggfuzz
 
@@ -473,14 +475,18 @@ x-build-dist-debug:
 pre-test:
 	@which cargo-nextest &> /dev/null || cargo install -q cargo-nextest@0.9.85 --locked
 
+UNIT_TEST_PACKAGES := \
+	kvengine rfstore rfengine \
+	cse-ctl tikv-worker cloud_worker \
+	test_cloud_server test_pd_client \
+	native_br load_data cloud_encryption \
+	cloud_server pd_client api_version \
+	concurrency_manager
+UNIT_TEST_PACKAGES_STR := $(foreach p,$(UNIT_TEST_PACKAGES),-p $(p))
+
 test-cloud-engine: pre-test
 	cargo nextest run -P ci \
-		-p kvengine -p rfstore -p rfengine \
-		-p cse-ctl -p tikv-worker -p cloud_worker \
-		-p test_cloud_server -p test_pd_client \
-		-p native_br -p load_data -p cloud_encryption \
-		-p cloud_server -p pd_client -p api_version \
-		-p concurrency_manager \
+		$(UNIT_TEST_PACKAGES_STR) \
 		--tests
 
 test-cloud-engine-integration: pre-test
@@ -488,3 +494,29 @@ test-cloud-engine-integration: pre-test
 		--test cloud_engine --test cloud_engine_failpoints \
 		--test-threads=4 \
 		--features jemalloc
+
+coverage-report: pre-coverage-report test-with-coverage post-coverage-report
+
+pre-coverage-report:
+	@which cargo-llvm-cov &> /dev/null || cargo install -q cargo-llvm-cov@0.6.15 --locked
+	cargo llvm-cov clean --workspace
+
+test-with-coverage: pre-test
+	cargo llvm-cov nextest -P ci \
+		$(UNIT_TEST_PACKAGES_STR) \
+		--tests \
+		--no-report
+	cargo llvm-cov nextest -P ci -p tests \
+		--test cloud_engine --test cloud_engine_failpoints \
+		--test-threads=4 \
+		--features jemalloc \
+		--no-report
+	LOG_FILE=$(CURDIR)/random_test.log \
+		cargo llvm-cov test -p tests \
+		--test random test_random_all \
+		--features jemalloc \
+		--no-report
+
+post-coverage-report:
+	cargo llvm-cov report --html --output-dir coverage/
+	cargo llvm-cov report --lcov --output-path coverage/lcov.info
