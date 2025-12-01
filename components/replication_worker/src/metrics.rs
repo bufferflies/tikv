@@ -68,4 +68,10 @@ lazy_static! {
         &["type", "keyspace", "reason"]
     )
     .unwrap();
+    pub static ref REP_KEYSPACE_SERVICE_SAFEPOINT: IntGaugeVec = register_int_gauge_vec!(
+        "tikv_cdc_rep_keyspace_service_safepoint",
+        "The value of keyspace service safepoint",
+        &["keyspace", "type"]
+    )
+    .unwrap();
 }

@@ -38,3 +38,29 @@ pub(crate) fn parse_ticdc_response(resp: &[u8]) -> TiCdcError {
         },
     }
 }
+
+// Ref: https://docs.pingcap.com/tidb/stable/ticdc-open-api-v2/#query-the-replication-task-list
+#[derive(Deserialize, Clone, Debug, Default)]
+pub(crate) struct ReplicationTaskList {
+    pub total: usize,
+    pub items: Vec<ReplicationTaskItem>,
+}
+
+#[allow(unused)]
+#[derive(Deserialize, Clone, Debug, Default)]
+pub(crate) struct RunningError {
+    pub time: String,
+    pub addr: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[allow(unused)]
+#[derive(Deserialize, Clone, Debug, Default)]
+pub(crate) struct ReplicationTaskItem {
+    pub id: String,
+    pub state: String, // normal, stopped, error, failed, finished
+    pub checkpoint_tso: u64,
+    pub checkpoint_time: String,
+    pub error: Option<RunningError>,
+}

@@ -114,7 +114,6 @@ where
     Ok((status, resp))
 }
 
-#[allow(unused)]
 pub(crate) async fn read_from_ticdc<F>(
     tag: &str,
     http_client: &HttpClient,

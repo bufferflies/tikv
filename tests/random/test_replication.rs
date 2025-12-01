@@ -9,7 +9,7 @@ use futures::executor::block_on;
 use log_wrappers::Value as LogValue;
 use native_br::{backup, backup_worker};
 use pd_client::{PdClient, RpcClient};
-use replication_worker::{KeyspacesResp, LocalProvider};
+use replication_worker::{KeyspacesResp, LocalProvider, SafepointConfig};
 use security::{HttpClient, SecurityManager};
 use sqlx::Row;
 use test_cloud_server::{
@@ -173,6 +173,12 @@ fn test_random_replication() {
     rep_config.min_wal_target_time_span = ReadableDuration::secs(min_wal_target_time_span);
     rep_config.max_wal_target_time_span = ReadableDuration::secs(max_wal_target_time_span);
     rep_config.skip_store_addr_keywords = vec!["no-cdc".into()]; // Cover the skip stores process.
+    rep_config.safepoint = SafepointConfig {
+        gc_ttl: ReadableDuration(WAIT_SYNC_TIMEOUT),
+        create_changefeed_gc_ttl: ReadableDuration::secs(60),
+        sync_safepoint_interval: ReadableDuration::secs(10),
+        sync_ticdc_timeout: ReadableDuration::secs(3), // Small value for easy to timeout.
+    };
     rep_config.merged_engine.block_cache_size = ReadableSize::mb(64).into();
     rep_config.merged_engine.mem_table_size = cluster.get_mem_table_size();
     rep_config.merged_engine.raft_write_batch_size = ReadableSize::kb(256);

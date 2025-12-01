@@ -158,6 +158,9 @@ impl ReplicationWorkerConfig {
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct SafepointConfig {
+    /// `gc_ttl` is the time-to-live when replication worker set service
+    /// safepoint. It is defined the same as `gc-ttl` of TiCDC.
+    pub gc_ttl: ReadableDuration,
     /// The time-to-live when replication worker set service safepoint during
     /// creating changefeed to ensure that the `start_ts` of the changefeed is
     /// available during changefeed initialization.
@@ -168,12 +171,18 @@ pub struct SafepointConfig {
     /// And the value should not be too large, as we do not remove the safepoint
     /// for easier.
     pub create_changefeed_gc_ttl: ReadableDuration,
+    /// The interval to sync GC safepoint of changefeeds from TiCDC.
+    pub sync_safepoint_interval: ReadableDuration,
+    pub sync_ticdc_timeout: ReadableDuration,
 }
 
 impl Default for SafepointConfig {
     fn default() -> Self {
         Self {
+            gc_ttl: ReadableDuration::hours(24),
             create_changefeed_gc_ttl: ReadableDuration::minutes(10),
+            sync_safepoint_interval: ReadableDuration::minutes(1),
+            sync_ticdc_timeout: ReadableDuration::secs(30),
         }
     }
 }

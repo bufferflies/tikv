@@ -15,7 +15,7 @@ use std::{
 use api_version::ApiV2;
 use bytes::{Buf, Bytes};
 use cdc::{metrics::*, CdcEvent, Conn, ConnId};
-use collections::{HashMap, HashMapEntry, HashSet};
+use collections::{HashMap, HashMapEntry, HashMapExt, HashSet};
 use futures::executor::block_on;
 use grpcio::{ChannelBuilder, EnvBuilder, ServerBuilder};
 use grpcio_health::{create_health, HealthService, ServingStatus};
@@ -72,7 +72,7 @@ use crate::{
     kube::{KeyspaceKubeService, KubeApi},
     metrics::*,
     provisioned::KeyspaceProvisionedService,
-    safepoint::ServiceSafepointManager,
+    safepoint::{KeyspaceChangefeeds, ServiceSafepointManager},
     scheduler::get_cdc_status,
     ticdc_util::TiCdcError,
     util::{
@@ -200,7 +200,7 @@ impl ReplicationWorker {
         let merged_engine = box_try!(MergedEngine::new(ctx.clone(), None));
         let synced_target_ts = merged_engine.get_synced_target_ts();
         let keyspace_ids = merged_engine.get_keyspaces();
-        let mut keyspaces = HashMap::default();
+        let mut keyspaces = HashMap::with_capacity(keyspace_ids.len());
         let cdc_addrs = Arc::new(dashmap::DashMap::new());
         let kube_api = if config.is_kube_mode() {
             info!("init k8s api");
@@ -242,26 +242,29 @@ impl ReplicationWorker {
         let gc_runner = GcRunner::new(merged_engine.get_kv(), None, config.local_file_gc_timeout.0);
         let gc_worker = worker::Builder::new("rep-gc-worker").create();
         gc_worker.start_with_timer("rep-gc-worker", gc_runner);
-
+        let interval = config.report_region_interval.0;
+        let update_stores_wal_size_limit = config.update_stores_wal_size_limit.as_memory_size();
+        let incr_scan_concurrency_limit =
+            Arc::new(Semaphore::new(config.incr_scan_concurrency_limit));
+        let mut keyspaces_feeds = HashMap::with_capacity(keyspaces.len());
+        for (&keyspace_id, ks) in keyspaces.iter_mut() {
+            let raft = merged_engine.get_raft();
+            let kv = merged_engine.get_kv();
+            let rep_pd_cli = ks.get_pd_client();
+            let ks_feeds =
+                KeyspaceChangefeeds::new(keyspace_id, ks.get_states(), rep_pd_cli.clone());
+            keyspaces_feeds.insert(keyspace_id, ks_feeds);
+            ks.report_loop = Some(runtime.spawn(async move {
+                Self::report_regions_loop(keyspace_id, raft, kv, rep_pd_cli, interval).await;
+            }));
+        }
         let safepoint_mgr = box_try!(ServiceSafepointManager::new(
             ctx.config.merged_store_id,
             ctx.pd.clone(),
             &config,
             runtime.handle().clone(),
+            keyspaces_feeds,
         ));
-
-        let interval = config.report_region_interval.0;
-        let update_stores_wal_size_limit = config.update_stores_wal_size_limit.as_memory_size();
-        let incr_scan_concurrency_limit =
-            Arc::new(Semaphore::new(config.incr_scan_concurrency_limit));
-        for (&keyspace_id, ks) in keyspaces.iter_mut() {
-            let raft = merged_engine.get_raft();
-            let kv = merged_engine.get_kv();
-            let rep_pd_cli = ks.get_pd_client();
-            ks.report_loop = Some(runtime.spawn(async move {
-                Self::report_regions_loop(keyspace_id, raft, kv, rep_pd_cli, interval).await;
-            }));
-        }
         let mut apply_ctx =
             ApplyContext::new(merged_engine.get_kv(), Some(merged_engine.get_router()));
         let (tx, rx) = tikv_util::mpsc::unbounded();
@@ -637,10 +640,14 @@ impl ReplicationWorker {
             Self::report_region_to_rep_pd_by_id(&raft, &pd_client, region_id);
         }
         let states = ks.get_states_mut();
-        let req_body = match states.feeds.entry(changefeed_id) {
+        let req_body = match states.feeds.entry(changefeed_id.clone()) {
             Entry::Vacant(e) => {
                 // TODO: verify the request parameter.
                 e.insert(body_string);
+                self.safepoint_mgr
+                    .as_ref()
+                    .unwrap()
+                    .add_changefeed(keyspace_id, changefeed_id);
                 self.merged_engine
                     .set_keyspace_states(keyspace_id, states.marshal())
                     .unwrap();
@@ -1815,7 +1822,9 @@ impl ReplicationWorker {
         cb: Box<dyn FnOnce(Result<()>) + Send>,
     ) {
         if self.keyspaces.contains_key(&keyspace_id) {
-            cb(Err(Error::OtherError("keyspace already exists".into())));
+            // Accept duplicated add_keyspace request.
+            info!("handle_add_keyspace: keyspace already exists"; "keyspace" => keyspace_id);
+            cb(Ok(()));
             return;
         }
         let mut task_service: Box<dyn KeyspaceService> = if self.config.is_kube_mode() {
@@ -1988,19 +1997,20 @@ impl ReplicationWorker {
         let kv = self.merged_engine.get_kv();
         let interval = self.config.report_region_interval.0;
         let report_loop = self.runtime.spawn(async move {
-            Self::report_regions_loop(
-                keyspace_id,
-                raft.clone(),
-                kv.clone(),
-                rep_pd_cli.clone(),
-                interval,
-            )
-            .await
+            Self::report_regions_loop(keyspace_id, raft.clone(), kv.clone(), rep_pd_cli, interval)
+                .await
         });
         let ks = Keyspace {
             service: task_service,
             report_loop: Some(report_loop),
         };
+        if let Some(sp_mgr) = self.safepoint_mgr.as_ref() {
+            sp_mgr.add_keyspace(
+                keyspace_id,
+                ks.get_states().cdc_addr.clone(),
+                ks.get_pd_client(),
+            );
+        }
         self.keyspaces.insert(keyspace_id, ks);
         self.merged_engine
             .set_keyspace_states(keyspace_id, states)?;
@@ -2024,7 +2034,9 @@ impl ReplicationWorker {
         info!("remove_keyspace"; "keyspace" => keyspace_id);
         let ks = match self.keyspaces.entry(keyspace_id) {
             HashMapEntry::Vacant(_) => {
-                cb(Err(Error::OtherError("keyspace not found".into())));
+                // Accept duplicated remove_keyspace request.
+                info!("remove_keyspace: keyspace not found"; "keyspace" => keyspace_id);
+                cb(Ok(()));
                 return;
             }
             HashMapEntry::Occupied(e) => {
@@ -2036,6 +2048,9 @@ impl ReplicationWorker {
                 e.remove()
             }
         };
+        if let Some(sp_mgr) = self.safepoint_mgr.as_ref() {
+            sp_mgr.remove_keyspace(keyspace_id);
+        }
         self.cdc_addrs.remove(&keyspace_id);
         let keyspace_regions = self.merged_engine.get_keyspace_regions(keyspace_id);
         keyspace_regions.iter().for_each(|&region_id| {
@@ -2055,6 +2070,9 @@ impl ReplicationWorker {
             return Err(Error::OtherError("keyspace service not found".into()));
         };
         if ks.get_states_mut().feeds.remove(&changefeed_id).is_some() {
+            if let Some(sp_mgr) = self.safepoint_mgr.as_ref() {
+                sp_mgr.remove_changefeed(keyspace_id, changefeed_id);
+            }
             self.merged_engine
                 .set_keyspace_states(keyspace_id, ks.get_states().marshal())?
         };
