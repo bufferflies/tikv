@@ -1,20 +1,25 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    collections::VecDeque,
     convert::TryInto,
+    fmt::Debug,
     fs,
     io::{Read, Seek, SeekFrom},
     os::unix::fs::FileExt,
     path::PathBuf,
     sync::{
-        atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use engine_traits::ObjectStorage;
 use kvengine::dfs::{Dfs, S3Fs};
+use protobuf::Message;
+use rfenginepb::StoreBackupMeta;
 use slog_global::*;
 use tikv_util::{
     errors::{Context as _, IoError},
@@ -24,11 +29,14 @@ use tokio::task::JoinHandle;
 
 use crate::{
     compact_worker::CompactTask,
-    compress_lz4, decompress_lz4, decompress_lz4_to_buffer, get_integral_wal_chunks,
-    get_lz4_decompressed_size, last_wal_chunk_file_key,
+    compress_lz4, decompress_lz4, decompress_lz4_to_buffer, find_latest_snapshot,
+    get_integral_wal_chunks, get_lz4_decompressed_size, last_wal_chunk_file_key,
     manifest::Manifest,
     metrics::{self, RFENGINE_DFS_WORKER_HEALTHY_GAUGE},
-    wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name, Error, Result, WalChunkMeta,
+    parse_epoch_from_snapshot_key, snapshot_store_meta_key, wal_chunk_file_key,
+    wal_chunk_file_prefix, wal_file_name,
+    writer::EPOCH_SNAPSHOT_LEN,
+    Error, Result, WalChunkMeta, MAX_EPOCH_BACKWARD,
 };
 
 #[derive(Debug)]
@@ -67,10 +75,14 @@ impl LightweightBackupConfig {
     }
 }
 
-struct BackgroundUpload {
-    file_key: String,
+struct BackgroundWal {
+    chunk: WalChunkMeta,
+    join_handle: JoinHandle<Result<()>>,
+}
+
+struct BackgroundSnapshot {
     epoch_id: u32,
-    join_handle: JoinHandle<()>,
+    join_handle: JoinHandle<Result<()>>,
 }
 
 pub(crate) struct ObjectStorageWorker {
@@ -88,7 +100,16 @@ pub(crate) struct ObjectStorageWorker {
     s3fs: Arc<S3Fs>,
     healthy: Healthy,
     memory_limiter: MemoryLimiter,
-    background_uploads: Vec<BackgroundUpload>,
+    background_uploads: VecDeque<BackgroundWal>,
+    upload_results: VecDeque<(WalChunkMeta, bool)>,
+    preparing_snap: bool,
+    persisting_snap: Option<BackgroundSnapshot>,
+    persisted_snap_epoch: u32,
+
+    // When dfs worker failed to persist chunk, the healthy would be set to false and it will
+    // not be recovered until next success snapshot, so we skip the epoch before the next
+    // snapshot.
+    skip_sync_before_epoch: u32,
 }
 
 impl ObjectStorageWorker {
@@ -129,26 +150,38 @@ impl ObjectStorageWorker {
             s3fs,
             healthy: dfs_worker_healthy,
             memory_limiter,
-            background_uploads: vec![],
+            background_uploads: Default::default(),
+            upload_results: Default::default(),
+            preparing_snap: false,
+            persisting_snap: None,
+            persisted_snap_epoch: 0,
+            skip_sync_before_epoch: 0,
         }
     }
 
     // `init` will rebuild the last wal chunk persistence states. If no wal chunk
     // found in the epoch range from `epoch_id - 3` to `epoch_id`, trigger an
     // instant rfengine snapshot.
-    pub(crate) fn init(&mut self) -> Result<bool> {
-        self.healthy.set_healthy();
-        let mut need_snapshot = false;
+    pub(crate) fn init(&mut self) -> Result<()> {
         // Wait for node bootstrapped.
         info!("dfs worker wait for store bootstrapped.");
         let store_id = self.wait_for_bootstrapped();
         debug_assert!(store_id > 0);
         info!("{}: dfs worker start init.", store_id);
-        let mut rebuild_epoch = self.epoch_id;
+        self.init_snapshot();
+        if self.is_snap_lag_too_much() {
+            return Err(Error::Dfs("snapshot lag too much".to_string()));
+        }
+        // We start to check WAL integrity from the persisted_snap_epoch + 1, so if
+        // there is chunk missing and we not able to rebuild, the init failed and
+        // the healthy would be remain false.
+        let mut check_epoch = self.persisted_snap_epoch + 1;
         let store_id = self.get_engine_id();
-        let mut last_chunk = None;
         loop {
-            let scan_prefix = wal_chunk_file_prefix(store_id, rebuild_epoch);
+            if check_epoch >= self.epoch_id {
+                return Ok(());
+            }
+            let scan_prefix = wal_chunk_file_prefix(store_id, check_epoch);
             info!(
                 "{}: rebuild last wal chunk list chunks with prefix {}",
                 store_id, scan_prefix
@@ -157,55 +190,59 @@ impl ObjectStorageWorker {
             // Chunks in an epoch should be listed in one iterate.
             let (chunks, has_more) = self.s3fs.list_objects("", Some(&scan_prefix), None)?;
             debug_assert_eq!(has_more, None);
-            if !chunks.is_empty() {
-                let chunk_metas: Vec<WalChunkMeta> = chunks
-                    .into_iter()
-                    .filter_map(|x| {
-                        x.key
-                            .try_into()
-                            .map_err(|e| warn!("skip invalid WAL chunk: {:?}", e))
-                            .ok()
-                    })
-                    .collect();
-                if let Ok((mut integral_chunks, ..)) = get_integral_wal_chunks(&chunk_metas) {
-                    last_chunk = integral_chunks.pop();
-                    if last_chunk.is_some() {
-                        info!("{}: found integral wal chunks", store_id;
-                            "integral_chunks" => ?integral_chunks, "last_chunk" => ?last_chunk);
-                        break;
-                    }
+            let chunk_metas: Vec<WalChunkMeta> = chunks
+                .into_iter()
+                .filter_map(|x| {
+                    x.key
+                        .try_into()
+                        .map_err(|e| warn!("skip invalid WAL chunk: {:?}", e))
+                        .ok()
+                })
+                .collect();
+            let (integral_chunks, last_end_off, has_last) =
+                get_integral_wal_chunks(&chunk_metas, check_epoch);
+            for chunk in integral_chunks {
+                self.upload_results.push_back((chunk, true));
+            }
+            if has_last {
+                check_epoch += 1;
+                continue;
+            }
+            if check_epoch == self.epoch_id {
+                // It is the latest epoch, it is expected that has_last is false.
+                self.start_off = last_end_off;
+                self.sync_off = last_end_off;
+                return Ok(());
+            }
+            // Now the wal chunk of the current epoch is incomplete.
+            if check_epoch < self.near_overwritten_epoch() {
+                return Err(Error::Dfs("chunk lag too much".to_string()));
+            }
+            // By reset the epoch to an earlier one, we may rewrite the already uploaded
+            // WAL epoch files, but as we handle the overlap in get_integral_wal_chunks,
+            // it is ok.
+            self.reset(check_epoch);
+            return Ok(());
+        }
+    }
+
+    fn need_snapshot_after_init(&self) -> bool {
+        self.persisted_snap_epoch + EPOCH_SNAPSHOT_LEN <= self.epoch_id
+    }
+
+    fn init_snapshot(&mut self) {
+        let prefix = self.s3fs.get_prefix();
+        let store_id = self.get_engine_id();
+        match find_latest_snapshot(self.s3fs.clone(), &prefix, store_id, self.epoch_id) {
+            Ok(snap_key) => {
+                if let Some(snap_epoch) = parse_epoch_from_snapshot_key(snap_key.as_deref()) {
+                    self.persisted_snap_epoch = snap_epoch;
                 }
             }
-
-            if rebuild_epoch <= 1 || rebuild_epoch <= self.near_overwritten_epoch() {
-                need_snapshot = true;
-                break;
-            }
-            rebuild_epoch -= 1;
-        }
-        match last_chunk {
-            None => {
-                // Rebuild from the earliest epoch.
-                self.epoch_id = rebuild_epoch;
-                self.sync_off = 0;
-                self.start_off = 0;
-                info!(
-                    "{}: no wal chunk found, rebuild from epoch {}",
-                    store_id, rebuild_epoch
-                );
-            }
-            Some(chunk) => {
-                self.epoch_id = chunk.epoch;
-                self.start_off = chunk.end_off;
-                self.sync_off = chunk.end_off;
-                info!(
-                    "{}: found the last wal chunk {} rebuild from epoch {} offset {}",
-                    store_id, chunk.key, chunk.epoch, chunk.end_off
-                );
+            Err(err) => {
+                error!("{}: failed to find snapshot key: {}", store_id, err);
             }
         }
-
-        Ok(need_snapshot)
     }
 
     fn wait_for_bootstrapped(&self) -> u64 {
@@ -219,71 +256,182 @@ impl ObjectStorageWorker {
 
     pub(crate) fn run(&mut self) {
         match self.init() {
-            Ok(need_snapshot) => {
-                if need_snapshot {
+            Ok(()) => {
+                if self.need_snapshot_after_init() {
                     // Send task to compact worker to trigger a snapshot.
-                    self.compact_worker_tx.send(CompactTask::Snapshot).unwrap();
+                    self.compact_worker_tx
+                        .send(CompactTask::PrepareSnapshot)
+                        .unwrap();
+                    self.preparing_snap = true;
                 }
+                info!("dfs worker init ok, set healthy");
+                self.healthy.set_healthy();
             }
             Err(err) => {
-                // Disable lightweight backup if init failed.
-                error!("dfs worker init failed, set unhealthy"; "err" => ?err);
-                self.healthy.set_unhealthy(self.epoch_id, "init");
+                error!("dfs worker init failed, keep unhealthy"; "err" => ?err);
+                // calling set_unhealthy to update metrics to trigger alarm.
+                self.healthy.set_unhealthy();
+                // trigger snapshot to recover the healthy.
+                self.compact_worker_tx
+                    .send(CompactTask::PrepareSnapshot)
+                    .unwrap();
             }
         }
-        while let Ok(task) = self.task_rx.recv() {
+        loop {
+            let recv_res = self.task_rx.recv_timeout(Duration::from_millis(100));
+            self.try_wait_uploads();
+            self.try_wait_snap_and_recover_healthy();
+            let task = match recv_res {
+                Ok(task) => task,
+                Err(err) => {
+                    if err.is_timeout() {
+                        continue;
+                    }
+                    info!("ObjectStorageWorker recv error {:?}", err);
+                    return;
+                }
+            };
             if let ObjectStorageTask::Close = task {
                 info!("ObjectStorageWorker close");
                 return;
-            }
-
-            // If dfs worker is unhealthy, skip handle some tasks and downgrade to disable
-            // lightweight backup.
-            // Try to recover when receive snapshot task.
-            if !self
-                .healthy
-                .is_healthy(task.epoch_id().unwrap_or(self.epoch_id))
-            {
-                if let ObjectStorageTask::Rotate { epoch_id, .. } = task {
-                    // Reset to the new epoch. Otherwise, `handle_sync` will sync from previous
-                    // unhealthy epoch.
-                    self.reset(epoch_id + 1);
-                }
-                continue;
             }
             match task {
                 ObjectStorageTask::Sync { epoch_id, file_off } => {
                     if let Err(err) = self.handle_sync(epoch_id, file_off) {
                         error!("dfs worker handle_sync failed, set unhealthy"; "err" => ?err);
-                        self.healthy.set_unhealthy(epoch_id, "handle sync")
+                        self.set_unhealthy(epoch_id);
                     }
                 }
                 ObjectStorageTask::Rotate { epoch_id, file_off } => {
-                    if self.need_sync(epoch_id, file_off) {
+                    if self.need_sync_on_rotate(epoch_id, file_off) {
                         info!("{} dfs worker need sync before rotate", self.get_engine_id();
                             "current_epoch" => self.epoch_id, "current_sync_off" => self.sync_off,
                             "epoch_id" => epoch_id, "file_off" => file_off,
                         );
                         if let Err(err) = self.handle_sync(epoch_id, file_off) {
                             error!("dfs worker handle_sync failed, set unhealthy"; "err" => ?err);
-                            self.healthy.set_unhealthy(epoch_id, "handle sync");
+                            self.set_unhealthy(epoch_id);
                             return;
                         }
                     }
-                    if let Err(err) = self.handle_rotate(epoch_id) {
-                        error!("dfs worker handle_rotate failed, set unhealthy"; "err" => ?err);
-                        self.healthy.set_unhealthy(epoch_id, "handle rotate");
-                    }
+                    self.handle_rotate(epoch_id);
                 }
                 ObjectStorageTask::Flush => {
                     // Send flush task before close in normal case. If close without flush, we can
                     // construct the case for wal chunk recovery in random test.
-                    if !self.buf.is_empty() && self.next_chunk(false).is_err() {
-                        self.healthy.set_unhealthy(self.epoch_id, "handle flush");
+                    if !self.buf.is_empty() {
+                        self.next_chunk(false);
                     }
                     self.wait_uploads();
+                    self.wait_snap_and_recover_healthy();
+                }
+                ObjectStorageTask::Snapshot(res) => {
+                    self.preparing_snap = false;
+                    match res {
+                        Ok(prepared_snap) => {
+                            self.handle_snapshot(prepared_snap);
+                        }
+                        Err(err) => {
+                            error!("dfs worker prepare snapshot failed, set unhealthy"; "err" => ?err);
+                            self.set_unhealthy(self.epoch_id);
+                        }
+                    }
                 }
                 ObjectStorageTask::Close => unreachable!(),
+            }
+        }
+    }
+
+    fn try_wait_uploads(&mut self) {
+        while let Some(upload) = self.background_uploads.pop_front() {
+            if !upload.join_handle.is_finished() {
+                self.background_uploads.push_front(upload);
+                return;
+            }
+            self.wait_upload(upload);
+        }
+    }
+
+    fn wait_upload(&mut self, upload: BackgroundWal) {
+        let join_res = self.s3fs.get_runtime().block_on(upload.join_handle);
+        match join_res {
+            Ok(Ok(())) => {
+                self.upload_results.push_back((upload.chunk, true));
+            }
+            res => {
+                error!(
+                    "{} dfs worker put WAL chunk {:?} failed, error {:?}",
+                    self.get_engine_id(),
+                    upload.chunk,
+                    res,
+                );
+                self.set_unhealthy(upload.chunk.epoch);
+                self.upload_results.push_back((upload.chunk, false));
+            }
+        }
+    }
+
+    fn set_unhealthy(&mut self, failed_epoch: u32) {
+        let next_snap_epoch = Manifest::next_snapshot_epoch(failed_epoch);
+        if self.skip_sync_before_epoch < next_snap_epoch {
+            self.skip_sync_before_epoch = next_snap_epoch;
+        }
+        self.healthy.set_unhealthy();
+    }
+
+    fn try_wait_snap_and_recover_healthy(&mut self) {
+        if !self
+            .persisting_snap
+            .as_ref()
+            .is_some_and(|s| s.join_handle.is_finished())
+        {
+            return;
+        }
+        self.wait_snap_and_recover_healthy();
+    }
+
+    fn wait_snap_and_recover_healthy(&mut self) {
+        let Some(snap) = self.persisting_snap.take() else {
+            return;
+        };
+        self.upload_results
+            .retain(|(chunk, _)| chunk.epoch > snap.epoch_id);
+        let join_res = self.s3fs.get_runtime().block_on(snap.join_handle);
+        match join_res {
+            Ok(Ok(())) => {
+                info!(
+                    "{} dfs worker joined snapshot recovery",
+                    self.get_engine_id()
+                );
+                self.persisted_snap_epoch = snap.epoch_id;
+                if !self.healthy.is_healthy() {
+                    for (chunk, success) in self.upload_results.iter() {
+                        if !success {
+                            warn!(
+                                "{} dfs worker unable to recover healthy by snapshot {} as chunk {:?} failed",
+                                self.get_engine_id(),
+                                snap.epoch_id,
+                                chunk,
+                            );
+                            return;
+                        }
+                    }
+                    info!(
+                        "{} dfs worker recovered healthy by snapshot {}",
+                        self.get_engine_id(),
+                        snap.epoch_id
+                    );
+                    self.healthy.set_healthy();
+                }
+            }
+            res => {
+                error!(
+                    "dfs worker put snap epoch {} failed, error {:?}",
+                    snap.epoch_id, res
+                );
+                if self.is_snap_lag_too_much() {
+                    self.set_unhealthy(snap.epoch_id);
+                }
             }
         }
     }
@@ -310,27 +458,51 @@ impl ObjectStorageWorker {
         let file_key =
             last_wal_chunk_file_key(store_id, self.epoch_id, self.start_off, self.sync_off);
         let chunk = self.take_chunk_data()?;
-
+        let wal_chunk = self.new_wal_chunk(true);
         let fs = self.s3fs.clone();
-        let healthy = self.healthy.clone();
-        let acquired = self.memory_limiter.acquire(chunk.len())?;
-        let epoch_id = self.epoch_id;
-        self.s3fs.get_runtime().spawn_blocking(move || {
-            if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
-                error!("{} put wal chunk failed", store_id; "err" => ?err);
-                healthy.set_unhealthy(epoch_id, "put wal chunk");
-            }
-            drop(acquired);
+        let mut mem_limiter = self.memory_limiter.clone();
+        let handle = self.s3fs.get_runtime().spawn_blocking(move || {
+            let _acquired = mem_limiter.acquire(chunk.len())?;
+            metrics::RFENGINE_DFS_RUNNING_UPLOADS.inc();
+            let res = fs
+                .put_objects(vec![(file_key, Bytes::from(chunk))])
+                .map_err(|err| Error::Dfs(err));
+            metrics::RFENGINE_DFS_RUNNING_UPLOADS.dec();
+            res
         });
-
+        let bg_upload = BackgroundWal {
+            chunk: wal_chunk,
+            join_handle: handle,
+        };
+        self.background_uploads.push_back(bg_upload);
         Ok(())
     }
 
-    fn need_sync(&self, epoch_id: u32, file_off: u64) -> bool {
+    fn need_sync_on_rotate(&self, epoch_id: u32, file_off: u64) -> bool {
+        if self.skip_sync(epoch_id) {
+            return false;
+        }
         self.epoch_id < epoch_id || (self.epoch_id == epoch_id && self.sync_off < file_off)
     }
 
+    fn skip_sync(&self, epoch_id: u32) -> bool {
+        if epoch_id < self.skip_sync_before_epoch {
+            debug_assert!(
+                !self.healthy.is_healthy(),
+                "{} skip sync epoch {}, skip_sync_before {}",
+                self.get_engine_id(),
+                epoch_id,
+                self.skip_sync_before_epoch,
+            );
+            return true;
+        }
+        false
+    }
+
     fn handle_sync(&mut self, epoch_id: u32, file_off: u64) -> Result<()> {
+        if self.skip_sync(epoch_id) {
+            return Ok(());
+        }
         let store_id = self.get_engine_id();
 
         if (epoch_id, file_off) < (self.epoch_id, self.sync_off) {
@@ -379,7 +551,7 @@ impl ObjectStorageWorker {
                 "{}: handle_sync put wal epoch {} start_off {} sync_off {}",
                 store_id, epoch_id, self.start_off, self.sync_off
             );
-            self.next_chunk(false)?;
+            self.next_chunk(false);
         }
 
         // Sync WAL of `epoch_id` from `self.sync_off` to file_off
@@ -440,13 +612,65 @@ impl ObjectStorageWorker {
         }
     }
 
-    fn handle_rotate(&mut self, epoch_id: u32) -> Result<()> {
+    fn handle_rotate(&mut self, epoch_id: u32) {
         debug!("{}: handle_rotate epoch {}", self.get_engine_id(), epoch_id);
-        // Call next_chunk even self.buf is empty. This can cover the case the last
-        // chunk flushed during stop with no `.last` suffix.
-        let res = self.next_chunk(true);
+        if self.skip_sync_before_epoch <= epoch_id {
+            // Call next_chunk even self.buf is empty. This can cover the case the last
+            // chunk flushed during stop with no `.last` suffix.
+            self.next_chunk(true);
+        }
         self.reset(epoch_id + 1);
-        res
+        if epoch_id % EPOCH_SNAPSHOT_LEN == 0 {
+            if self.preparing_snap {
+                warn!(
+                    "{}: prepare_snap not finished, skip snap epoch {}",
+                    self.get_engine_id(),
+                    epoch_id
+                );
+                return;
+            }
+            if self.persisting_snap.is_some() {
+                warn!(
+                    "{}: persisting_snap not finished, skip snap epoch {}",
+                    self.get_engine_id(),
+                    epoch_id
+                );
+                return;
+            }
+            let _ = self.compact_worker_tx.send(CompactTask::PrepareSnapshot);
+            self.preparing_snap = true;
+        }
+    }
+
+    fn is_snap_lag_too_much(&self) -> bool {
+        self.persisted_snap_epoch + MAX_EPOCH_BACKWARD <= self.epoch_id
+    }
+
+    fn handle_snapshot(&mut self, prepared_snap: PreparedSnapshot) {
+        let engine_id = self.get_engine_id();
+        let epoch_id = prepared_snap.store_meta.epoch;
+        // Also need snapshot backup_meta.
+        let meta_key = snapshot_store_meta_key(engine_id, epoch_id);
+        let meta_data = prepared_snap.store_meta.write_to_bytes().unwrap();
+        let meta_obj = (meta_key, Bytes::from(meta_data));
+
+        // `rlog_obj` should be written to DFS at the end, as we scan for latest
+        // snapshot by the rlog object.
+        // See https://github.com/tidbcloud/cloud-storage-engine/issues/1840.
+        let s3fs = self.s3fs.clone();
+        let join_handle: JoinHandle<Result<()>> = self.s3fs.get_runtime().spawn_blocking(move || {
+                for obj in [meta_obj, prepared_snap.rlog_obj] {
+                    if let Err(err) = s3fs.put_objects(vec![obj]) {
+                        error!("{} put snapshot object failed", engine_id; "err" => ?err, "epoch" => epoch_id);
+                        return Err(Error::Dfs(err));
+                    }
+                }
+                Ok(())
+            });
+        self.persisting_snap = Some(BackgroundSnapshot {
+            epoch_id,
+            join_handle,
+        });
     }
 
     pub(crate) fn should_chunk(&mut self, to_read: usize) -> bool {
@@ -490,79 +714,63 @@ impl ObjectStorageWorker {
         res
     }
 
-    fn wait_an_upload(&self, upload: BackgroundUpload) {
-        match self.s3fs.get_runtime().block_on(upload.join_handle) {
-            Ok(()) => info!("noticed an upload has finished."; "tag" => upload.file_key),
-            Err(err) => {
-                let msg = format!(
-                    "wait_an_upload: background task exits abnormally: {}",
-                    upload.file_key
-                );
-                error!("wait_an_upload failed"; "err" => ?err, "tag" => upload.file_key);
-                self.healthy.set_unhealthy(upload.epoch_id, &msg);
-            }
-        }
-    }
-
-    /// Remove finished background uploads.
-    /// Won't block on unfinished uploads.
-    fn gc_finished_uploads(&mut self) {
-        let finished = self
-            .background_uploads
-            .extract_if(|upload| upload.join_handle.is_finished())
-            .collect::<Vec<_>>();
-
-        finished.into_iter().for_each(|v| self.wait_an_upload(v));
-    }
-
     /// Wait all background uploads to finish.
     fn wait_uploads(&mut self) {
         std::mem::take(&mut self.background_uploads)
             .into_iter()
-            .for_each(|upload| self.wait_an_upload(upload));
+            .for_each(|upload| self.wait_upload(upload));
     }
 
-    fn next_chunk(&mut self, rotate: bool) -> Result<()> {
+    fn new_wal_chunk(&self, rotate: bool) -> WalChunkMeta {
         let store_id = self.get_engine_id();
-        let file_key = if rotate {
+        let key = if rotate {
             last_wal_chunk_file_key(store_id, self.epoch_id, self.start_off, self.sync_off)
         } else {
             wal_chunk_file_key(store_id, self.epoch_id, self.start_off, self.sync_off)
         };
+        WalChunkMeta {
+            key,
+            epoch: self.epoch_id,
+            start_off: self.start_off,
+            end_off: self.sync_off,
+            last: rotate,
+        }
+    }
+
+    fn next_chunk(&mut self, rotate: bool) {
+        let store_id = self.get_engine_id();
+        let wal_chunk = self.new_wal_chunk(rotate);
+        let file_key = wal_chunk.key.clone();
         let buf_len = self.buf.len();
-        let chunk = self.take_chunk_data()?;
-        info!(
-            "{}: put wal chunk {} len {} compress len {}",
-            store_id,
-            file_key,
-            ChunkHeader::len() + buf_len,
-            chunk.len()
-        );
+        let chunk_res = self.take_chunk_data();
+        // chunk_res return only compress_lz4 error which is very unlikely.
+        // So we keep the the error handling logic in one place for simplicity.
         let fs = self.s3fs.clone();
-        let healthy = self.healthy.clone();
-        let acquired = self.memory_limiter.acquire(chunk.len())?;
-        let epoch_id = self.epoch_id;
-        metrics::RFENGINE_DFS_RUNNING_UPLOADS.inc();
+        let mut mem_limiter = self.memory_limiter.clone();
         let handle = {
-            let file_key = file_key.clone();
             self.s3fs.get_runtime().spawn_blocking(move || {
-                if let Err(err) = fs.put_objects(vec![(file_key, Bytes::from(chunk))]) {
-                    error!("{} put wal chunk failed", store_id, ; "err" => ?err);
-                    healthy.set_unhealthy(epoch_id, "put wal chunk");
-                }
+                let chunk = chunk_res?;
+                info!(
+                    "{}: put wal chunk {} len {} compress len {}",
+                    store_id,
+                    file_key,
+                    ChunkHeader::len() + buf_len,
+                    chunk.len()
+                );
+                let _acquired = mem_limiter.acquire(chunk.len())?;
+                metrics::RFENGINE_DFS_RUNNING_UPLOADS.inc();
+                let res = fs
+                    .put_objects(vec![(file_key, Bytes::from(chunk))])
+                    .map_err(|err| Error::Dfs(err));
                 metrics::RFENGINE_DFS_RUNNING_UPLOADS.dec();
-                drop(acquired);
+                res
             })
         };
-
-        self.gc_finished_uploads();
-        let bg_upload = BackgroundUpload {
-            file_key,
-            epoch_id,
+        let bg_upload = BackgroundWal {
+            chunk: wal_chunk,
             join_handle: handle,
         };
-        self.background_uploads.push(bg_upload);
-        Ok(())
+        self.background_uploads.push_back(bg_upload);
     }
 
     fn need_compression(&self) -> bool {
@@ -716,60 +924,53 @@ impl ChunkHeader {
 pub(crate) enum ObjectStorageTask {
     Sync { epoch_id: u32, file_off: u64 }, // Sync the `epoch_id` wal file to `file_off`.
     Rotate { epoch_id: u32, file_off: u64 }, // Rotate to next epoch.
-    Flush,                                 // Trigger flush the last chunk, mainly for test.
+    Snapshot(Result<PreparedSnapshot>),
+    Flush, // Trigger flush the last chunk, mainly for test.
     Close,
 }
 
-impl ObjectStorageTask {
-    fn epoch_id(&self) -> Option<u32> {
-        match self {
-            Self::Sync { epoch_id, .. } | Self::Rotate { epoch_id, .. } => Some(*epoch_id),
-            Self::Flush | Self::Close => None,
-        }
+pub(crate) struct PreparedSnapshot {
+    pub(crate) store_meta: StoreBackupMeta,
+    pub(crate) rlog_obj: (String, Bytes),
+}
+
+impl Debug for PreparedSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PreparedSnapshot epoch {}", self.store_meta.epoch)
     }
 }
 
+/// Healthy is read by ServiceWorker on handle backup request.
+/// On start up the default healthy is false until the DfsWorker init.
+/// When dfs worker failed to persist the WAL chunk or snapshot, it is set to
+/// unhealthy. It will be recovered to healthy after persisted a snapshot.
 #[derive(Clone)]
-pub(crate) struct Healthy(
-    Arc<AtomicU32>, // The epoch id since which DFS worker is healthy.
-);
+pub(crate) struct Healthy(Arc<AtomicBool>);
 
 impl Default for Healthy {
     fn default() -> Self {
-        Self(Arc::new(AtomicU32::new(0)))
+        Self(Arc::new(AtomicBool::new(false)))
     }
 }
 
 impl Healthy {
     pub(crate) fn set_healthy(&self) {
         RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(1);
-        self.0.store(0, Ordering::Release);
+        self.0.store(true, Ordering::Release);
     }
 
-    pub(crate) fn set_unhealthy(&self, current_epoch: u32, ctx: &str) {
+    pub(crate) fn set_unhealthy(&self) {
         RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(0);
-        let next_snapshot_epoch = Manifest::next_snapshot_epoch(current_epoch);
-        self.0.fetch_max(next_snapshot_epoch, Ordering::Release);
-        warn!("dfs worker unhealthy"; "ctx" => ctx,
-            "current_epoch" => current_epoch, "next_snapshot" => next_snapshot_epoch);
-
+        self.0.store(false, Ordering::Release);
+        warn!("dfs worker unhealthy");
         #[cfg(feature = "testexport")]
         {
             crate::metrics::RFENGINE_DFS_WORKER_BECOME_UNHEALTHY_COUNTER.inc();
         }
     }
 
-    pub(crate) fn is_healthy(&self, current_epoch: u32) -> bool {
-        current_epoch >= self.0.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn check_healthy(&self, current_epoch: u32) -> bool {
-        let ok = self.is_healthy(current_epoch);
-        if ok {
-            info!("dfs worker become healthy"; "epoch" => current_epoch);
-            RFENGINE_DFS_WORKER_HEALTHY_GAUGE.set(1);
-        }
-        ok
+    pub(crate) fn is_healthy(&self) -> bool {
+        self.0.load(Ordering::Acquire)
     }
 }
 

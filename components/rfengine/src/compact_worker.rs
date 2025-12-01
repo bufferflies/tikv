@@ -32,9 +32,7 @@ use slog_global::*;
 use tikv_util::{
     backoff,
     mpsc::{Receiver, SendError, Sender},
-    sys::thread::StdThreadBuildWrapper,
     time::Instant,
-    DFS_WORKER_THREAD_NAME,
 };
 
 use crate::{
@@ -71,24 +69,14 @@ pub(crate) struct CompactWorker {
     dir: PathBuf,
     manifest: Manifest,
     task_rx: Receiver<CompactTask>,
-    snap_task_handle: Option<
-        JoinHandle<
-            std::result::Result<
-                u32,           // epoch_id
-                (u32, String), // epoch_id, err
-            >,
-        >,
-    >,
+    snap_tx: Sender<ObjectStorageTask>,
     buf: Vec<u8>,
     compacted_epoch: Arc<AtomicU32>,
-    s3fs: Option<Arc<S3Fs>>,
-    last_snap_epoch_id: u32,
     epoch_rotate_len: usize,
 
     // Used to cache small rlogs to reduce disk IO when taking snapshot.
     rlog_cache: RlogCache,
     rlog_compression_type: CompressionType,
-    healthy: Healthy,
 
     rate_limiter: Option<Arc<IoRateLimiter>>,
     sync_concurrency: usize,
@@ -104,21 +92,19 @@ impl CompactWorker {
         dir: PathBuf,
         cfg: &RfEngineConfig,
         task_rx: Receiver<CompactTask>,
+        snap_tx: Sender<ObjectStorageTask>,
         manifest: Manifest,
         compacted_epoch: Arc<AtomicU32>,
         lightweight_backup: Option<&(LightweightBackupConfig, Arc<S3Fs>)>,
-        healthy: Healthy,
         rate_limiter: Option<Arc<IoRateLimiter>>,
     ) -> Self {
-        // Create new thread for object storage worker if lightweight backup enabled.
-        let (rlog_cache, compress_type, s3fs) = if let Some((config, s3fs)) = lightweight_backup {
+        let (rlog_cache, compress_type) = if let Some((config, _)) = lightweight_backup {
             (
                 RlogCache::new(config.rlog_cache_capacity, config.rlog_cache_size_threshold),
                 config.rlog_compression_type,
-                Some(s3fs.clone()),
             )
         } else {
-            (RlogCache::none(), CompressionType::NoCompression, None)
+            (RlogCache::none(), CompressionType::NoCompression)
         };
         let epoch_rotate_len = cfg.epoch_rotate_len;
         let sync_concurrency = cfg.compact_wal_sync_concurrency;
@@ -127,15 +113,12 @@ impl CompactWorker {
             dir,
             manifest,
             task_rx,
-            snap_task_handle: None,
+            snap_tx,
             buf: vec![],
             compacted_epoch,
-            s3fs,
-            last_snap_epoch_id: 0,
             epoch_rotate_len,
             rlog_cache,
             rlog_compression_type: compress_type,
-            healthy,
             rate_limiter,
             sync_concurrency,
             files_to_sync: vec![],
@@ -143,31 +126,15 @@ impl CompactWorker {
         }
     }
 
-    pub(crate) fn is_lightweight_enabled(&self) -> bool {
-        self.s3fs.is_some()
-    }
-
     pub(crate) fn run(&mut self) {
         while let Ok(task) = self.task_rx.recv() {
             match task {
                 CompactTask::Compact { epoch_id } => self.handle_compact(epoch_id),
                 CompactTask::HeavyBackup(task) => self.handle_heavy_backup(task),
-                CompactTask::Snapshot => {
-                    self.handle_snapshot();
+                CompactTask::PrepareSnapshot => {
+                    self.handle_prepare_snapshot_backup();
                 }
-                CompactTask::Close { force } => {
-                    self.handle_close(force);
-                    return;
-                }
-            }
-        }
-    }
-
-    fn handle_close(&mut self, force: bool) {
-        // Close and join snapshot task thread.
-        if let Some(snap_handle) = self.snap_task_handle.take() {
-            if !force {
-                let _ = snap_handle.join().unwrap();
+                CompactTask::Close => return,
             }
         }
     }
@@ -219,17 +186,6 @@ impl CompactWorker {
             self.handle_compact_with_backoff(epoch_id);
             info!("handle compact {} success after retry", epoch_id);
         }
-
-        if self.manifest.should_snapshot() {
-            self.handle_snapshot();
-        }
-    }
-
-    fn handle_snapshot(&mut self) {
-        if !self.is_lightweight_enabled() {
-            return;
-        }
-        self.snapshot_backup();
     }
 
     fn compact(&mut self, epoch_id: u32) -> Result<()> {
@@ -399,100 +355,47 @@ impl CompactWorker {
         Ok((file, is_cached))
     }
 
-    fn snapshot_backup(&mut self) {
-        self.try_join_snap_task();
+    fn handle_prepare_snapshot_backup(&mut self) {
         let engine_id = self.manifest.get_engine_id();
-        if self.has_unfinished_snap_task() {
-            self.healthy
-                .set_unhealthy(self.manifest.epoch_id, "snapshot task unfinished");
-            warn!("{}: snapshot task unfinished", engine_id);
-        }
-        if !self.healthy.check_healthy(self.manifest.epoch_id) {
-            warn!("{}: skip unhealthy snapshot backup", engine_id);
-            return;
-        }
         let timer = Instant::now_coarse();
-        info!("{}: start snapshot task", engine_id);
+        let epoch_id = self.manifest.epoch_id;
+        info!("{}: start snapshot task, epoch {}", engine_id, epoch_id);
         let mut backup_meta = StoreBackupMeta::default();
         backup_meta.set_store_id(engine_id);
+        backup_meta.set_epoch(epoch_id);
 
         let manifest = self.manifest.to_change_set(true); // Exclude tombstone peers.
         let rlog_obj_res = self.backup_raft_log_files(&manifest, &mut backup_meta, true);
         if rlog_obj_res.is_err() {
+            let rlog_obj_err = rlog_obj_res.unwrap_err();
             warn!(
                 "{}: create snapshot rlog file failed {:?}",
-                engine_id,
-                rlog_obj_res.unwrap_err()
+                engine_id, rlog_obj_err
             );
-            self.healthy
-                .set_unhealthy(self.manifest.epoch_id, "create snapshot rlog");
+            let _ = self
+                .snap_tx
+                .send(ObjectStorageTask::Snapshot(Err(rlog_obj_err)));
             return;
         }
         let rlog_obj = rlog_obj_res.unwrap();
-        // manifest epoch id already increased by 1.
-        let epoch_id = manifest.get_epoch_id();
         backup_meta.set_manifest(manifest);
         let duration = timer.saturating_elapsed();
         info!(
-            "snapshot backup write file size: {}, raft meta offset {}, takes {:?}",
+            "{}: snapshot backup epoch {} prepare rlog file size: {}, raft meta offset {}, takes {:?}",
+            engine_id,
+            epoch_id,
             rlog_obj.1.len(),
             backup_meta.raft_meta_start_off,
             duration,
         );
         ENGINE_TAKE_SNAPSHOT_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
-
-        // Also need snapshot backup_meta.
-        let meta_key = snapshot_store_meta_key(engine_id, epoch_id);
-        let meta_data = backup_meta.write_to_bytes().unwrap();
-        let meta_obj = (meta_key, Bytes::from(meta_data));
-
-        // `rlog_obj` should be written to DFS at the end, as we scan for latest
-        // snapshot by the rlog object.
-        // See https://github.com/tidbcloud/cloud-storage-engine/issues/1840.
-        let s3fs = self.s3fs.as_ref().unwrap().clone();
-        // We use the same DFS_WORKER_THREAD_NAME thread name to make panic mark file
-        // work.
-        let snap_task_handle = thread::Builder::new()
-            .name(DFS_WORKER_THREAD_NAME.into())
-            .spawn_wrapper(move || {
-                for obj in [meta_obj, rlog_obj] {
-                    if let Err(err) = s3fs.put_objects(vec![obj]) {
-                        error!("{} put snapshot object failed", engine_id; "err" => ?err, "epoch" => epoch_id);
-                        return Err((epoch_id, err));
-                    }
-                }
-                Ok(epoch_id)
-            })
-            .unwrap();
-        self.snap_task_handle = Some(snap_task_handle);
-    }
-
-    fn try_join_snap_task(&mut self) {
-        if self
-            .snap_task_handle
-            .as_ref()
-            .map(|h| h.is_finished())
-            .unwrap_or_default()
-        {
-            let handle = self.snap_task_handle.take().unwrap();
-            match handle.join().unwrap() {
-                Ok(epoch_id) => {
-                    self.last_snap_epoch_id = epoch_id;
-                }
-                Err((epoch_id, err)) => {
-                    self.healthy.set_unhealthy(epoch_id, "join snapshot task");
-                    let engine_id = self.manifest.get_engine_id();
-                    error!("{} joined snapshot task failed {:?}", engine_id, err);
-                }
-            }
-        }
-    }
-
-    fn has_unfinished_snap_task(&self) -> bool {
-        self.snap_task_handle
-            .as_ref()
-            .map(|h| !h.is_finished())
-            .unwrap_or_default()
+        let prepared_snap = PreparedSnapshot {
+            store_meta: backup_meta,
+            rlog_obj,
+        };
+        let _ = self
+            .snap_tx
+            .send(ObjectStorageTask::Snapshot(Ok(prepared_snap)));
     }
 
     fn full_backup(&mut self, task: BackupTask) {
@@ -881,8 +784,8 @@ pub(crate) fn wal_file_name(dir: &Path, epoch_id: u32, epoch_rotate_len: usize) 
 pub(crate) enum CompactTask {
     Compact { epoch_id: u32 },
     HeavyBackup(BackupTask),
-    Close { force: bool },
-    Snapshot,
+    PrepareSnapshot,
+    Close,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -1087,7 +990,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        dfs_worker,
         log_batch::{RaftLogOp, RaftLogs},
         manifest::{persist_change_set, Manifest},
         raft_log_file_name, region_state_key, store_raft_log_file_key,
@@ -1135,6 +1037,7 @@ mod tests {
         let tmp_path = tmp_dir.path();
         defer!(fs::remove_dir_all(tmp_path).unwrap());
         let (_, rx) = tikv_util::mpsc::unbounded();
+        let (dfs_tx, _dfs_rx) = tikv_util::mpsc::unbounded();
         let engine_id = 999;
         let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
         let cfg = RfEngineConfig::default();
@@ -1142,10 +1045,10 @@ mod tests {
             tmp_path.to_path_buf(),
             &cfg,
             rx,
+            dfs_tx,
             manifest,
             AtomicU32::new(0).into(),
             None,
-            dfs_worker::Healthy::default(),
             None,
         );
         worker.rlog_cache = if with_cache {
@@ -1286,6 +1189,7 @@ mod tests {
         let tmp_path = tmp_dir.path();
         defer!(fs::remove_dir_all(tmp_path).unwrap());
         let (_, rx) = tikv_util::mpsc::unbounded();
+        let (dfs_tx, _dfs_rx) = tikv_util::mpsc::unbounded();
         let engine_id = 1999;
         let manifest = Manifest::open(tmp_path, AtomicU64::new(engine_id).into()).unwrap();
         let cfg = RfEngineConfig::default();
@@ -1293,10 +1197,10 @@ mod tests {
             tmp_path.to_path_buf(),
             &cfg,
             rx,
+            dfs_tx,
             manifest,
             AtomicU32::new(0).into(),
             None,
-            dfs_worker::Healthy::default(),
             None,
         );
         worker.rlog_cache = if with_cache {
@@ -1435,6 +1339,7 @@ mod tests {
         let tmp_path = tmp_dir.path();
         defer!(fs::remove_dir_all(tmp_path).unwrap());
         let (_, rx) = tikv_util::mpsc::unbounded();
+        let (dfs_tx, _dfs_rx) = tikv_util::mpsc::unbounded();
 
         let manifest = Manifest::open(tmp_path, AtomicU64::new(1).into()).unwrap();
         let mut cfg = RfEngineConfig::default();
@@ -1443,10 +1348,10 @@ mod tests {
             tmp_path.to_path_buf(),
             &cfg,
             rx,
+            dfs_tx,
             manifest,
             AtomicU32::new(0).into(),
             None,
-            dfs_worker::Healthy::default(),
             None,
         );
 

@@ -583,28 +583,21 @@ fn collect_wal_chunk_metas(
 
     // Get integral WAL chunk files.
     let check_last = end_off == u64::MAX;
-    match get_integral_wal_chunks(&chunk_metas) {
-        Ok((integral_chunks, last_end_off, has_last_chunk)) => {
-            let ok = if check_last {
-                has_last_chunk
-            } else {
-                last_end_off >= end_off
-            };
-            if ok {
-                Ok((integral_chunks, last_end_off))
-            } else {
-                error!("{} collect wal chunk keys: chunks not ready", tag;
-                    "epoch" => epoch_id, "end_off" => end_off, "last_end_off" => last_end_off, "integral_chunks" => ?integral_chunks);
-                Err(Error::WalChunkIntegrityError(format!(
-                    "chunks not ready for offset {end_off}"
-                )))
-            }
-        }
-        Err(msg) => {
-            error!("{} collect wal chunk keys: integrity check failed", tag;
-                "epoch" => epoch_id, "end_off" => end_off, "chunks" => ?chunk_metas, "msg" => &msg);
-            Err(Error::WalChunkIntegrityError(msg))
-        }
+    let (integral_chunks, last_end_off, has_last_chunk) =
+        get_integral_wal_chunks(&chunk_metas, epoch_id);
+    let ok = if check_last {
+        has_last_chunk
+    } else {
+        last_end_off >= end_off
+    };
+    if ok {
+        Ok((integral_chunks, last_end_off))
+    } else {
+        error!("{} collect wal chunk keys: chunks not ready", tag;
+            "epoch" => epoch_id, "end_off" => end_off, "last_end_off" => last_end_off, "integral_chunks" => ?integral_chunks);
+        Err(Error::WalChunkIntegrityError(format!(
+            "chunks not ready for offset {end_off}"
+        )))
     }
 }
 
@@ -951,7 +944,7 @@ pub fn collect_snapshot_meta_rlog_files(
         "try to find snapshot before backup epoch {} for store {} ",
         epoch_id, store_id,
     );
-    let snap_key = find_latest_snapshot(dfs.clone(), prefix, store_meta)?;
+    let snap_key = find_latest_snapshot(dfs.clone(), prefix, store_id, epoch_id)?;
     let snap_epoch = parse_epoch_from_snapshot_key(snap_key.as_deref());
     if snap_epoch.is_none() {
         // If no snapshot available and the epoch_id > MAX_EPOCH_BACKWARD, it means

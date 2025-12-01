@@ -89,6 +89,8 @@ pub enum Error {
     MaxBatchSizeExceeded,
     #[error("Other error: {0}")]
     Other(String),
+    #[error("dfs error: {0}")]
+    Dfs(String),
 }
 
 impl From<std::io::Error> for Error {

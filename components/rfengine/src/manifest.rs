@@ -273,13 +273,6 @@ impl Manifest {
         self.engine_id.load(Ordering::SeqCst)
     }
 
-    /// Check if we should do snapshot in `handle_rotate`.
-    ///
-    /// We only do snapshot every EPOCH_ROTATE_LEN(4) epochs.
-    pub(crate) fn should_snapshot(&self) -> bool {
-        self.epoch_id % EPOCH_SNAPSHOT_LEN == 0
-    }
-
     /// The epoch of next snapshot.
     pub(crate) fn next_snapshot_epoch(epoch_id: u32) -> u32 {
         epoch_id.saturating_add(EPOCH_SNAPSHOT_LEN) / EPOCH_SNAPSHOT_LEN * EPOCH_SNAPSHOT_LEN

@@ -122,14 +122,15 @@ impl ServiceWorker {
     ) -> Self {
         let engine_id = manifest.engine_id.clone();
         let (compact_worker_tx, compact_rx) = tikv_util::mpsc::unbounded();
+        let (dfs_worker_tx, dfs_worker_rx) = tikv_util::mpsc::unbounded();
         let mut compact_worker = CompactWorker::new(
             dir.clone(),
             cfg,
             compact_rx,
+            dfs_worker_tx.clone(),
             manifest,
             compacted_epoch.clone(),
             lightweight_backup.as_ref(),
-            healthy.clone(),
             compact_rate_limiter,
         );
         let handle = std::thread::Builder::new()
@@ -144,7 +145,6 @@ impl ServiceWorker {
 
         let service_worker_epoch = Arc::new(AtomicU32::new(epoch_id));
         let dfs_worker_handle = if let Some((cfg, s3fs)) = lightweight_backup {
-            let (dfs_worker_tx, dfs_worker_rx) = tikv_util::mpsc::unbounded();
             let mut dfs_worker = ObjectStorageWorker::new(
                 cfg,
                 s3fs,
@@ -382,8 +382,7 @@ impl ServiceWorker {
             dfs_worker_handle.try_send(ObjectStorageTask::Close);
             dfs_worker_handle.handle.join().unwrap();
         }
-        self.compact_worker_handle
-            .try_send(CompactTask::Close { force });
+        self.compact_worker_handle.try_send(CompactTask::Close);
         let join_handle = self.compact_worker_handle.handle.take().unwrap();
         join_handle.join().unwrap();
     }
@@ -411,7 +410,7 @@ impl ServiceWorker {
         }
         let async_writer = self.async_wal_writer.as_ref().unwrap();
 
-        if !self.dfs_worker_healthy.is_healthy(async_writer.epoch_id) {
+        if !self.dfs_worker_healthy.is_healthy() {
             return backup_callback(
                 task,
                 Err(Error::DfsWorkerUnhealthy {

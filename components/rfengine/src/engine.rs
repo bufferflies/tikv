@@ -51,7 +51,7 @@ pub const MIN_EPOCH_ROTATE_LEN: usize = 4;
 pub const MAX_EPOCH_ROTATE_LEN: usize = 32;
 
 pub const TRUNCATE_ALL_INDEX: u64 = u64::MAX;
-pub const MAX_EPOCH_BACKWARD: u32 = 100;
+pub const MAX_EPOCH_BACKWARD: u32 = 64;
 pub const MIN_RLOG_FILE_SIZE: u64 = 16 * 1024 * 1024; // 16MB
 
 /// `RfEngine` is a persistent storage engine for multi-raft logs.
@@ -150,6 +150,8 @@ pub struct RfEngineCore {
 
     pub(crate) lightweight: bool,
 
+    pub(crate) dfs_worker_healthy: Healthy,
+
     pub(crate) epoch_rotate_len: usize,
 
     // Initializes current epoch id during loading engine and update it after wal rotation of sync
@@ -238,6 +240,7 @@ impl RfEngineCore {
             service_worker_handle: Mutex::new(None),
             engine_id,
             lightweight: cfg.lightweight_backup,
+            dfs_worker_healthy: dfs_worker_healthy.clone(),
             epoch_rotate_len: cfg.epoch_rotate_len,
             current_epoch_id: Arc::new(AtomicU32::new(0)),
             compacted_epoch: compacted_epoch.clone(),
@@ -267,9 +270,8 @@ impl RfEngineCore {
                     None
                 } else if data_dir.is_some() && panic_mark_dfs_worker_file_exists(data_dir.unwrap())
                 {
-                    // If panic_mark_dfs_worker_file exists, skip init dfs worker thread and mark
-                    // dfs worker unhealthy.
-                    dfs_worker_healthy.set_unhealthy(u32::MAX, "open");
+                    // If panic_mark_dfs_worker_file exists, skip init dfs worker thread.
+                    en.dfs_worker_healthy.set_unhealthy();
                     error!(
                         "lightweight backup is enabled, but panic_mark_dfs_worker_file exists, skip init dfs worker thread"
                     );
@@ -541,6 +543,10 @@ impl RfEngineCore {
         self.lightweight
     }
 
+    pub fn is_dfs_worker_healthy(&self) -> bool {
+        self.dfs_worker_healthy.is_healthy()
+    }
+
     pub(crate) fn try_send_task(&self, task: ServiceTask) {
         if let Err(SendError(task)) = self.task_sender.send(task) {
             warn!("send service task failed: {:?}", task);
@@ -678,15 +684,14 @@ fn restore_keyspace_raft_logs(
 pub fn find_latest_snapshot(
     object_storage: Arc<dyn ObjectStorage>,
     prefix: &str,
-    store_meta: &StoreBackupMeta,
+    store_id: u64,
+    epoch_id: u32,
 ) -> Result<Option<String>> {
-    let epoch_id = store_meta.get_epoch();
     let start_epoch = if epoch_id > MAX_EPOCH_BACKWARD {
         epoch_id - MAX_EPOCH_BACKWARD
     } else {
         1
     };
-    let store_id = store_meta.get_store_id();
 
     // Find the latest snapshot smaller than cluster_backup epoch.
     let snapshot = match object_storage.list_objects(

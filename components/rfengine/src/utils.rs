@@ -1,9 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    path::{Path, PathBuf},
-    result::Result as StdResult,
-};
+use std::path::{Path, PathBuf};
 
 use api_version::ApiV2;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -215,25 +212,21 @@ impl std::convert::TryFrom<String> for WalChunkMeta {
 /// See https://github.com/tidbcloud/cloud-storage-engine/issues/2033 for details.
 pub fn get_integral_wal_chunks(
     chunks: &[WalChunkMeta],
-) -> StdResult<
-    (
-        Vec<WalChunkMeta>, // integral_chunks
-        u64,               // last_end_off
-        bool,              // has_last_chunk
-    ),
-    String, // err_msg
-> {
+    epoch_id: u32,
+) -> (
+    Vec<WalChunkMeta>, // integral_chunks
+    u64,               // last_end_off
+    bool,              // has_last_chunk
+) {
     if chunks.is_empty() {
-        return Ok((vec![], 0, false));
+        return (vec![], 0, false);
     }
 
     let first_chunk = chunks.first().unwrap();
     if first_chunk.start_off != 0 {
         // Return as no chunk.
-        return Ok((vec![], 0, false));
+        return (vec![], 0, false);
     }
-
-    let wal_epoch = first_chunk.epoch;
     let mut last_start_off = first_chunk.start_off;
     let mut last_end_off = first_chunk.end_off;
     let mut has_last_chunk = first_chunk.last;
@@ -242,11 +235,8 @@ pub fn get_integral_wal_chunks(
     integral_chunks.push(first_chunk.clone());
 
     for chunk in chunks.iter().skip(1) {
-        if chunk.epoch != wal_epoch {
-            return Err(format!(
-                "epoch mismatch: {} != {}: {:?}",
-                chunk.epoch, wal_epoch, chunk
-            ));
+        if chunk.epoch != epoch_id {
+            continue;
         }
 
         if chunk.start_off == last_end_off {
@@ -279,7 +269,7 @@ pub fn get_integral_wal_chunks(
             "all_chunks" => ?chunks,
         );
     }
-    Ok((integral_chunks, last_end_off, has_last_chunk))
+    (integral_chunks, last_end_off, has_last_chunk)
 }
 
 pub fn wal_chunk_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) -> String {
@@ -619,17 +609,9 @@ mod tests {
             let chunks = make_chunks(chunks);
             let expected_chunks = pick_chunks(&chunks, expected);
             assert_eq!(
-                get_integral_wal_chunks(&chunks).unwrap(),
+                get_integral_wal_chunks(&chunks, 1),
                 (expected_chunks, last_end_off, has_last_chunk)
             );
-        }
-
-        let err_cases: Vec<Vec<WalChunkMeta>> = vec![vec![
-            wal_chunk_file_key(1, 1, 0, 100).try_into().unwrap(),
-            wal_chunk_file_key(1, 10, 100, 200).try_into().unwrap(),
-        ]];
-        for chunks in err_cases {
-            get_integral_wal_chunks(&chunks).unwrap_err();
         }
     }
 }

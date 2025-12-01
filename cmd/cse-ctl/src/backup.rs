@@ -141,7 +141,8 @@ pub fn execute_show_backup(args: ShowBackupArgs) {
                 let snap_key = rfengine::find_latest_snapshot(
                     object_storage.clone(),
                     &config.dfs.prefix,
-                    store,
+                    store.store_id,
+                    store.epoch,
                 )
                 .unwrap();
                 let snap_epoch =

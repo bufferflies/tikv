@@ -11,7 +11,7 @@ use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -53,6 +53,7 @@ struct ServiceContext {
     put_delay_rules: DelayRules,
     read_limiter: Arc<IoRateLimiter>,
     write_limiter: Arc<IoRateLimiter>,
+    fail_all: Arc<AtomicBool>,
 }
 
 impl ServiceContext {
@@ -101,6 +102,10 @@ impl ServiceContext {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
     }
+
+    fn should_fail(&self) -> bool {
+        self.fail_all.load(Ordering::Relaxed)
+    }
 }
 
 pub struct ObjectStorageService {
@@ -114,6 +119,7 @@ pub struct ObjectStorageService {
     put_delay_rules: DelayRules,
     read_limiter: Arc<IoRateLimiter>,
     write_limiter: Arc<IoRateLimiter>,
+    fail_all: Arc<AtomicBool>,
 }
 
 impl ObjectStorageService {
@@ -135,6 +141,7 @@ impl ObjectStorageService {
             put_delay_rules: Default::default(),
             read_limiter: Arc::new(IoRateLimiter::new(IoRateLimitMode::AllIo, true, true)),
             write_limiter: Arc::new(IoRateLimiter::new(IoRateLimitMode::AllIo, true, true)),
+            fail_all: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -150,6 +157,11 @@ impl ObjectStorageService {
     pub fn set_put_delay(&self, keyword: &str, delay: Duration) {
         self.put_delay_rules
             .insert(keyword.to_string(), delay.as_millis() as u64);
+    }
+
+    /// Force all OSS operations to fail fast with 500. Useful for tests.
+    pub fn set_fail_all(&self, fail: bool) {
+        self.fail_all.store(fail, Ordering::Relaxed);
     }
 
     // Set rate as `0` to disable rate limit.
@@ -632,6 +644,9 @@ impl ObjectStorageService {
     }
 
     async fn service(ctx: Arc<ServiceContext>, req: Request<Body>) -> HttpResult {
+        if ctx.should_fail() {
+            return Ok(Self::internal_error("fail_all enabled".to_string()));
+        }
         let res: Result<Response<Body>> = match *req.method() {
             Method::PUT if Self::is_copy_object_request(&req) => {
                 Self::handle_copy_object(ctx, req).await
@@ -683,6 +698,13 @@ impl ObjectStorageService {
             .unwrap()
     }
 
+    fn internal_error(msg: String) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(msg))
+            .unwrap()
+    }
+
     pub fn start_server(&mut self) {
         assert!(self.svc_handle.is_none(), "server has started");
 
@@ -694,6 +716,7 @@ impl ObjectStorageService {
             put_delay_rules: self.put_delay_rules.clone(),
             read_limiter: self.read_limiter.clone(),
             write_limiter: self.write_limiter.clone(),
+            fail_all: self.fail_all.clone(),
         });
         let make_svc = make_service_fn(move |_conn| {
             let ctx = ctx.clone();
