@@ -320,14 +320,20 @@ struct ReplicationService {
     kv: kvengine::Engine,
     scheduler: tikv_util::mpsc::Sender<CdcMsg>,
     memory_quota: MemoryQuota,
+    runtime: tokio::runtime::Handle,
 }
 
 impl ReplicationService {
-    pub fn new(kv: kvengine::Engine, scheduler: tikv_util::mpsc::Sender<CdcMsg>) -> Self {
+    pub fn new(
+        kv: kvengine::Engine,
+        scheduler: tikv_util::mpsc::Sender<CdcMsg>,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
         Self {
             kv,
             scheduler,
             memory_quota: MemoryQuota::new(1024 * 1024 * 1024),
+            runtime,
         }
     }
 
@@ -540,13 +546,28 @@ impl Tikv for ReplicationService {
                 iter.next_async().await;
             }
             resp.set_pairs(kv_pairs.into());
-            sink.success(resp)
-                .unwrap_or_else(|e| {
-                    error!("kv_scan failed"; "error" => ?e);
-                })
-                .await
+            resp
         };
-        ctx.spawn(tikv_util::init_task_local(task));
+        let resp = self.runtime.spawn(tikv_util::init_task_local(task));
+        let fut = async move {
+            match resp.await {
+                Ok(resp) => sink.success(resp).await,
+                Err(err) if err.is_panic() => {
+                    panic!("kv_scan panic");
+                }
+                Err(err) => {
+                    sink.fail(RpcStatus::with_message(
+                        RpcStatusCode::CANCELLED,
+                        format!("{}", err),
+                    ))
+                    .await
+                }
+            }
+            .unwrap_or_else(|e| {
+                error!("kv_scan rpc failed"; "error" => ?e);
+            });
+        };
+        ctx.spawn(fut);
     }
 
     fn kv_get(&mut self, ctx: RpcContext<'_>, req: GetRequest, sink: UnarySink<GetResponse>) {
@@ -579,13 +600,28 @@ impl Tikv for ReplicationService {
             } else {
                 resp.set_not_found(true);
             }
-            sink.success(resp)
-                .unwrap_or_else(|e| {
-                    error!("kv_get failed"; "error" => ?e);
-                })
-                .await
+            resp
         };
-        ctx.spawn(tikv_util::init_task_local(task));
+        let resp = self.runtime.spawn(tikv_util::init_task_local(task));
+        let fut = async move {
+            match resp.await {
+                Ok(resp) => sink.success(resp).await,
+                Err(err) if err.is_panic() => {
+                    panic!("kv_get panic");
+                }
+                Err(err) => {
+                    sink.fail(RpcStatus::with_message(
+                        RpcStatusCode::CANCELLED,
+                        format!("{}", err),
+                    ))
+                    .await
+                }
+            }
+            .unwrap_or_else(|e| {
+                error!("kv_get rpc failed"; "error" => ?e);
+            });
+        };
+        ctx.spawn(fut);
     }
 
     fn kv_scan_lock(

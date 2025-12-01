@@ -276,7 +276,7 @@ impl ReplicationWorker {
             ctx,
             http_client: Arc::new(http_client),
             merged_engine,
-            runtime,
+            runtime: runtime.clone(),
             grpc_server: None,
             health_service: None,
             kube_api,
@@ -320,7 +320,11 @@ impl ReplicationWorker {
             .build_args();
         let addr = SocketAddr::from_str(&worker.config.grpc_addr).unwrap();
         let security_mgr = worker.ctx.pd.get_security_mgr();
-        let service = ReplicationService::new(worker.merged_engine.get_kv(), tx.clone());
+        let service = ReplicationService::new(
+            worker.merged_engine.get_kv(),
+            tx.clone(),
+            runtime.handle().clone(),
+        );
         let health_service = HealthService::default();
         let sb = ServerBuilder::new(env)
             .channel_args(channel_args)
@@ -423,8 +427,10 @@ impl ReplicationWorker {
             let has_msg = res.is_ok();
             match res {
                 Ok(msg) => {
+                    try_force_stop!(self);
                     self.handle_msg(msg);
                     while let Ok(msg) = self.rx.try_recv() {
+                        try_force_stop!(self);
                         self.handle_msg(msg);
                     }
                 }
@@ -458,7 +464,6 @@ impl ReplicationWorker {
     }
 
     fn handle_msg(&mut self, msg: CdcMsg) {
-        try_force_stop!(self);
         match msg {
             CdcMsg::AddKeyspace {
                 keyspace_id,
