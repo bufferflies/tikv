@@ -97,6 +97,12 @@ macro_rules! try_force_stop_err {
 // Used to check whether the Raft log is committed.
 const QUORUM_SIZE: u8 = 2;
 
+const ALL_KV_ENGINE_META_KEYS: &[&[u8]] = &[
+    rfengine::KV_ENGINE_META_KEY,
+    rfengine::KV_ENGINE_META_DIFF_KEY,
+    rfengine::KV_ENGINE_META_SNAP_DIFF_KEY,
+];
+
 #[derive(Clone)]
 pub struct MergedEngineContext {
     pub pd: Arc<dyn PdClient>,
@@ -587,6 +593,7 @@ impl MergedEngine {
         let mut regions_raft_progress = RegionsRaftProgress::default();
         let mut store_progresses = HashMap::default();
         let mut raftdb_paths = Vec::new();
+        let mut raft_wb = rfengine::WriteBatch::new();
         for store in backup_meta.get_stores() {
             let store_progress = StoreProgress {
                 store_id: store.get_store_id(),
@@ -643,6 +650,18 @@ impl MergedEngine {
                     continue;
                 };
 
+                let Some(mut shard_meta) =
+                    rfstore::store::load_engine_meta(&origin, store.store_id, peer_id)
+                else {
+                    let states = origin.get_peer_all_states(peer_id, false);
+                    warn!("{} recover_from_backup: no engine meta", tag;
+                        "origin" => %origin_tag, "peer" => peer_id, "states" => ?states);
+                    debug_assert!(false);
+                    continue;
+                };
+                debug_assert_eq!(shard_meta.range.keyspace_id, keyspace_id);
+                shard_meta.engine_id = merged_store_id;
+
                 let preprocess_index = raft_state.get_last_preprocessed_index();
                 let region_progress = region_progresses
                     .entry(region_id)
@@ -692,49 +711,28 @@ impl MergedEngine {
                     .max(RAFT_INIT_LOG_INDEX);
 
                 // merge states
-                let mut batch = rfengine::WriteBatch::new();
                 let peer_is_newer = regions_raft_progress.update(region_id, &raft_state);
                 if peer_is_newer {
+                    write_engine_meta(&mut raft_wb, region_id, &shard_meta);
                     origin.iterate_peer_states(peer_id, false, |k, v| {
                         trace!("{} recover_from_backup", tag;
                             "k" => LogValue::key(k), "v" => LogValue::value(v),
                             "origin" => %origin_tag, "peer" => peer_id,
                         );
-
-                        update_peer_state(
-                            &mut batch,
+                        update_peer_state_without_engine_meta(
+                            &mut raft_wb,
                             k,
                             v,
-                            merged_raft.get_engine_id(),
+                            merged_store_id,
                             region_id,
                             keyspace_id,
                         );
                         true
                     });
 
-                    if batch
-                        .get_state(region_id, rfengine::KV_ENGINE_META_KEY)
-                        .is_some()
-                    {
-                        for k in [
-                            rfengine::KV_ENGINE_META_DIFF_KEY,
-                            rfengine::KV_ENGINE_META_SNAP_DIFF_KEY,
-                        ] {
-                            if batch.get_state(region_id, k).is_none() {
-                                batch.set_state(region_id, region_id, keyspace_id, k, &[]);
-                            }
-                        }
-                    }
-
                     region_progress.commit_index = commit;
                     region_progress.synced_index = preprocess_index;
-                    if !peer_is_restored_from_snapshot(
-                        tag,
-                        "recover_from_backup",
-                        Either::Right(&origin),
-                        peer_id,
-                        commit,
-                    ) {
+                    if !shard_meta_is_restored_from_snapshot(&shard_meta, origin_commit) {
                         region_progress.truncated_index = TruncatedIndex {
                             truncated_index: origin_truncated_index,
                             commit_index_for_truncate: origin_commit,
@@ -767,17 +765,33 @@ impl MergedEngine {
                     );
                 }
                 for entry in entry_buf {
-                    batch.append_raft_log(region_id, region_id, keyspace_id, &entry);
+                    raft_wb.append_raft_log(region_id, region_id, keyspace_id, &entry);
                 }
-                batch.truncate_raft_log(
+                raft_wb.truncate_raft_log(
                     region_id,
                     region_id,
                     keyspace_id,
                     region_progress.truncated_index(),
                 );
-                merged_raft.write(batch).expect("raft write");
+
+                if raft_wb.estimated_size() >= ctx.config.raft_write_batch_size.0 as usize {
+                    merged_raft
+                        .write(mem::take(&mut raft_wb))
+                        .expect("raft write");
+                }
+
+                debug!(
+                    "{} recover_from_backup", tag;
+                    "region" => ?region_state, "raft" => ?raft_state,
+                    "progress" => ?region_progress,
+                    "origin" => %origin_tag, "keyspace" => keyspace_id);
             }
         }
+
+        if !raft_wb.is_empty() {
+            merged_raft.write(raft_wb).expect("raft write");
+        }
+
         // destroy original raft engines
         for raftdb_path in raftdb_paths {
             let raft_path = Path::new(&raftdb_path);
@@ -1825,7 +1839,7 @@ impl fmt::Debug for SyncRegionsContext<'_> {
     }
 }
 
-fn update_peer_state(
+fn update_peer_state_without_engine_meta(
     wb: &mut rfengine::WriteBatch,
     k: &Bytes,
     v: &Bytes,
@@ -1846,7 +1860,7 @@ fn update_peer_state(
             rfengine::region_state_key(region_version),
             data.into(),
         );
-    } else {
+    } else if !ALL_KV_ENGINE_META_KEYS.contains(&k.chunk()) {
         wb.set_state_bytes(region_id, region_id, keyspace_id, k.clone(), v.clone());
     }
 }
@@ -2086,7 +2100,7 @@ fn peer_is_restored_from_snapshot(
             return false;
         }
         let origin_tag = ShardTag::new(tag.engine_id, IdVer::new(cs.shard_id, cs.shard_ver));
-        let ok = cs.sequence > commit_index;
+        let ok = cs_is_restored_from_snapshot(&cs, commit_index);
         if ok {
             debug!("{} {}: restored from snapshot", tag, ctx;
                 "origin" => %origin_tag, "seq" => cs.sequence, "commit" => commit_index);
@@ -2094,4 +2108,12 @@ fn peer_is_restored_from_snapshot(
         return ok;
     }
     false
+}
+
+fn cs_is_restored_from_snapshot(cs: &kvenginepb::ChangeSet, commit_index: u64) -> bool {
+    cs.sequence > commit_index
+}
+
+fn shard_meta_is_restored_from_snapshot(shard_meta: &ShardMeta, commit_index: u64) -> bool {
+    shard_meta.seq > commit_index
 }
