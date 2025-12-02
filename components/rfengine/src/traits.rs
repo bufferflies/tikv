@@ -10,7 +10,7 @@ use kvproto::{
 };
 use raft::eraftpb::Entry;
 
-use crate::{metrics::*, RfEngine, WriteBatch};
+use crate::{RfEngine, WriteBatch};
 
 impl RaftEngineReadOnly for RfEngine {
     fn is_empty(&self) -> Result<bool> {
@@ -130,10 +130,6 @@ impl RaftEngine for RfEngine {
 
     fn gc(&self, _raft_group_id: u64, mut _from: u64, _to: u64) -> Result<usize> {
         panic!()
-    }
-
-    fn flush_metrics(&self, instance: &str) {
-        flush_engine_properties(self, instance);
     }
 
     fn reset_statistics(&self) {

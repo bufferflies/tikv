@@ -28,7 +28,7 @@ use api_version::{dispatch_api_version, KvFormat};
 use cloud_encryption::MasterKey;
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::from_rocks_compression_type;
-use engine_traits::{KvEngine, RaftEngine, CF_DEFAULT, CF_WRITE};
+use engine_traits::{CF_DEFAULT, CF_WRITE};
 use file_system::{
     BytesFetcher, IoRateLimitMode, IoRateLimiter, MetricsManager as IoMetricsManager,
 };
@@ -934,13 +934,9 @@ impl TikvServer {
 
     fn init_metrics_flusher(&mut self, fetcher: BytesFetcher) {
         let mut io_metrics = IoMetricsManager::new(fetcher);
-        let kv = self.raw_engines.kv.clone();
-        let raft = self.raw_engines.raft.clone();
         self.background_worker
             .spawn_interval_task(DEFAULT_METRICS_FLUSH_INTERVAL, move || {
                 let now = Instant::now();
-                KvEngine::flush_metrics(&kv, "kv");
-                RaftEngine::flush_metrics(&raft, "raft");
                 io_metrics.flush(now);
             });
     }
