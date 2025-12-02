@@ -1,4 +1,6 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
+#![feature(let_chains)]
+#![feature(box_patterns)]
 
 mod error;
 mod manifest;
@@ -47,7 +49,8 @@ use pd_client::PdClient;
 use protobuf::Message;
 use raft_proto::{eraftpb, eraftpb::Entry};
 use rfengine::{
-    iterator::WalIterator, RaftLogOp, RfEngine, WriteBatch, KV_ENGINE_META_KEY, TRUNCATE_ALL_INDEX,
+    iterator::WalIterator, raft_state_key, region_state_key, RaftLogOp, RfEngine, WriteBatch,
+    KV_ENGINE_META_KEY, TRUNCATE_ALL_INDEX,
 };
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::{
@@ -610,7 +613,7 @@ impl MergedEngine {
             let origin = box_try!(Self::setup_raft_engine(ctx, &backup_meta, store));
             raftdb_paths.push(store_config.raft_store.raftdb_path);
             let region_peers_map = origin.get_region_peer_map();
-            for (region_id, peer_id) in region_peers_map {
+            for (&region_id, &peer_id) in &region_peers_map {
                 if region_id == 0 {
                     continue;
                 }
@@ -729,6 +732,34 @@ impl MergedEngine {
                         );
                         true
                     });
+
+                    // Depends on other region.
+                    if let Some(box parent) = &shard_meta.parent
+                        && parent.id != region_id
+                    {
+                        let parent_tag = parent.tag();
+                        let parent_peer_id = *region_peers_map.get(&parent.id).unwrap_or_else(|| {
+                            panic!("{} recover_from_backup: parent region not found, origin: {}, parent: {}", tag, origin_tag, parent_tag);
+                        });
+                        // The state value of parent version should be the latest. It's safe to
+                        // overwrite.
+                        let state_keys = [raft_state_key(parent.ver), region_state_key(parent.ver)];
+                        for k in state_keys {
+                            let state_val = origin.get_state(parent_peer_id, &k).unwrap_or_else(|| {
+                                panic!("{} recover_from_backup: parent state key not found, origin: {}, parent: {}", tag, origin_tag, parent_tag);
+                            });
+                            update_peer_state_without_engine_meta(
+                                &mut raft_wb,
+                                &k,
+                                &state_val,
+                                merged_store_id,
+                                parent.id,
+                                keyspace_id,
+                            );
+                        }
+                        debug!("{} recover_from_backup: set parent states", tag;
+                            "origin" => %origin_tag, "parent" => %parent_tag, "parent_peer" => parent_peer_id);
+                    }
 
                     region_progress.commit_index = commit;
                     region_progress.synced_index = preprocess_index;
