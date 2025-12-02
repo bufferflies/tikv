@@ -1,6 +1,6 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use k8s_openapi::{
@@ -26,6 +26,7 @@ const K8S_ANNOTATION_KEYSPACE_ID: &str = "serverless.tidbcloud.com/keyspace-id";
 
 const ENV_REP_PD_STS_NAME: &str = "REP_PD_STS_NAME";
 const ENV_REP_CDC_STS_NAME: &str = "REP_CDC_STS_NAME";
+const ENV_REP_CDC_GC_TTL: &str = "REP_CDC_GC_TTL";
 
 pub(crate) const PD_PORT: i32 = 2379;
 pub(crate) const CDC_PORT: i32 = 8300;
@@ -75,6 +76,7 @@ impl KeyspaceService for KeyspaceKubeService {
     fn keyspace_id(&self) -> u32 {
         self.keyspace_id
     }
+
     async fn start(&mut self) -> Result<()> {
         let api = &self.kube_api;
         let start_pd = async {
@@ -89,7 +91,8 @@ impl KeyspaceService for KeyspaceKubeService {
             .await?;
             Ok::<_, Error>(pd_client)
         };
-        let start_cdc = async { api.create_cdc(&self.scheme, self.keyspace_id).await };
+        let gc_ttl = self.conf.safepoint.gc_ttl.0;
+        let start_cdc = async { api.create_cdc(&self.scheme, self.keyspace_id, gc_ttl).await };
         let (res_pd, res_cdc) = futures::join!(start_pd, start_cdc);
         self.pd_client = Some(box_try!(res_pd));
         let _ = box_try!(res_cdc);
@@ -190,7 +193,12 @@ impl KubeApi {
         Ok(())
     }
 
-    pub(crate) async fn create_cdc(&self, scheme: &str, keyspace_id: u32) -> Result<()> {
+    pub(crate) async fn create_cdc(
+        &self,
+        scheme: &str,
+        keyspace_id: u32,
+        gc_ttl: Duration,
+    ) -> Result<()> {
         let cdc_sts_name = self.cdc_sts_name(keyspace_id);
         self.create_svc(cdc_sts_name.clone(), CDC_PORT).await?;
         if self.sts_api.get_opt(&cdc_sts_name).await?.is_some() {
@@ -234,6 +242,11 @@ impl KubeApi {
         envs.push(EnvVar {
             name: ENV_REP_CDC_STS_NAME.into(),
             value: Some(cdc_sts_name),
+            ..Default::default()
+        });
+        envs.push(EnvVar {
+            name: ENV_REP_CDC_GC_TTL.into(),
+            value: Some(gc_ttl.as_secs().to_string()),
             ..Default::default()
         });
 
@@ -378,7 +391,9 @@ fn test_sts_create() {
         let pvc_res = api.pvc_api.get(&KubeApi::pvc_name(&pd_name)).await;
         info!("pd_pvc: {:?}", pvc_res);
 
-        api.create_cdc("http", 1).await.unwrap();
+        api.create_cdc("http", 1, Duration::from_secs(86400))
+            .await
+            .unwrap();
         let cdc_name = api.cdc_sts_name(1);
         let sts_res = api.sts_api.get(&cdc_name).await;
         info!("cdc_sts: {:?}", sts_res);
