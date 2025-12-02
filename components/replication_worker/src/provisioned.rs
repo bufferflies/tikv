@@ -101,6 +101,8 @@ pub mod local_provider {
         cdc_bin_path: String,
         tidb_bin_path: String,
         base_port: u16,
+        log_level: String, // E.g., "info", "debug".
+
         pub pd_child: Option<Child>,
         pub cdc_child: Option<Child>,
         pub tidb_child: Option<Child>,
@@ -109,7 +111,7 @@ pub mod local_provider {
     }
 
     impl LocalProvider {
-        pub fn new(keyspace_id: u32, data_dir: PathBuf, base_port: u16) -> Self {
+        pub fn new(keyspace_id: u32, data_dir: PathBuf, base_port: u16, log_level: String) -> Self {
             let security_mgr = SecurityManager::new(&SecurityConfig::default()).unwrap();
             Self {
                 keyspace_id,
@@ -118,6 +120,7 @@ pub mod local_provider {
                 cdc_bin_path: std::env::var("CDC_BIN").unwrap(),
                 tidb_bin_path: std::env::var("TIDB_BIN").unwrap_or_default(),
                 base_port,
+                log_level,
                 pd_child: None,
                 cdc_child: None,
                 tidb_child: None,
@@ -154,6 +157,7 @@ pub mod local_provider {
             cmd.arg("--name=pd")
                 .arg(format!("--data-dir={}", data_dir.display()))
                 .arg(format!("--log-file={}", log_file.display()))
+                .arg(format!("--log-level={}", &self.log_level))
                 .arg(format!("--client-urls={}", self.pd_client_url()))
                 .arg(format!("--peer-urls={}", self.local_pd_peer_url()))
                 .arg(format!("--initial-cluster={}", initial_cluster))
@@ -170,6 +174,7 @@ pub mod local_provider {
             cmd.arg("server")
                 .arg(format!("--addr={}", cdc_addr))
                 .arg(format!("--log-file={}", log_file.display()))
+                .arg(format!("--log-level={}", &self.log_level))
                 .arg(format!("--data-dir={}", data_dir.display()))
                 .arg(format!("--pd={}", pd_url));
             info!("start cdc-server"; "cmd" => ?cmd);

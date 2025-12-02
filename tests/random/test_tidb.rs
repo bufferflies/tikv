@@ -1076,6 +1076,7 @@ pub(crate) struct Switches {
     pub enable_columnar_normal_workload: bool,
     pub enable_columnar_dynamic_workload: bool,
     pub enable_columnar_partition_workload: bool,
+    pub rep_log_level: String, // Log level of "rep-" components: "info", "debug".
 }
 
 impl Switches {
@@ -1109,6 +1110,7 @@ impl Switches {
         let enable_columnar_normal_workload = env_switch("ENABLE_COLUMNAR_NORMAL_WORKLOAD");
         let enable_columnar_dynamic_workload = env_switch("ENABLE_COLUMNAR_DYNAMIC_WORKLOAD");
         let enable_columnar_partition_workload = env_switch("ENABLE_COLUMNAR_PARTITION_WORKLOAD");
+        let rep_log_level = env_param("REP_LOG_LEVEL", "info".to_string());
 
         Self {
             remote_cop_min_block_size,
@@ -1134,6 +1136,7 @@ impl Switches {
             enable_columnar_normal_workload,
             enable_columnar_dynamic_workload,
             enable_columnar_partition_workload,
+            rep_log_level,
         }
     }
 }

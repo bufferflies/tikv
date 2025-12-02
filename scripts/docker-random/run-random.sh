@@ -43,6 +43,7 @@ ENABLE_COLUMNAR_DYNAMIC_WORKLOAD=1
 ENABLE_COLUMNAR_PARTITION_WORKLOAD=1
 
 TIDB_NEXT_GEN=0
+REP_LOG_LEVEL="info"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -132,6 +133,9 @@ while [ $# -gt 0 ]; do
     --tidb-next-gen)
         TIDB_NEXT_GEN=1
         ;;
+    --rep-debug-log)
+        REP_LOG_LEVEL="debug"
+        ;;
     *)
         echo "Usage: $0 DOCKER_ID TESTNAME [--keep-tmp-on-error] [--log-path LOG_PATH] [--memory-profile]"
         exit 1
@@ -181,6 +185,7 @@ export ENABLE_COLUMNAR_DYNAMIC_WORKLOAD
 export ENABLE_COLUMNAR_PARTITION_WORKLOAD
 
 export TIDB_NEXT_GEN
+export REP_LOG_LEVEL
 
 mkdir -p "$LOG_PATH"/logs "$LOG_PATH"/error-logs
 for i in $(seq -w 1 100000); do

@@ -66,8 +66,9 @@ fn test_random_replication() {
     let rep_dir = tempfile::Builder::new().prefix("rep_").tempdir().unwrap();
     let rep_dir = rep_dir.path();
     let rep_dir_copy = rep_dir.to_path_buf();
+    let rep_log_level = switches.rep_log_level.clone();
     let local_provider_task = runtime.spawn_blocking(move || {
-        let mut local_provider = LocalProvider::new(KEYSPACE_ID, rep_dir_copy, 6000);
+        let mut local_provider = LocalProvider::new(KEYSPACE_ID, rep_dir_copy, 6000, rep_log_level);
         local_provider.start(LOCAL_TIDB_HEALTHY_TIMEOUT);
         local_provider
     });

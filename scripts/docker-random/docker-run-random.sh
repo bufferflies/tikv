@@ -151,6 +151,9 @@ while [[ $# -gt 0 ]]; do
 	--tidb-next-gen)
 		RUN_ARGS+=("--tidb-next-gen")
 		;;
+	--rep-debug-log)
+		RUN_ARGS+=("--rep-debug-log")
+		;;
 	--help)
 		show_help
 		exit 0
