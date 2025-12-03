@@ -116,7 +116,7 @@ pub mod local_provider {
             Self {
                 keyspace_id,
                 data_dir,
-                pd_bin_path: std::env::var("PD_BIN").unwrap(),
+                pd_bin_path: std::env::var("REP_PD_BIN").unwrap(),
                 cdc_bin_path: std::env::var("CDC_BIN").unwrap(),
                 tidb_bin_path: std::env::var("TIDB_BIN").unwrap_or_default(),
                 base_port,
