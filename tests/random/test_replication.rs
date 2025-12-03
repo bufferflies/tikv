@@ -38,10 +38,7 @@ const WAIT_SYNC_TIMEOUT: Duration = Duration::from_secs(90);
 #[test]
 fn test_random_replication() {
     init_logger();
-    // Log level is controlled by "RUST_LOG". The log level here should not be
-    // higher than "RUST_LOG".
-    // TODO: auto adjust log level according to "RUST_LOG".
-    logger::set_log_level(slog::Level::Debug);
+    logger::set_log_level(get_log_level());
     let prepare_time = Instant::now_coarse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

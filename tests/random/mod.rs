@@ -813,6 +813,53 @@ pub(crate) fn init_logger() {
     cloud_server::setup::initial_logger(&tikv_config);
 }
 
+#[cfg(feature = "env-logger")]
+fn get_log_level() -> slog::Level {
+    get_log_level_from_rust_log()
+}
+
+#[cfg(any(feature = "env-logger", test))]
+fn get_log_level_from_rust_log() -> slog::Level {
+    // Critical < Error < Warning < Info < Debug < Trace.
+    let mut max_level = None;
+    if let Ok(log_env) = std::env::var("RUST_LOG") {
+        // E.g., "info,raft=debug"
+        for part in log_env.split(',') {
+            let level = part.split('=').last().unwrap_or(part);
+            if let Ok(level) = level.parse::<slog::Level>() {
+                if max_level.map_or(true, |x| x < level) {
+                    max_level = Some(level);
+                }
+            }
+        }
+    }
+    max_level.unwrap_or(slog::Level::Info)
+}
+
+#[cfg(not(feature = "env-logger"))]
+fn get_log_level() -> slog::Level {
+    slog::Level::Info
+}
+
 pub(crate) fn test_id() -> String {
     std::env::var("TEST_ID").unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_log_level() {
+        let cases = vec![
+            ("info", slog::Level::Info),
+            ("warn", slog::Level::Warning),
+            ("info,raft=debug", slog::Level::Debug),
+            ("error,raft=warn,tikv=info", slog::Level::Info),
+        ];
+        for (rust_log, expected_level) in cases {
+            std::env::set_var("RUST_LOG", rust_log);
+            assert_eq!(get_log_level_from_rust_log(), expected_level);
+        }
+    }
 }

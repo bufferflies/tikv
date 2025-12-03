@@ -9311,6 +9311,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "slog",
+ "slog-envlogger",
  "slog-global",
  "sqlx",
  "sst_importer",

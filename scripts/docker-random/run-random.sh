@@ -6,6 +6,13 @@ DOCKER_ID=$1
 TESTNAME=$2
 shift 2
 
+export RUST_BACKTRACE=1
+export LOG_LEVEL=info
+
+# Components pattern for env_logger. E.g. export RUST_LOG="info,raft=debug"
+# Also see "--env-logger" of make-bin.sh
+export RUST_LOG="info"
+
 # Optional keep temporary data on error for debugging.
 # Note: When the container stops, the files from the last loop will not be automatically removed. However, they will be cleared during the next iterations.
 KEEP_TMP_ON_ERROR=0
@@ -143,11 +150,6 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-
-export RUST_BACKTRACE=1
-export LOG_LEVEL=info
-# Components pattern for env_logger. E.g. export RUST_LOG="info,raft=debug"
-export RUST_LOG="info"
 
 export MEMORY_PROFILE
 

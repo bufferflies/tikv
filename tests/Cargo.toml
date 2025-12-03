@@ -88,7 +88,7 @@ profiling = ["profiler/profiling"]
 
 # Usage: set environment variable RUST_LOG (e.g, export RUST_LOG="info,raft=debug")
 # Ref: https://docs.rs/env_logger/latest/env_logger/#enabling-logging
-env-logger = ["tikv_util/env-logger"]
+env-logger = ["tikv_util/env-logger", "slog-envlogger"]
 
 test-engine-kv-rocksdb = [
     "raftstore/test-engine-kv-rocksdb"
@@ -167,6 +167,7 @@ rfstore = { workspace = true }
 schema = { workspace = true }
 serde_json = "1.0"
 slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
+slog-envlogger = { version = "2.2.0", optional = true }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 sqlx = { version = "0.5", features = ["runtime-tokio-rustls", "mysql", "chrono", "bigdecimal"] }
 tempfile = "3.0"
