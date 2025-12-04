@@ -263,7 +263,6 @@ impl SstImporter {
     ) -> Result<Option<Range>> {
         info!("download start";
             "meta" => ?meta,
-            "url" => ?backend,
             "name" => name,
             "rewrite_rule" => ?rewrite_rule,
             "speed_limit" => speed_limiter.speed_limit(),
