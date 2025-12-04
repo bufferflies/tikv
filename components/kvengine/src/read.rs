@@ -953,6 +953,7 @@ impl SnapAccessCore {
                 }
             }
             for tbl in lh.tables.iter() {
+                count += 1;
                 if overlap_ids.contains(&tbl.id()) {
                     overlapped_count += 1;
                     snap.mut_table_creates()
@@ -999,12 +1000,15 @@ impl SnapAccessCore {
             vector_indexes.push(index.to_vector_index_pb());
         }
 
+        let vector_indexes_count = vector_indexes.iter().map(|v| v.files.len()).sum::<usize>();
         info!(
-            "convert snap access to change set for {}, total files {}, overlapped files {}, unconverted_l0s {}",
+            "{} convert snap access to change set, total {}, overlapped {}, unconverted_l0s {}, columnar {}, vector {}",
             self.get_tag(),
             count,
             overlapped_count,
             snap.get_unconverted_l0s().len(),
+            snap.get_columnar_creates().len(),
+            vector_indexes_count,
         );
         cs
     }
