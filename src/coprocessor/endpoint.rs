@@ -15,7 +15,8 @@ use std::{
 };
 
 use ::tracker::{
-    set_tls_tracker_token, with_tls_tracker, RequestInfo, RequestType, GLOBAL_TRACKERS,
+    get_tls_tracker_token, set_tls_tracker_token, with_tls_tracker, RequestInfo, RequestType,
+    TrackerToken, GLOBAL_TRACKERS,
 };
 use anyhow::anyhow;
 use api_version::{dispatch_api_version, KvFormat};
@@ -581,6 +582,7 @@ impl<E: Engine> Endpoint<E> {
         mut tracker: Box<Tracker<E>>,
         handler_builder: RequestHandlerBuilder<E::Snap>,
         remote_ctx: Option<RemoteContext>,
+        tracker_token: TrackerToken,
         resource_publisher: Option<Arc<dyn ResourcePublisher>>,
         keyspace_read_limiter: Option<(
             KeyspaceReadLimiter,
@@ -635,7 +637,7 @@ impl<E: Engine> Endpoint<E> {
         tracker.on_slow_down();
 
         let (mut request_type, mut is_remote) = (RequestType::Unknown, false);
-        with_tls_tracker(|tracker| {
+        GLOBAL_TRACKERS.with_tracker(tracker_token, |tracker| {
             request_type = tracker.req_info.request_type;
             is_remote = tracker.req_info.is_remote;
         });
@@ -776,6 +778,7 @@ impl<E: Engine> Endpoint<E> {
         } else {
             (None, None)
         };
+        let tracker_token = get_tls_tracker_token();
         let res = self
             .read_pool
             .spawn_handle(
@@ -784,6 +787,7 @@ impl<E: Engine> Endpoint<E> {
                     tracker,
                     r.handler_builder,
                     remote_ctx,
+                    tracker_token,
                     resource_publisher,
                     keyspace_read_limiter,
                 )
