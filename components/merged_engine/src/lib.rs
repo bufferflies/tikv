@@ -164,7 +164,8 @@ pub struct RegionProgress {
     pub region_id: u64,
     pub entries: HashMap<u64 /* log_index */, RaftLogOpWithCounter>,
     pub synced_index: u64,
-    pub commit_index: u64,
+    // Use `commit_index()`/`update_commit_index()` to read/write.
+    commit_index: u64,
 
     pub truncated_index: TruncatedIndex,
     // The original commit index sync from upstream TiKV to associate with the truncated index. As
@@ -196,6 +197,21 @@ impl RegionProgress {
             commit_index: 0,
             truncated_index: TruncatedIndex::default(),
             origin_commit_indexes: HashMap::default(),
+        }
+    }
+
+    #[inline]
+    pub fn commit_index(&self) -> u64 {
+        self.commit_index
+    }
+
+    #[inline]
+    pub fn update_commit_index(&mut self, new_commit_index: u64) -> bool {
+        if self.commit_index < new_commit_index {
+            self.commit_index = new_commit_index;
+            true
+        } else {
+            false
         }
     }
 
@@ -665,53 +681,49 @@ impl MergedEngine {
                 debug_assert_eq!(shard_meta.range.keyspace_id, keyspace_id);
                 shard_meta.engine_id = merged_store_id;
 
-                let preprocess_index = raft_state.get_last_preprocessed_index();
                 let region_progress = region_progresses
                     .entry(region_id)
                     .or_insert(RegionProgress::new(keyspace_id, region_id));
-                let merged_commit_index = region_progress.commit_index;
 
-                debug!(
-                    "{} recover_from_backup", tag;
-                    "region" => ?region_state, "raft" => ?raft_state,
-                    "progress" => ?region_progress,
-                    "origin" => %origin_tag, "keyspace" => keyspace_id);
-
-                if raft_state.get_last_index() > preprocess_index {
-                    // Fetch uncommitted entries, and insert them into region progress, so that they
-                    // will be replayed when commit index advances (during sync_merged).
-                    let low_idx = preprocess_index + 1;
-                    let high_idx = raft_state.get_last_index() + 1;
-                    debug!(
-                        "{} recover_from_backup: fetch uncommitted entries: [{}, {})",
-                        tag, low_idx, high_idx; "origin" => %origin_tag);
-                    if let Err(err) = fetch_raft_entries_to_region_progress(
-                        tag,
-                        &origin,
-                        peer_id,
-                        low_idx,
-                        high_idx,
-                        region_progress,
-                    ) {
-                        panic!(
-                            "{} recover_from_backup: fetch raft entries failed, low: {}, high: {}, err: {}, origin: {}",
-                            tag, low_idx, high_idx, err, origin_tag
-                        );
-                    }
-                }
-
-                // Committed entries will be replayed right away during the recovery process
-                // below.
+                let preprocess_index = raft_state.get_last_preprocessed_index();
                 let origin_commit = raft_state.get_commit();
-                let commit = origin_commit.max(region_progress.commit_index);
-                if merged_commit_index >= commit {
-                    continue;
-                }
-
                 let origin_truncated_index = origin
                     .get_truncated_index(peer_id)
                     .unwrap_or_default()
                     .max(RAFT_INIT_LOG_INDEX);
+
+                let merged_commit_index = region_progress.commit_index();
+
+                // Fetch entries, and insert them into region progress, so that they
+                // will be replayed when commit index advances (during sync_merged).
+                // Entries earlier than truncated index of latest peer are also fetched, as they
+                // would be required by dependents.
+                {
+                    let low_idx = origin_truncated_index + 1;
+                    let high_idx = raft_state.get_last_index() + 1;
+                    debug!(
+                        "{} recover_from_backup: fetch entries: [{}, {})",
+                        tag, low_idx, high_idx; "origin" => %origin_tag);
+                    if low_idx < high_idx {
+                        if let Err(err) = fetch_raft_entries_to_region_progress(
+                            tag,
+                            &origin,
+                            peer_id,
+                            low_idx,
+                            high_idx,
+                            region_progress,
+                        ) {
+                            panic!(
+                                "{} recover_from_backup: fetch entries failed, low: {}, high: {}, err: {}, origin: {}",
+                                tag, low_idx, high_idx, err, origin_tag
+                            );
+                        }
+                    }
+                }
+
+                if merged_commit_index > origin_commit {
+                    continue;
+                }
 
                 // merge states
                 let peer_is_newer = regions_raft_progress.update(region_id, &raft_state);
@@ -757,11 +769,12 @@ impl MergedEngine {
                                 keyspace_id,
                             );
                         }
+
                         debug!("{} recover_from_backup: set parent states", tag;
                             "origin" => %origin_tag, "parent" => %parent_tag, "parent_peer" => parent_peer_id);
                     }
 
-                    region_progress.commit_index = commit;
+                    region_progress.update_commit_index(origin_commit);
                     region_progress.synced_index = preprocess_index;
                     if !shard_meta_is_restored_from_snapshot(&shard_meta, origin_commit) {
                         region_progress.truncated_index = TruncatedIndex {
@@ -776,35 +789,6 @@ impl MergedEngine {
                     }
                 }
 
-                // merge raft logs
-                let mut entry_buf = Vec::new();
-                let low_idx = merged_commit_index
-                    .max(origin_truncated_index)
-                    .max(region_progress.truncated_index())
-                    + 1;
-                let high_idx = commit + 1;
-                debug!(
-                    "{} recover_from_backup: fetch committed entries: [{}, {})",
-                    tag, low_idx, high_idx;
-                    "origin" => %origin_tag, "progress" => ?region_progress);
-                if let Err(err) =
-                    origin.fetch_raft_entries_to(peer_id, low_idx, high_idx, None, &mut entry_buf)
-                {
-                    panic!(
-                        "fetch raft entries failed for region {}, low: {}, high: {}, err: {}",
-                        region_id, low_idx, high_idx, err
-                    );
-                }
-                for entry in entry_buf {
-                    raft_wb.append_raft_log(region_id, region_id, keyspace_id, &entry);
-                }
-                raft_wb.truncate_raft_log(
-                    region_id,
-                    region_id,
-                    keyspace_id,
-                    region_progress.truncated_index(),
-                );
-
                 if raft_wb.estimated_size() >= ctx.config.raft_write_batch_size.0 as usize {
                     merged_raft
                         .write(mem::take(&mut raft_wb))
@@ -816,6 +800,38 @@ impl MergedEngine {
                     "region" => ?region_state, "raft" => ?raft_state,
                     "progress" => ?region_progress,
                     "origin" => %origin_tag, "keyspace" => keyspace_id);
+            }
+        }
+
+        // Append raft logs to merged rfengine.
+        for progress in region_progresses.values_mut() {
+            let region_id = progress.region_id;
+            let keyspace_id = progress.keyspace_id;
+
+            if !progress.entries.is_empty() {
+                let commit_index = progress.commit_index();
+                let mut committed_entries = vec![];
+                progress.entries.retain(|_, v| {
+                    if v.index <= commit_index {
+                        committed_entries.push(v.to_entry());
+                    }
+                    // Retain not-synced, so that they will be replayed when commit index advances
+                    // (during sync_merged).
+                    v.index > progress.synced_index
+                });
+
+                committed_entries.sort_unstable_by_key(|e| e.index);
+                for entry in committed_entries {
+                    raft_wb.append_raft_log(region_id, region_id, keyspace_id, &entry);
+                }
+            }
+
+            // Always truncate raft log to properly set truncated index.
+            raft_wb.truncate_raft_log(region_id, region_id, keyspace_id, RAFT_INIT_LOG_INDEX);
+            if raft_wb.estimated_size() >= ctx.config.raft_write_batch_size.0 as usize {
+                merged_raft
+                    .write(mem::take(&mut raft_wb))
+                    .expect("raft write");
             }
         }
 
@@ -896,7 +912,7 @@ impl MergedEngine {
             let region_progress = region_progresses
                 .entry(region_id)
                 .or_insert(RegionProgress::new(keyspace_id, region_id));
-            region_progress.commit_index = raft_state.get_commit();
+            region_progress.update_commit_index(raft_state.get_commit());
             region_progress.synced_index = raft_state.get_last_preprocessed_index();
             region_progress.truncated_index = TruncatedIndex {
                 truncated_index: merged_raft
@@ -908,10 +924,10 @@ impl MergedEngine {
                 region_progress.entries = entries.clone();
             }
 
-            if region_progress.commit_index > region_progress.synced_index {
+            if region_progress.commit_index() > region_progress.synced_index {
                 // Fetch committed entries for `sync_merged`.
                 let low_idx = region_progress.synced_index + 1;
-                let high_idx = region_progress.commit_index + 1;
+                let high_idx = region_progress.commit_index() + 1;
                 debug!(
                     "{} recover_from_merged_raft_engine: fetch committed entries: [{}, {})",
                     tag, low_idx, high_idx; "progress" => ?region_progress);
@@ -1163,8 +1179,7 @@ impl MergedEngine {
                         progress
                             .origin_commit_indexes
                             .insert(store_id, origin_commit);
-                        if origin_commit > progress.commit_index {
-                            progress.commit_index = origin_commit;
+                        if progress.update_commit_index(origin_commit) {
                             debug!(
                                 "{} update_wal: advance commit index {}",
                                 tag, progress.commit_index; "origin" => %origin_tag);
@@ -1368,7 +1383,7 @@ impl MergedEngine {
 
         let progress = self.region_progresses.get_mut(&updated_region).unwrap();
         let low = progress.synced_index.max(RAFT_INIT_LOG_INDEX) + 1;
-        let high: u64 = progress.commit_index + 1;
+        let high: u64 = progress.commit_index() + 1;
         debug!("{} sync_merged: [{}, {})", tag, low, high);
         if low >= high {
             return Ok(SyncRegionResult::Finished);

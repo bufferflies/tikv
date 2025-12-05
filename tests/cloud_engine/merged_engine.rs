@@ -11,7 +11,7 @@ use merged_engine::{MergedEngine, MergedEngineConfig, MergedEngineContext};
 use native_br::{backup, backup::BackupType, common::send_request_to_store};
 use pd_client::PdClient;
 use rand::Rng;
-use rfstore::store::{load_raft_engine_meta, ApplyContext};
+use rfstore::store::{load_raft_engine_meta, ApplyContext, RAFT_INIT_LOG_INDEX};
 use security::{GetSecurityManager, SecurityManager};
 use test_cloud_server::{
     client::{RefStore, RequestOptions},
@@ -135,10 +135,30 @@ fn test_merged_engine_once() {
     for (region_id, _) in region_peers {
         if let Some(progress) = merged_engine.get_region_progress(region_id) {
             let truncated_index = merged_raft.get_truncated_index(region_id).unwrap();
+
+            if progress.keyspace_id != keyspace_id {
+                // Regions out of the keyspace may have no change (when all peers split fast
+                // enough). Then truncated index will not be updated.
+                assert!(
+                    truncated_index == progress.truncated_index()
+                        || truncated_index == RAFT_INIT_LOG_INDEX
+                );
+                continue;
+            }
+
             if progress.truncated_index() != truncated_index {
                 if let Some(cs) = load_raft_engine_meta(&merged_raft, region_id) {
-                    // When the shard is not initial flushed, the truncated index is not updated.
-                    assert!(cs.has_parent());
+                    // When the shard has parent/dependents, raft logs are not truncated to
+                    // `progress.truncated_index`.
+                    let has_dependents = merged_raft.has_dependents(region_id);
+                    assert!(
+                        cs.has_parent() || has_dependents,
+                        "truncated index mismatch: cs: {:?}, has_dependents {}, progress: {:?}, truncated_index: {}",
+                        cs,
+                        has_dependents,
+                        progress,
+                        truncated_index
+                    );
                 }
             }
         }
@@ -180,6 +200,15 @@ fn test_merged_engine_once() {
     for (region_id, _) in region_peers {
         if let Some(progress) = merged_engine.get_region_progress(region_id) {
             let truncated_index = merged_raft.get_truncated_index(region_id).unwrap();
+
+            if progress.keyspace_id != keyspace_id {
+                assert!(
+                    truncated_index == progress.truncated_index()
+                        || truncated_index == RAFT_INIT_LOG_INDEX
+                );
+                continue;
+            }
+
             assert_eq!(progress.truncated_index(), truncated_index);
         }
     }
