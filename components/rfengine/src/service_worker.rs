@@ -394,8 +394,7 @@ impl ServiceWorker {
         if task.config.lightweight {
             self.lightweight_backup(task);
         } else {
-            self.compact_worker_handle
-                .try_send(CompactTask::HeavyBackup(task));
+            (task.callback)(Err(Error::Backup("backup not enabled".into())));
         }
     }
 

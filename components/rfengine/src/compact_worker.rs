@@ -2,11 +2,10 @@
 
 use std::{
     borrow::Cow,
-    cmp::min,
     collections::{HashMap, VecDeque},
     fmt, fs,
     fs::File,
-    io::{Read, Seek, SeekFrom, Write},
+    io::Write,
     mem,
     path::{Path, PathBuf},
     sync::{
@@ -26,7 +25,6 @@ use protobuf::Message;
 use quick_cache::unsync::Cache as QuickCache;
 use rfenginepb::{
     KeySpaceBackupMeta, RaftLogBackupFile, RaftLogFile, StoreBackupMeta, StoreRaftLogBackupMeta,
-    WalChunk,
 };
 use slog_global::*;
 use tikv_util::{
@@ -41,8 +39,6 @@ use crate::{
     write_batch::PeerBatch,
     *,
 };
-
-const MAX_WAL_CHUNK_SIZE: u64 = 128 * 1024 * 1024;
 
 // Maximum size of snapshot. This size is determined by maximum object size of
 // S3, which is 5 GiB.
@@ -130,20 +126,11 @@ impl CompactWorker {
         while let Ok(task) = self.task_rx.recv() {
             match task {
                 CompactTask::Compact { epoch_id } => self.handle_compact(epoch_id),
-                CompactTask::HeavyBackup(task) => self.handle_heavy_backup(task),
                 CompactTask::PrepareSnapshot => {
                     self.handle_prepare_snapshot_backup();
                 }
                 CompactTask::Close => return,
             }
-        }
-    }
-
-    fn handle_heavy_backup(&mut self, task: BackupTask) {
-        if task.config.incremental {
-            self.incremental_backup(task);
-        } else {
-            self.full_backup(task);
         }
     }
 
@@ -398,55 +385,6 @@ impl CompactWorker {
             .send(ObjectStorageTask::Snapshot(Ok(prepared_snap)));
     }
 
-    fn full_backup(&mut self, task: BackupTask) {
-        let engine_id = self.manifest.get_engine_id();
-        info!("{}: start backup task", engine_id);
-        let ob_start_time = Instant::now();
-        let wal_epoch = self.manifest.epoch_id + 1;
-        let mut objects = vec![];
-        let mut backup_meta = StoreBackupMeta::default();
-        backup_meta.set_store_id(engine_id);
-        match self.backup_wal(&mut backup_meta, wal_epoch, 0, task.file_off) {
-            Ok(mut objs) => objects.append(&mut objs),
-            Err(e) => {
-                return backup_callback(
-                    task,
-                    Err(Error::Backup(format!("backup wal failed {:?}", e))),
-                    "full_fail",
-                    ob_start_time,
-                );
-            }
-        }
-        let manifest = self.manifest.to_change_set(true); // Exclude tombstone peers.
-        match self.backup_raft_log_files(&manifest, &mut backup_meta, false) {
-            Ok(obj) => objects.push(obj),
-            Err(e) => {
-                return backup_callback(
-                    task,
-                    Err(Error::Backup(format!("backup raft log failed {:?}", e))),
-                    "full_fail",
-                    ob_start_time,
-                );
-            }
-        }
-        backup_meta.set_manifest(manifest);
-        let total_size: usize = objects.iter().map(|(_, data)| data.len()).sum();
-        info!(
-            "backup write file count: {}, size: {}, raft meta offset {}",
-            objects.len(),
-            total_size,
-            backup_meta.raft_meta_start_off,
-        );
-        // Starts a background task in case the object storage is slow and blocking WAL
-        // compaction.
-        thread::spawn(move || {
-            if let Err(err) = task.object_storage.put_objects(objects) {
-                return backup_callback(task, Err(Error::Backup(err)), "full_fail", ob_start_time);
-            }
-            backup_callback(task, Ok(backup_meta), "full_success", ob_start_time);
-        });
-    }
-
     fn get_keyspace_id_from_peer(store_id: u64, peer_meta: &rfenginepb::PeerMeta) -> u32 {
         match utils::get_keyspace_id_from_peer(peer_meta) {
             Some(keyspace_id) => keyspace_id,
@@ -571,108 +509,6 @@ impl CompactWorker {
         Ok((object_key, object.freeze()))
     }
 
-    fn backup_wal(
-        &mut self,
-        backup_meta: &mut StoreBackupMeta,
-        wal_epoch: u32,
-        start_off: u64,
-        end_off: u64,
-    ) -> Result<Vec<(String, Bytes)>> {
-        let wal_file_name = wal_file_name(&self.dir, wal_epoch, self.epoch_rotate_len);
-        let mut wal_file = fs::File::open(wal_file_name)?;
-        let mut chunks = vec![];
-        let mut total_size = 0;
-        let backup_size = end_off - start_off;
-        while total_size < backup_size {
-            let chunk_size = min(MAX_WAL_CHUNK_SIZE, backup_size - total_size);
-            let chunk = vec![0u8; chunk_size as usize];
-            chunks.push(chunk);
-            total_size += chunk_size;
-        }
-        let mut objects = vec![];
-        let mut offset = start_off;
-        if offset > 0 {
-            wal_file.seek(SeekFrom::Start(offset))?;
-        }
-        for mut chunk in chunks.drain(..) {
-            wal_file.read_exact(chunk.as_mut_slice())?;
-            let mut wal_chunk = WalChunk::default();
-            wal_chunk.set_epoch(wal_epoch);
-            wal_chunk.set_start_off(offset);
-            wal_chunk.set_end_off(offset + chunk.len() as u64);
-            let wal_key = wal_file_key(
-                backup_meta.get_store_id(),
-                wal_chunk.get_epoch(),
-                wal_chunk.get_start_off(),
-                wal_chunk.get_end_off(),
-            );
-            backup_meta.mut_wal_chunks().push(wal_chunk);
-            offset += chunk.len() as u64;
-            objects.push((wal_key, Bytes::from(chunk)));
-        }
-        Ok(objects)
-    }
-
-    fn incremental_backup(&mut self, mut task: BackupTask) {
-        let engine_id = self.manifest.get_engine_id();
-        let wal_epoch = self.manifest.epoch_id + 1;
-        // If epoch is not matched, fallback to full backup.
-        if wal_epoch != task.config.wal_epoch {
-            warn!(
-                "Fallback to full backup as wal epoch changed, cur: {}, input:{}",
-                wal_epoch, task.config.wal_epoch
-            );
-            task.config.incremental = false;
-            task.config.start_offset = 0;
-            return self.full_backup(task);
-        }
-        let ob_start_time = Instant::now();
-        if task.file_off < task.config.start_offset {
-            let msg = format!(
-                "WAL offset invalid, current {}, given start {}",
-                task.file_off, task.config.start_offset
-            );
-            return backup_callback(task, Err(Error::Backup(msg)), "incr_fail", ob_start_time);
-        }
-        info!(
-            "Engine {} start incremental backup task, epoch {}",
-            engine_id, wal_epoch
-        );
-        let mut backup_meta = StoreBackupMeta::default();
-        backup_meta.set_store_id(engine_id);
-        let mut objects = vec![];
-        match self.backup_wal(
-            &mut backup_meta,
-            wal_epoch,
-            task.config.start_offset,
-            task.file_off,
-        ) {
-            Ok(mut objs) => objects.append(&mut objs),
-            Err(e) => {
-                return backup_callback(
-                    task,
-                    Err(Error::Backup(format!("Backup WAL failed {:?}", e))),
-                    "incr_fail",
-                    ob_start_time,
-                );
-            }
-        }
-        let total_size: usize = objects.iter().map(|(_, data)| data.len()).sum();
-        info!(
-            "incremental backup read file count: {}, size: {}",
-            objects.len(),
-            total_size
-        );
-        // Starts a background task in case the object storage is slow and blocking WAL
-        // compaction.
-        thread::spawn(move || {
-            if let Err(err) = task.object_storage.put_objects(objects) {
-                return backup_callback(task, Err(Error::Backup(err)), "incr_fail", ob_start_time);
-            }
-            backup_callback(task, Ok(backup_meta), "incr_success", ob_start_time);
-        });
-    }
-
     fn sync_files(&mut self) {
         if self.files_to_sync.is_empty() {
             return;
@@ -783,7 +619,6 @@ pub(crate) fn wal_file_name(dir: &Path, epoch_id: u32, epoch_rotate_len: usize) 
 #[derive(Debug)]
 pub(crate) enum CompactTask {
     Compact { epoch_id: u32 },
-    HeavyBackup(BackupTask),
     PrepareSnapshot,
     Close,
 }
@@ -795,7 +630,6 @@ pub(crate) enum CompactTask {
 pub struct BackupConfig {
     pub cluster_id: u64,
     pub store_id: u64,
-    pub incremental: bool,
     pub wal_epoch: u32,
     pub start_offset: u64,
     pub lightweight: bool,

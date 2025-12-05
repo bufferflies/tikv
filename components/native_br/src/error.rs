@@ -90,10 +90,6 @@ pub enum Error {
     NoSnapshotAvailableError(String),
     #[error("WAL chunk integrity error {0}")]
     WalChunkIntegrityError(String),
-    // IncrementalBackupToleratedError means that we are performing an incremental backup with a
-    // last backup having tolerated error of one store, but we meet the error of another store.
-    #[error("Incremental backup tolerated error for store {0}")]
-    IncrementalBackupToleratedError(u64 /* store id */),
     #[error("Fetch RfEngine WAL chunk HTTP request error {0}")]
     RfengineHttpRequestError(HttpRequestError),
     #[error("Fetch RfEngine WAL chunk service error {0}")]

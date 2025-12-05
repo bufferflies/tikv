@@ -24,8 +24,7 @@ use tikv_util::{
 use crate::{
     backup,
     backup::{
-        update_service_safe_point, BackupConfig, BackupType, IncrementalBackupFile, Result,
-        SharedResult,
+        update_service_safe_point, BackupConfig, IncrementalBackupFile, Result, SharedResult,
     },
     error::{Error, SharedError},
     metrics::{NATIVE_BR_BACKUP_BATCH_SIZE, NATIVE_BR_BACKUP_ERROR, NATIVE_BR_BACKUP_SUCCESS},
@@ -325,7 +324,6 @@ impl BackupRunner {
         info!("backup worker: start backup"; "backup_ts" => backup_ts);
         let res = backup::backup_cluster_with_ts(
             self.config.clone(),
-            BackupType::Lightweight,
             "".to_string(),
             self.pd_client.as_ref(),
             backup_ts,

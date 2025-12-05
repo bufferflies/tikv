@@ -149,7 +149,6 @@ fn is_backup_error_retryable(err: &Error) -> bool {
     match err {
         Error::MetaNotFound(_)
         | Error::HttpRequestError(_)
-        | Error::IncrementalBackupToleratedError(_)
         | Error::RfengineDfsWorkerUnhealthy(_) => true,
         Error::BackupErrorOnStores(errs, _) => errs.iter().all(|e| is_backup_error_retryable(e)),
         Error::SharedError(err) => is_backup_error_retryable(err.inner()),

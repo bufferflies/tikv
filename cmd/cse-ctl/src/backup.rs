@@ -6,14 +6,12 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::Args;
 use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
 use native_br::{
-    backup::{
-        execute_full_backup, execute_incremental_backup, execute_lightweight_backup, BackupConfig,
-    },
+    backup::{execute_lightweight_backup, BackupConfig},
     common::get_all_incremental_backups,
 };
 use rfengine::parse_epoch_from_snapshot_key;
 use tikv_util::info;
-const INCREMENTAL_BACKUP_INTERVAL: u64 = 30; // seconds.
+const BACKUP_INTERVAL: u64 = 30; // seconds.
 
 #[derive(Args)]
 pub struct BackupArgs {
@@ -24,15 +22,8 @@ pub struct BackupArgs {
     /// used.
     #[clap(long, default_value_t = String::new())]
     pub name: String,
-    /// Lightweight backup or legacy backup.
-    #[clap(long)]
-    pub lightweight: bool,
-    /// Incremental backup or full backup.
-    #[clap(long)]
-    pub incremental: bool,
-    /// Backup interval for incremental or lightweight, in seconds. For
-    /// lightweight backup, interval set to 0 means only backup once.
-    #[clap(long, default_value_t = INCREMENTAL_BACKUP_INTERVAL)]
+    /// Backup interval, interval set to 0 means only backup once.
+    #[clap(long, default_value_t = BACKUP_INTERVAL)]
     pub interval: u64,
     /// PD endpoints, use `,` to separate multiple PDs
     #[clap(long, default_value_t = String::new())]
@@ -54,20 +45,10 @@ pub struct BackupArgs {
 pub fn execute_backup(args: BackupArgs) {
     let config: BackupConfig = get_backup_config_from_args(&args);
     info!("Begin backup with config {:?}", config);
-    if args.lightweight {
-        if let Err(e) =
-            execute_lightweight_backup(config, args.name, Duration::from_secs(args.interval))
-        {
-            panic!("failed to execute lightweight backup, err {:?}", e)
-        }
-    } else if args.incremental {
-        if let Err(e) =
-            execute_incremental_backup(config, args.name, Duration::from_secs(args.interval))
-        {
-            panic!("failed to execute incremental backup, err {:?}", e)
-        }
-    } else if let Err(e) = execute_full_backup(config, args.name) {
-        panic!("failed to execute full backup, err {:?}", e)
+    if let Err(e) =
+        execute_lightweight_backup(config, args.name, Duration::from_secs(args.interval))
+    {
+        panic!("failed to execute lightweight backup, err {:?}", e)
     }
 }
 

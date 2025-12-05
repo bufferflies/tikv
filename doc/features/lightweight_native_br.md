@@ -4,8 +4,6 @@
 
 In production environment, cluster backup operations are triggered in two ways: periodic backups and real-time backups during keyspace restores. Although incremental backups are supported to minimize backup costs, the large volume of writes in the cluster often results in most backups falling back to full backups. Considering the costs and the frequency of real-time backups, there is a requirement to optimize the cluster native backup and restore process.
 
-More details of native br please refer to [native_br](native_br.md)
-
 ## Lightweight Backups
 
 To make backups lightweight and avoid backing up WAL (Write-Ahead Log) and raft logs every time, which can lead to large backup sizes, historical epoch WAL files are persisted to S3. This means that each backup operation only needs to take a snapshot of the WAL files and save the corresponding WAL epoch and file_offset as metadata.

@@ -63,21 +63,11 @@ const BACKUP_GC_SERVICE_NAME: &str = "native_br";
 // will block GC.
 const BACKUP_SERVICE_SAFEPOINT_TTL: Duration = Duration::from_secs(12 * 60 * 60); // 12 hour.
 
-// Backup must not have more than 1 tolerated error of store.
-const BACKUP_MAX_TOLERATED_ERROR: usize = 1;
-
 pub const BACKUP_TS_WAIT_TIMEOUT_DEFAULT: ReadableDuration = ReadableDuration::secs(30);
 pub const BACKUP_TS_TTL_DEFAULT: ReadableDuration = ReadableDuration::secs(60);
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub type SharedResult<T> = std::result::Result<T, SharedError>;
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum BackupType {
-    Full,
-    Incremental,
-    Lightweight,
-}
 
 /// Generate full path `/<prefix>/backup/<name>`.
 /// When `name` is empty, `backup_ts` must be some.
@@ -96,77 +86,6 @@ pub fn backup_file_full_path(prefix: String, name: String, backup_ts: Option<u64
         .to_string()
 }
 
-pub fn execute_incremental_backup(
-    config: BackupConfig,
-    name: String,
-    interval: Duration,
-) -> Result<()> {
-    if !name.is_empty() {
-        return Err(Error::BackupError(
-            "Don't support non-empty name for incremental backup.".to_string(),
-        ));
-    }
-
-    if interval.is_zero() {
-        return Err(Error::BackupError(
-            "Interval must be positive for incremental backup. Use full or lightweight instead to backup once.".to_string(),
-        ));
-    }
-
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let gap = interval.as_secs() - duration.as_secs() % interval.as_secs();
-    let start_time = StdInstant::now()
-        .checked_add(Duration::from_secs(gap))
-        .unwrap();
-    let mut interval = GLOBAL_TIMER_HANDLE.interval(start_time, interval).compat();
-    let pd_client = create_pd_client(&config.security, &config.pd);
-    let mut cluster_backup_meta = None;
-    while let Some(Ok(_)) = block_on(interval.next()) {
-        match backup_cluster(
-            config.clone(),
-            BackupType::Incremental,
-            name.clone(),
-            &pd_client,
-            cluster_backup_meta.clone(),
-        ) {
-            Ok((_, meta)) => {
-                cluster_backup_meta = Some(meta);
-            }
-            Err(e) => {
-                // For other errors, retry incremental backup later.
-                if need_full_backup(&e) {
-                    warn!("Incremental backup fails {:?}, fallback to full backup", e);
-                    // If incremental backup fails, restart full backup automatically.
-                    match backup_cluster(
-                        config.clone(),
-                        BackupType::Full,
-                        name.clone(),
-                        &pd_client,
-                        None,
-                    ) {
-                        Ok((_, meta)) => cluster_backup_meta = Some(meta),
-                        Err(e) => {
-                            return Err(Error::BackupError(format!(
-                                "Full backup still fail {:?}",
-                                e
-                            )));
-                        }
-                    }
-                } else {
-                    warn!("Incremental backup fails {:?}, retry later", e);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn execute_full_backup(config: BackupConfig, name: String) -> Result<()> {
-    // TODO: Set safepoint before backup and delete it after backup.
-    let pd_client = create_pd_client(&config.security, &config.pd);
-    backup_cluster(config, BackupType::Full, name, &pd_client, None).map(|_| ())
-}
-
 // Backup once if interval is 0.
 pub fn execute_lightweight_backup(
     config: BackupConfig,
@@ -177,7 +96,7 @@ pub fn execute_lightweight_backup(
 
     // Once lightweight backup.
     if interval.is_zero() {
-        return backup_cluster(config, BackupType::Lightweight, name, &pd_client, None).map(|_| ());
+        return backup_cluster(config, name, &pd_client, None).map(|_| ());
     }
 
     // Cron lightweight backup.
@@ -191,7 +110,6 @@ pub fn execute_lightweight_backup(
     while let Some(Ok(_)) = block_on(interval.next()) {
         match backup_cluster(
             config.clone(),
-            BackupType::Lightweight,
             name.clone(),
             &pd_client,
             cluster_backup_meta.clone(),
@@ -241,20 +159,12 @@ pub fn get_backup_ts(pd_client: &dyn PdClient) -> Result<u64> {
 // return backup file key(full path) and ClusterBackupMeta
 pub fn backup_cluster(
     config: BackupConfig,
-    backup_type: BackupType,
     name: String,
     pd_client: &dyn PdClient,
     last_backup_meta: Option<ClusterBackupMeta>,
 ) -> Result<(String, ClusterBackupMeta)> {
     let backup_ts = get_backup_ts(pd_client)?;
-    let ret = backup_cluster_with_ts(
-        config,
-        backup_type,
-        name,
-        pd_client,
-        backup_ts,
-        last_backup_meta,
-    )?;
+    let ret = backup_cluster_with_ts(config, name, pd_client, backup_ts, last_backup_meta)?;
     // Incremental backup keeps running in production env, so we only update service
     // safepoint when backup succeed. Therefore the first backup cannot be used as
     // we don't set safepoint before backup for logical simplicity.
@@ -264,7 +174,6 @@ pub fn backup_cluster(
 
 pub fn backup_cluster_with_ts(
     config: BackupConfig,
-    backup_type: BackupType,
     name: String,
     pd_client: &dyn PdClient,
     backup_ts: u64,
@@ -282,47 +191,24 @@ pub fn backup_cluster_with_ts(
 
     let dfs_conf = config.dfs.clone();
     let s3fs = S3Fs::new_from_config(dfs_conf);
-    let mut cluster_backup_meta = match backup_type {
-        BackupType::Full => ClusterBackupMeta::new(),
-        BackupType::Incremental => {
-            if let Some(meta) = last_backup_meta {
-                // Cluster topology may be changed between two loop, so it's necessary to check
-                // consistency.
-                check_backup_meta_consistency(&meta, &stores)?;
-                meta
-            } else {
-                // If no input backup meta, load latest one from s3.
-                let meta = runtime.block_on(get_latest_backup_meta(&s3fs, cluster_id))?;
-                if meta.is_lightweight {
-                    info!("latest cluster backup meta is lightweight, fallback to full backup");
-                    return Err(Error::MetaNotFound(cluster_id));
-                }
-                check_backup_meta_consistency(&meta, &stores)?;
-                meta
+    let mut cluster_backup_meta = ClusterBackupMeta::new();
+    let last_backup_meta = last_backup_meta.or_else(|| {
+        match runtime.block_on(get_latest_backup_meta(&s3fs, cluster_id)) {
+            Ok(latest) => Some(latest),
+            Err(err) => {
+                warn!("get latest backup meta failed"; "err" => ?err);
+                None
             }
         }
-        BackupType::Lightweight => {
-            let mut meta = ClusterBackupMeta::new();
-            let last_backup_meta = last_backup_meta.or_else(|| {
-                match runtime.block_on(get_latest_backup_meta(&s3fs, cluster_id)) {
-                    Ok(latest) => Some(latest),
-                    Err(err) => {
-                        warn!("get latest backup meta failed"; "err" => ?err);
-                        None
-                    }
-                }
-            });
-            if let Some(mut last_backup_meta) = last_backup_meta {
-                // Incremental backup of keyspace meta.
-                meta.set_meta_revision(last_backup_meta.meta_revision);
-                meta.set_keyspace_meta(last_backup_meta.take_keyspace_meta());
-            }
-            meta
-        }
-    };
+    });
+    if let Some(mut last_backup_meta) = last_backup_meta {
+        // Incremental backup of keyspace meta.
+        cluster_backup_meta.set_meta_revision(last_backup_meta.meta_revision);
+        cluster_backup_meta.set_keyspace_meta(last_backup_meta.take_keyspace_meta());
+    }
     cluster_backup_meta.set_backup_ts(backup_ts);
     cluster_backup_meta.set_cluster_id(cluster_id);
-    cluster_backup_meta.set_is_lightweight(backup_type == BackupType::Lightweight);
+    cluster_backup_meta.set_is_lightweight(true);
 
     runtime.block_on(backup_pd_keyspace_meta(&config, &mut cluster_backup_meta))?;
 
@@ -335,7 +221,6 @@ pub fn backup_cluster_with_ts(
     let tolerated_err_stores = loop {
         match runtime.block_on(backup_stores(
             &config,
-            backup_type,
             backup_ts,
             pd_client,
             stores.clone(),
@@ -404,7 +289,6 @@ pub fn backup_cluster_with_ts(
 
 async fn backup_stores(
     config: &BackupConfig,
-    backup_type: BackupType,
     backup_ts: u64,
     pd_client: &dyn PdClient,
     stores: Vec<Store>,
@@ -415,28 +299,13 @@ async fn backup_stores(
     let cluster_id = cluster_backup_meta.cluster_id;
     debug_assert!(cluster_id > 0);
     for store in stores {
-        let rf_config = get_rf_backup_config(
-            cluster_backup_meta,
-            cluster_id,
-            store.id,
-            backup_type,
-            backup_ts,
-            config,
-        );
-        if let Some(rf_config) = rf_config {
-            let security_mgr = pd_client.get_security_mgr();
-            let task = async move {
-                let res = backup_store(rf_config, &store, &security_mgr, timeout).await;
-                (store, res)
-            };
-            tasks.spawn(task);
-        } else {
-            // Treat tolerated error in incremental backup as error, to make sure that
-            // the `config.tolerate_err` will not be violated.
-            // TODO: remove incremental backup.
-            info!("incremental backup: last_backup.tolerated_err > 0"; "store_id" => store.id, "backup" => ?cluster_backup_meta);
-            return Err(Error::IncrementalBackupToleratedError(store.id));
-        }
+        let rf_config = get_rf_backup_config(cluster_id, store.id, backup_ts, config);
+        let security_mgr = pd_client.get_security_mgr();
+        let task = async move {
+            let res = backup_store(rf_config, &store, &security_mgr, timeout).await;
+            (store, res)
+        };
+        tasks.spawn(task);
     }
 
     let mut error_stores = vec![];
@@ -518,104 +387,33 @@ fn merge_store_backup_meta(
     cluster_backup_meta: &mut ClusterBackupMeta,
     store_backup_meta: StoreBackupMeta,
 ) {
-    // Only full backup has manifest. Full backup and lightweight backup need merge
-    // store meta.
-    //
-    // BackupType::Full and BackupType::Lightweight.
-    if store_backup_meta.has_manifest() || cluster_backup_meta.is_lightweight {
-        // remove the old one and add the new one.
-        if let Some(index) = cluster_backup_meta
-            .stores
-            .iter()
-            .position(|s| s.store_id == store_backup_meta.store_id)
-        {
-            cluster_backup_meta.stores.remove(index);
-        }
-        cluster_backup_meta.mut_stores().push(store_backup_meta);
-    } else {
-        // For incremental backup, only WAL is backed up.
-        // Append new WAL chunks to original StoreBackupMeta.
-        //
-        // BackupType::Incremental
-        let store = cluster_backup_meta
-            .mut_stores()
-            .iter_mut()
-            .find(|s| s.store_id == store_backup_meta.store_id)
-            .unwrap(); // store existence is checked before.
-        for chunk in &store_backup_meta.wal_chunks {
-            store.mut_wal_chunks().push(chunk.clone());
-        }
+    // remove the old one and add the new one.
+    if let Some(index) = cluster_backup_meta
+        .stores
+        .iter()
+        .position(|s| s.store_id == store_backup_meta.store_id)
+    {
+        cluster_backup_meta.stores.remove(index);
     }
+    cluster_backup_meta.mut_stores().push(store_backup_meta);
 }
 
 fn get_rf_backup_config(
-    backup_meta: &ClusterBackupMeta,
     cluster_id: u64,
     store_id: u64,
-    backup_type: BackupType,
     backup_ts: u64,
     cfg: &BackupConfig,
-) -> Option<rfengine::BackupConfig> {
-    let incremental = backup_type == BackupType::Incremental;
-    let lightweight = backup_type == BackupType::Lightweight;
+) -> rfengine::BackupConfig {
     let backup_ts_opt = (!cfg.backup_delay.is_zero()).then_some(backup_ts);
-    let mut config = rfengine::BackupConfig {
+    rfengine::BackupConfig {
         cluster_id,
         store_id,
-        incremental,
         wal_epoch: 0,
         start_offset: 0,
-        lightweight,
+        lightweight: true,
         backup_ts: backup_ts_opt,
         backup_ts_wait_secs: Some(cfg.backup_ts_wait_timeout.0.as_secs()),
         backup_ts_ttl_secs: Some(cfg.backup_ts_ttl.0.as_secs()),
-    };
-    if incremental {
-        // store id existence is checked in check_backup_meta_consistency
-        let store_meta = backup_meta
-            .get_stores()
-            .iter()
-            .find(|s| s.get_store_id() == store_id)?;
-        let last_wal = store_meta.get_wal_chunks().last().unwrap();
-        config.wal_epoch = last_wal.epoch;
-        config.start_offset = last_wal.get_end_off();
-    }
-    Some(config)
-}
-
-fn check_backup_meta_consistency(backup_meta: &ClusterBackupMeta, stores: &[Store]) -> Result<()> {
-    if backup_meta.tolerated_err > BACKUP_MAX_TOLERATED_ERROR as u32 {
-        error!("check_backup_meta_consistency: Tolerated error exceeds limit"; "backup" => ?backup_meta);
-        return Err(Error::BackupError(format!(
-            "Tolerated error {} exceeds limit {}",
-            backup_meta.tolerated_err, BACKUP_MAX_TOLERATED_ERROR
-        )));
-    }
-
-    if stores.len() != backup_meta.stores.len() + backup_meta.tolerated_err as usize {
-        return Err(Error::TopoChanged(format!(
-            "Stores' count changed during backup, cur: {}, backed up: {}",
-            stores.len(),
-            backup_meta.stores.len()
-        )));
-    }
-    let remain_stores: Vec<u64> = stores
-        .iter()
-        .filter(|s| {
-            !backup_meta
-                .stores
-                .iter()
-                .any(|s_meta| s_meta.store_id == s.id)
-        })
-        .map(|s| s.id)
-        .collect();
-    if remain_stores.len() == backup_meta.tolerated_err as usize {
-        Ok(())
-    } else {
-        Err(Error::TopoChanged(format!(
-            "Check backup meta fails, have no meta for store: {:?}",
-            remain_stores
-        )))
     }
 }
 
@@ -857,7 +655,6 @@ impl IncrementalBackupFile {
 mod tests {
     use chrono::{DateTime, NaiveDateTime, Utc};
     use kvengine::dfs::Dfs;
-    use kvproto::metapb::Store;
     use rfenginepb::{ChangeSet, ClusterBackupMeta, StoreBackupMeta, WalChunk};
     use test_cloud_server::oss::prepare_dfs;
     use test_pd_client::TestPdClient;
@@ -899,69 +696,6 @@ mod tests {
         merge_store_backup_meta(&mut cluster_meta, store_meta.clone());
         assert_eq!(cluster_meta.stores.len(), 2);
         assert_eq!(cluster_meta.stores.last().unwrap().clone(), store_meta);
-
-        // incremental backup, append wal chunks.
-        store_meta.set_store_id(store_id);
-        store_meta.clear_manifest();
-        let mut store_meta = StoreBackupMeta::new();
-        store_meta.set_store_id(store_id);
-        for i in 0..wal_chunk_cnt {
-            store_meta.mut_wal_chunks().push(WalChunk {
-                epoch: 2,
-                start_off: (i + wal_chunk_cnt) * 10,
-                end_off: (i + wal_chunk_cnt) * 20,
-                ..Default::default()
-            });
-        }
-        merge_store_backup_meta(&mut cluster_meta, store_meta.clone());
-        assert_eq!(cluster_meta.stores.len(), 2);
-        let last_meta = cluster_meta.stores.last().unwrap();
-        assert_eq!(last_meta.wal_chunks.len(), 2 * wal_chunk_cnt as usize);
-        for (i, chunk) in last_meta.wal_chunks.iter().enumerate() {
-            assert_eq!(chunk.epoch, 2);
-            assert_eq!(chunk.start_off, i as u64 * 10);
-            assert_eq!(chunk.end_off, i as u64 * 20);
-        }
-    }
-
-    #[test]
-    fn test_check_backup_meta_consistency() {
-        let mut meta = ClusterBackupMeta::new();
-        let mut stores = vec![];
-        for i in 0..3 {
-            stores.push(Store {
-                id: i,
-                ..Default::default()
-            });
-        }
-        check_backup_meta_consistency(&meta, &stores).unwrap_err();
-
-        for i in 0..3 {
-            meta.mut_stores().push(StoreBackupMeta {
-                store_id: i + 1,
-                ..Default::default()
-            });
-        }
-        check_backup_meta_consistency(&meta, &stores).unwrap_err();
-
-        meta.clear_stores();
-        for i in 0..3 {
-            meta.mut_stores().push(StoreBackupMeta {
-                store_id: i,
-                ..Default::default()
-            });
-        }
-        check_backup_meta_consistency(&meta, &stores).unwrap();
-
-        stores.push(Store {
-            id: 10,
-            ..Default::default()
-        });
-        check_backup_meta_consistency(&meta, &stores).unwrap_err();
-        meta.set_tolerated_err(1);
-        check_backup_meta_consistency(&meta, &stores).unwrap();
-        stores.first_mut().unwrap().id = 11;
-        check_backup_meta_consistency(&meta, &stores).unwrap_err();
     }
 
     #[test]

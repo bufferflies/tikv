@@ -8,7 +8,7 @@ use futures::executor::block_on;
 use kvengine::{dfs::S3Fs, table::BIT_DELETE, WRITE_CF};
 use kvproto::metapb;
 use merged_engine::{MergedEngine, MergedEngineConfig, MergedEngineContext};
-use native_br::{backup, backup::BackupType, common::send_request_to_store};
+use native_br::{backup, common::send_request_to_store};
 use pd_client::PdClient;
 use rand::Rng;
 use rfstore::store::{load_raft_engine_meta, ApplyContext, RAFT_INIT_LOG_INDEX};
@@ -65,7 +65,6 @@ fn test_merged_engine_once() {
     };
     let (_backup_key, backup_meta) = backup::backup_cluster(
         backup_config.clone(),
-        BackupType::Lightweight,
         "merged_engine_restart".to_string(),
         pd_client.as_ref(),
         None,

@@ -116,7 +116,6 @@ fn test_backup_on_scaling_up() {
         let h = s.spawn(move || {
             backup::backup_cluster_with_ts(
                 backup_config,
-                backup::BackupType::Lightweight,
                 backup_name,
                 pd_client.as_ref(),
                 backup_ts,
@@ -157,7 +156,6 @@ fn test_backup_on_scaling_up() {
         let h = s.spawn(move || {
             backup::backup_cluster_with_ts(
                 backup_config,
-                backup::BackupType::Lightweight,
                 backup_name,
                 pd_client.as_ref(),
                 backup_ts,
@@ -272,7 +270,6 @@ fn test_restore_on_disk_full() {
     let backup_ts = client.get_ts().into_inner();
     backup::backup_cluster_with_ts(
         backup_config,
-        backup::BackupType::Lightweight,
         backup_name.clone(),
         pd_client.as_ref(),
         backup_ts,
@@ -557,7 +554,6 @@ fn test_backup_pessimistic_lock() {
         let h = s.spawn(move || {
             backup::backup_cluster_with_ts(
                 backup_config,
-                backup::BackupType::Lightweight,
                 backup_name,
                 pd_client.as_ref(),
                 backup_ts,
@@ -738,7 +734,6 @@ fn test_check_backup_ts(#[case] write_method: TxnWriteMethod) {
         let h_backup = s.spawn(move || {
             backup::backup_cluster_with_ts(
                 backup_config,
-                backup::BackupType::Lightweight,
                 backup_name_cp,
                 pd_client.as_ref(),
                 backup_ts,
@@ -914,7 +909,6 @@ fn test_check_backup_ts_with_async_commit() {
         let h_backup = s.spawn(move || {
             backup::backup_cluster_with_ts(
                 backup_config,
-                backup::BackupType::Lightweight,
                 backup_name_cp,
                 pd_client.as_ref(),
                 backup_ts,
