@@ -139,7 +139,7 @@ impl Default for Options {
             ignore_columnar_table_load: false,
             build_columnar: AtomicBool::new(false),
             read_columnar: false,
-            gc_lock_extra_cf: false,
+            gc_lock_extra_cf: true,
             low_space_threshold: 0,
         }
     }

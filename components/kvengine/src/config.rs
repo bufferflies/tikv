@@ -190,7 +190,7 @@ impl Default for Config {
             ignore_columnar_table_load: false,
             build_columnar: false,
             read_columnar: false,
-            gc_lock_extra_cf: false,
+            gc_lock_extra_cf: true,
         }
     }
 }

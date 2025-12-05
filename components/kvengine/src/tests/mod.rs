@@ -1453,7 +1453,6 @@ fn new_test_options(
     opts.blob_table_build_options.min_blob_size = min_blob_size;
     opts.max_del_range_delay = Duration::from_secs(1);
     opts.read_columnar = true;
-    opts.gc_lock_extra_cf = true;
     opts
 }
 
