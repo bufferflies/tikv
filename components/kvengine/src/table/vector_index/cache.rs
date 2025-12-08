@@ -67,10 +67,7 @@ impl VectorIndexCache {
         handle: tokio::runtime::Handle,
         ia_mgr: IaManager,
     ) -> Self {
-        let cache_cap = config
-            .cache_cap
-            .as_disks_size(ia_mgr.main_store_paths())
-            .unwrap();
+        let cache_cap = config.cache_cap.as_memory_size();
         info!(
             "create vector index cache using config: {:?}, calcualted cache_cap: {}",
             config, cache_cap
@@ -199,7 +196,7 @@ impl VectorIndexCache {
         match ia_mgr.segment_cached_position(segment_ident) {
             FileSegmentPosition::InMem => true,
             FileSegmentPosition::InStore => {
-                // If the segment is in store but cached as in mem, we can evcit it.
+                // If the segment is in store but cached is in mem, we can evict it.
                 if cached.index_data.is_in_mem() {
                     return false;
                 }
@@ -218,7 +215,8 @@ impl VectorIndexCache {
     }
 }
 
-impl Drop for VectorIndexCache {
+/// Drop the cleanup task when the cache core is dropped.
+impl Drop for VectorIndexCacheCore {
     fn drop(&mut self) {
         if let Ok(guard) = self.cleanup_handle.try_read() {
             if let Some(handle) = guard.as_ref() {

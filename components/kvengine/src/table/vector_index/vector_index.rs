@@ -510,8 +510,15 @@ pub struct IndexData {
 }
 
 impl IndexData {
+    /// Returns the size of the index data resident in memory.
     pub fn index_size(&self) -> usize {
-        self.index.size()
+        match &self.file_data {
+            // Memory-mapped files don't consume heap memory equal to file size.
+            // The OS pages data in/out on demand. We only count the IndexData struct overhead.
+            MmapData::Local(_) => std::mem::size_of::<IndexData>(),
+            MmapData::InMem(data) => data.len(),
+            MmapData::AlignedInMem(data) => data.len(),
+        }
     }
 
     pub fn is_in_mem(&self) -> bool {
