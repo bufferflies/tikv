@@ -1,0 +1,62 @@
+name: Coverage
+
+on:
+  schedule:
+    # Beijing Time 02:00 (UTC+8) daily
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  coverage-report:
+    name: Generate Coverage Report
+    runs-on: [amd64, coverage]
+    env:
+      COVERAGE_OUTPUT_DIR: /var/www/html/reports/coverage
+    steps:
+      - name: Check Update
+        id: check-update
+        run: |
+          set -euo pipefail
+
+          SHA_FILE="${COVERAGE_OUTPUT_DIR}/github_sha.txt"
+
+          if [[ -f "${SHA_FILE}" ]]; then
+            EXISTING_SHA="$(tr -d '\n\r' < "${SHA_FILE}")"
+            if [[ "${EXISTING_SHA}" == "${{ github.sha }}" ]]; then
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              echo "Coverage report for ${{ github.sha }} already exists. Skipping job."
+              exit 0
+            fi
+          fi
+
+          echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Check out Code
+        if: steps.check-update.outputs.run != 'false'
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GIT_ACTION_BOT }}
+      - name: Generate Coverage Report
+        if: steps.check-update.outputs.run != 'false'
+        run: |
+          set -euo pipefail
+
+          mkdir -p ${COVERAGE_OUTPUT_DIR}
+          rm -rf -- "${COVERAGE_OUTPUT_DIR:?}/"*
+
+          make coverage-report
+
+          printf '%s\n' "${{ github.sha }}" > "${COVERAGE_OUTPUT_DIR}/github_sha.txt"
+          chmod -R +r ${COVERAGE_OUTPUT_DIR}
+          find "${COVERAGE_OUTPUT_DIR}" -type d -exec chmod +x {} \;
+
+          echo "Coverage report for ${{ github.sha }} generated at ${COVERAGE_OUTPUT_DIR}"
+      - name: Upload Coverage Report Artifact
+        if: steps.check-update.outputs.run != 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ github.sha }}
+          path: ${{ env.COVERAGE_OUTPUT_DIR }}

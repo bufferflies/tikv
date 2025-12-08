@@ -517,6 +517,7 @@ test-with-coverage: pre-test
 		--features jemalloc \
 		--no-report
 
+COVERAGE_OUTPUT_DIR ?= coverage
 post-coverage-report:
-	cargo llvm-cov report --html --output-dir coverage/
-	cargo llvm-cov report --lcov --output-path coverage/lcov.info
+	cargo llvm-cov report --html --output-dir $(COVERAGE_OUTPUT_DIR)/
+	cargo llvm-cov report --lcov --output-path $(COVERAGE_OUTPUT_DIR)/lcov.info
