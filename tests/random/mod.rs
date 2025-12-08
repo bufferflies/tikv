@@ -711,43 +711,76 @@ pub(crate) fn verify_cluster_stats(cluster: &ServerCluster, bucket_size: u64, ti
     });
 }
 
+fn try_verify_region_info_accessor(
+    cluster: &ServerCluster,
+    node_id: u16,
+) -> std::result::Result<(), String> {
+    let accessor = cluster.get_region_info_accessor(node_id);
+    let kvengine = cluster.get_kvengine(node_id);
+    let id_vers = kvengine.get_all_shard_id_vers();
+    let map_len = accessor.map_len();
+    let skl_len = accessor.skl_len();
+    if id_vers.len() != map_len || id_vers.len() != skl_len {
+        return Err(format!(
+            "region count not match (kvengine {}, map {}, skiplist {})",
+            id_vers.len(),
+            map_len,
+            skl_len
+        ));
+    }
+
+    for id_ver in id_vers {
+        let shard = kvengine
+            .get_shard(id_ver.id)
+            .ok_or_else(|| format!("shard {} not found", id_ver))?;
+        let region = accessor.find_region_by_id(id_ver.id).ok_or_else(|| {
+            format!(
+                "region {} not found in region info accessor on node {}",
+                id_ver, node_id
+            )
+        })?;
+        let region_version = region.region.get_region_epoch().get_version();
+        if shard.ver != region_version {
+            return Err(format!(
+                "region {} version mismatch (shard {}, accessor {})",
+                id_ver, shard.ver, region_version
+            ));
+        }
+        if shard.is_active() != region.is_leader() {
+            return Err(format!(
+                "region {} leader flag mismatch (shard_active {}, is_leader {})",
+                id_ver,
+                shard.is_active(),
+                region.is_leader()
+            ));
+        }
+        let encoded_start_key = encode_bytes(&shard.outer_start);
+        let region2 = accessor
+            .find_region_by_key(&encoded_start_key)
+            .map_err(|err| {
+                format!(
+                    "region for start key {:?} not found in region info accessor on node {}: {}",
+                    shard.outer_start, node_id, err
+                )
+            })?;
+        if shard.id != region2.id {
+            return Err(format!(
+                "region mismatch for start key {:?} shard {} got {}",
+                shard.outer_start, shard.id, region2.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn verify_region_info_accessor(cluster: &ServerCluster) {
     let nodes = cluster.get_nodes();
     for &node_id in &nodes {
-        let accessor = cluster.get_region_info_accessor(node_id);
-        let kvengine = cluster.get_kvengine(node_id);
-        let id_vers = must_wait_result(
-            || {
-                let id_vers = kvengine.get_all_shard_id_vers();
-                if id_vers.len() == accessor.map_len() && id_vers.len() == accessor.skl_len() {
-                    Ok(id_vers)
-                } else {
-                    Err(())
-                }
-            },
+        must_wait_result(
+            || try_verify_region_info_accessor(cluster, node_id),
             30,
-            || "region count not match".into(),
+            || format!("verify_region_info_accessor failed on node {}", node_id),
         );
-        for id_ver in id_vers {
-            let shard = kvengine.get_shard(id_ver.id).unwrap();
-            let region = accessor.find_region_by_id(id_ver.id).unwrap_or_else(|| {
-                panic!(
-                    "region {} not found in region info accessor on node {}",
-                    id_ver, node_id
-                )
-            });
-            let region_version = region.region.get_region_epoch().get_version();
-            assert_eq!(shard.ver, region_version, "shard {}", id_ver);
-            assert_eq!(shard.is_active(), region.is_leader(), "shard {}", id_ver);
-            let encoded_start_key = encode_bytes(&shard.outer_start);
-            let Ok(region2) = accessor.find_region_by_key(&encoded_start_key) else {
-                panic!(
-                    "region for start key {:?} not found in region info accessor on node {}",
-                    shard.outer_start, node_id
-                )
-            };
-            assert_eq!(shard.id, region2.id, "shard {}", id_ver);
-        }
     }
 }
 
