@@ -425,7 +425,7 @@ impl Default for IoRateLimitConfig {
         IoRateLimitConfig {
             max_bytes_per_sec: ReadableSize::mb(0),
             mode: IoRateLimitMode::WriteOnly,
-            strict: false,
+            strict: true,
             foreground_read_priority: IoPriority::High,
             foreground_write_priority: IoPriority::High,
             flush_priority: IoPriority::High,

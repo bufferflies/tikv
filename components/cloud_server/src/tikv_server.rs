@@ -306,7 +306,11 @@ impl TikvServer {
         let cfg_controller = Self::init_config(config);
         let config = cfg_controller.get_current();
         let (flow_controller, store_limiter) = Self::init_flow_control(&config);
-        let io_rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
+        let io_rate_limiter = Arc::new(IoRateLimiter::new(
+            IoRateLimitMode::WriteOnly,
+            config.storage.io_rate_limit.strict,
+            true,
+        ));
         io_rate_limiter
             .set_io_rate_limit(config.storage.io_rate_limit.max_bytes_per_sec.0 as usize);
         let master_key = dfs.get_runtime().block_on(config.security.new_master_key());
