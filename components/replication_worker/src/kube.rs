@@ -47,8 +47,10 @@ impl KeyspaceKubeService {
         kube_api: Arc<KubeApi>,
         conf: &ReplicationWorkerConfig,
         sec_conf: &SecurityConfig,
+        mut task_states: KeyspaceStates,
     ) -> Self {
-        let mut task_states = KeyspaceStates::default();
+        // Always overwrite the pd/cdc info in task_states. In case we change the
+        // deployment.
         task_states.pd_sts_name = kube_api.pd_sts_name(keyspace_id);
         task_states.cdc_sts_name = kube_api.cdc_sts_name(keyspace_id);
         let scheme = if sec_conf.ca_path.is_empty() {

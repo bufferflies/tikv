@@ -230,6 +230,7 @@ impl ReplicationWorker {
                     kube_api.clone().unwrap(),
                     &config,
                     &ctx.security_config,
+                    states,
                 ))
             };
             if let Err(err) = runtime.block_on(task_service.start()) {
@@ -1839,6 +1840,7 @@ impl ReplicationWorker {
                 kube_api,
                 &self.config,
                 &self.ctx.security_config,
+                KeyspaceStates::default(),
             ))
         } else if pd_url.is_empty() || cdc_addr.is_empty() {
             cb(Err(Error::OtherError("pd_url or cdc_addr is empty".into())));

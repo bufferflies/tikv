@@ -43,6 +43,9 @@ impl ServiceSafepointManager {
         runtime: tokio::runtime::Handle,
         keyspaces: HashMap<u32 /* keyspace_id */, KeyspaceChangefeeds>,
     ) -> Result<Self> {
+        info!("ServiceSafepointManager start";
+            "store" => merged_store_id, "keyspaces" => ?keyspaces);
+
         let http_client = box_try!(pd.get_security_mgr().http_client(hyper::Client::builder()));
         let config = rep_config.safepoint.clone();
         let runner = ServiceSafepointRunner {
@@ -178,7 +181,7 @@ impl ServiceSafepointManager {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ChangefeedSyncState {
     NotSynced,
     Synced,
@@ -212,6 +215,16 @@ pub(crate) struct KeyspaceChangefeeds {
     feeds: HashMap<String /* changefeed_id */, ChangefeedSyncState>,
 }
 
+impl fmt::Debug for KeyspaceChangefeeds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeyspaceChangefeeds")
+            .field("keyspace_id", &self.ctx.keyspace_id)
+            .field("cdc_addr", &self.ctx.cdc_addr)
+            .field("feeds", &self.feeds)
+            .finish()
+    }
+}
+
 impl KeyspaceChangefeeds {
     pub(crate) fn new(
         keyspace_id: u32,
@@ -238,13 +251,12 @@ impl KeyspaceChangefeeds {
     }
 
     fn set_feed_state(&mut self, feed_id: &str, new_state: ChangefeedSyncState) {
-        let Some(state) = self.feeds.get_mut(feed_id) else {
-            warn!("KeyspaceChangefeeds: set_feed_state: changefeed not found";
-                "feed" => feed_id, "keyspace" => self.ctx.keyspace_id);
+        let previous = self.feeds.insert(feed_id.to_string(), new_state.clone());
+        if previous.is_none() {
+            warn!("ServiceSafepointManager: set_feed_state: changefeed not found";
+                "feed" => feed_id, "new_state" => ?new_state, "keyspace" => self.ctx.keyspace_id);
             debug_assert!(false);
-            return;
         };
-        *state = new_state;
     }
 
     fn add_feed(&mut self, feed_id: String) {
@@ -424,11 +436,8 @@ impl ServiceSafepointRunner {
         let timeout = self.config.sync_ticdc_timeout.0;
 
         let mut join_set = tokio::task::JoinSet::new();
-        let ks_ctxs = self
-            .keyspaces
-            .values()
-            .filter(|ks| ks.need_sync())
-            .map(|ks| ks.ctx.clone());
+        // TODO: filter keyspaces by `ks.need_sync()`.
+        let ks_ctxs = self.keyspaces.values().map(|ks| ks.ctx.clone());
         for ks_ctx in ks_ctxs {
             let keyspace_id = ks_ctx.keyspace_id;
             let pd = pd.clone();
