@@ -813,6 +813,20 @@ pub fn prepare_dfs(prefix: &str) -> (TempDir, ObjectStorageService, DFSConfig) {
     (base_dir, oss, dfs_config)
 }
 
+pub fn prepare_builtin_dfs(prefix: &str) -> (TempDir, ObjectStorageService, DFSConfig) {
+    let base_dir = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+
+    let oss_dir = base_dir.path().join("oss");
+    let oss = ObjectStorageService::new(oss_dir);
+
+    let dfs_config = DFSConfig {
+        zstd_compression_level: "3".to_string(),
+        ..Default::default()
+    };
+
+    (base_dir, oss, dfs_config)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{assert_matches::assert_matches, os::unix::fs::FileExt};

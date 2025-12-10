@@ -188,11 +188,14 @@ impl ServerCluster {
         if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
             || dfs_conf.s3_endpoint == "local"
         {
+            info!("prepare_dfs: use builtin dfs");
             let builtin_dfs = builtin_dfs::BuiltinDfs::new(pd_client.clone());
             Arc::new(builtin_dfs)
         } else if dfs_conf.s3_endpoint == "memory" {
+            info!("prepare_dfs: use memory");
             Arc::new(kvengine::dfs::InMemFs::new())
         } else {
+            info!("prepare_dfs: use S3Fs");
             Arc::new(kvengine::dfs::S3Fs::new_from_config(dfs_conf.clone()))
         }
     }

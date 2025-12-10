@@ -27,7 +27,7 @@ use security::SecurityConfig;
 use test_cloud_server::{
     client::ClusterClientOptions,
     keyspace::make_row_key,
-    oss::{prepare_dfs, ObjectStorageService},
+    oss::{prepare_builtin_dfs, prepare_dfs, ObjectStorageService},
     tidb::TidbCluster,
     util::broadcast_schema_file_request_and_check,
     ServerCluster, ServerClusterBuilder, TikvWorkerOptions, IA_DISK_CAP_DEF,
@@ -72,6 +72,15 @@ const COP_BLOCK_CACHE_SIZE: ReadableSize = ReadableSize::mb(4); // Small size to
 
 #[test]
 fn test_random_all() {
+    test_random_all_impl(false);
+}
+
+#[test]
+fn test_random_builtin_all() {
+    test_random_all_impl(true);
+}
+
+fn test_random_all_impl(use_builtin_dfs: bool) {
     init_logger();
     let prepare_time = Instant::now_coarse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -82,11 +91,18 @@ fn test_random_all() {
         .unwrap();
     let _guard = runtime.enter();
 
-    let switches = Switches::from_env();
+    let mut switches = Switches::from_env();
+    if use_builtin_dfs {
+        switches.ia_table_ratio = 0 as f64;
+    }
     info!("switches: {:?}", switches);
 
     // Prepare.
-    let (_temp_dir, oss, dfs_config) = prepare_dfs("oss_");
+    let (_temp_dir, oss, dfs_config) = if use_builtin_dfs {
+        prepare_builtin_dfs("builtin_")
+    } else {
+        prepare_dfs("oss_")
+    };
     let security_conf = new_security_config();
     let mut cluster = prepare_cluster(
         dfs_config.clone(),
@@ -95,25 +111,11 @@ fn test_random_all() {
         INITIAL_KEYSPACE_COUNT,
         &switches,
         &oss,
+        use_builtin_dfs,
     );
     let pd_client = cluster.get_pd_client();
     let keyspace_manager = cluster.keyspace_manager().clone();
 
-    let backup_config = backup::BackupConfig {
-        dfs: dfs_config.clone(),
-        backup_delay: ReadableDuration::secs(1),
-        tolerate_err: 1,
-        skip_keyspace_meta: true,
-        ..Default::default()
-    };
-    let backup_worker = {
-        Arc::new(backup_worker::BackupWorker::new(
-            backup_config.clone(),
-            pd_client.clone(),
-            PERIODIC_BACKUP_INTERVAL,
-            BACKUP_BATCH_INTERVAL,
-        ))
-    };
     let load_data_config = {
         let tikv_config = cluster.get_node_config(cluster.get_nodes()[0]);
         let region_size = tikv_config.coprocessor.region_split_size.0 as usize;
@@ -145,16 +147,23 @@ fn test_random_all() {
         spawn_merge(cluster.new_scheduler(), true),
         spawn_transfer(cluster.new_scheduler()),
         spawn_move(cluster.new_scheduler(), Arc::new(RwLock::new(()))),
-        spawn_create_keyspace(
+    ];
+
+    if !use_builtin_dfs {
+        handles.push(spawn_create_keyspace(
             cluster.get_pd_client(),
             keyspace_manager.clone(),
             &s3fs,
             INITIAL_TABLE_COUNT,
             TABLE_SCHEMA_ENABLE_RATIO,
             TIMEOUT,
-        ),
-        spawn_major_compact(cluster.get_pd_client(), keyspace_manager.clone(), TIMEOUT),
-    ];
+        ))
+    }
+    handles.push(spawn_major_compact(
+        cluster.get_pd_client(),
+        keyspace_manager.clone(),
+        TIMEOUT,
+    ));
 
     let restore_config = RestoreConfig {
         dfs: dfs_config.clone(),
@@ -169,37 +178,56 @@ fn test_random_all() {
         lower_memory: switches.restore_lower_memory,
         ..Default::default()
     };
-    let object_cache = cluster.create_object_cache_randomly();
-    for _ in 0..RESTORE_CONCURRENCY {
-        handles.push(spawn_restore_keyspace(
-            cluster.get_pd_client(),
-            runtime.block_on(cluster.new_keyspace_client()),
-            restore_config.clone(),
-            keyspace_manager.clone(),
-            &s3fs,
-            switches.enable_oss_chaos,
-            object_cache.clone(),
-            TIMEOUT,
-        ));
-    }
-    let load_data_task_timeout = Duration::from_secs(env_param("LOAD_DATA_TASK_TIMEOUT_SEC", 90));
-    for _i in 0..LOAD_DATA_CONCURRENCY {
-        let load_data_config = load_data_config.clone();
-        handles.push(spawn_load_data(
-            cluster.get_pd_client(),
-            runtime.block_on(cluster.new_keyspace_client()),
-            dfs_config.clone(),
-            security_conf.clone(),
-            load_data_config.clone(),
-            keyspace_manager.clone(),
-            load_data_task_timeout,
-            Duration::from_secs(15),
-            TIMEOUT,
-        ));
+    if !use_builtin_dfs {
+        let object_cache = cluster.create_object_cache_randomly();
+        for _ in 0..RESTORE_CONCURRENCY {
+            handles.push(spawn_restore_keyspace(
+                cluster.get_pd_client(),
+                runtime.block_on(cluster.new_keyspace_client()),
+                restore_config.clone(),
+                keyspace_manager.clone(),
+                &s3fs,
+                switches.enable_oss_chaos,
+                object_cache.clone(),
+                TIMEOUT,
+            ));
+        }
+        let load_data_task_timeout =
+            Duration::from_secs(env_param("LOAD_DATA_TASK_TIMEOUT_SEC", 90));
+        for _i in 0..LOAD_DATA_CONCURRENCY {
+            let load_data_config = load_data_config.clone();
+            handles.push(spawn_load_data(
+                cluster.get_pd_client(),
+                runtime.block_on(cluster.new_keyspace_client()),
+                dfs_config.clone(),
+                security_conf.clone(),
+                load_data_config.clone(),
+                keyspace_manager.clone(),
+                load_data_task_timeout,
+                Duration::from_secs(15),
+                TIMEOUT,
+            ));
+        }
     }
 
-    let mut async_handles = vec![
-        spawn_backup(
+    let mut async_handles = vec![];
+    if !use_builtin_dfs {
+        let backup_config = backup::BackupConfig {
+            dfs: dfs_config.clone(),
+            backup_delay: ReadableDuration::secs(1),
+            tolerate_err: 1,
+            skip_keyspace_meta: true,
+            ..Default::default()
+        };
+        let backup_worker = {
+            Arc::new(backup_worker::BackupWorker::new(
+                backup_config.clone(),
+                pd_client.clone(),
+                PERIODIC_BACKUP_INTERVAL,
+                BACKUP_BATCH_INTERVAL,
+            ))
+        };
+        async_handles.push(spawn_backup(
             cluster.new_client(),
             keyspace_manager.clone(),
             backup_config,
@@ -207,14 +235,15 @@ fn test_random_all() {
             &s3fs,
             Duration::from_secs(5),
             TIMEOUT,
-        ),
-        spawn_gc_worker(
-            runtime.block_on(cluster.new_txn_client()),
-            pd_client.clone(),
-            keyspace_manager.clone(),
-            TIMEOUT,
-        ),
-    ];
+        ));
+    }
+    async_handles.push(spawn_gc_worker(
+        runtime.block_on(cluster.new_txn_client()),
+        pd_client.clone(),
+        keyspace_manager.clone(),
+        TIMEOUT,
+    ));
+
     for _ in 0..DROP_TABLE_CONCURRENCY {
         async_handles.push(spawn_drop_table(
             runtime.block_on(cluster.new_keyspace_client()),
@@ -231,20 +260,22 @@ fn test_random_all() {
             TIMEOUT,
         ));
     }
-    for i in 0..TXN_FILE_WRITE_CONCURRENCY {
-        handles.push(spawn_txn_file_write(
-            WRITE_CONCURRENCY,
-            i,
-            cluster.new_client_opt(ClusterClientOptions {
-                txn_file_max_chunk_size: Some(TXN_CHUNK_MAX_SIZE),
-                ..Default::default()
-            }),
-            keyspace_manager.clone(),
-            TIMEOUT,
-        ));
+    if !use_builtin_dfs {
+        for i in 0..TXN_FILE_WRITE_CONCURRENCY {
+            handles.push(spawn_txn_file_write(
+                WRITE_CONCURRENCY,
+                i,
+                cluster.new_client_opt(ClusterClientOptions {
+                    txn_file_max_chunk_size: Some(TXN_CHUNK_MAX_SIZE),
+                    ..Default::default()
+                }),
+                keyspace_manager.clone(),
+                TIMEOUT,
+            ));
+        }
     }
 
-    if switches.enable_oss_chaos {
+    if switches.enable_oss_chaos && !use_builtin_dfs {
         handles.push(spawn_oss_chaos(&oss, OSS_CHAOS_INTERVAL, running.clone()))
     }
 
@@ -289,7 +320,7 @@ fn test_random_all() {
 
     // Verify.
     info!("verify cluster");
-    let verified_records_count = runtime.block_on(verify_cluster(&mut cluster));
+    let verified_records_count = runtime.block_on(verify_cluster(&mut cluster, use_builtin_dfs));
 
     // Stop cluster.
     info!("stopping cluster");
@@ -320,6 +351,7 @@ fn prepare_cluster(
     initial_keyspace_count: usize,
     switches: &Switches,
     oss: &ObjectStorageService,
+    use_builtin_dfs: bool,
 ) -> ServerCluster {
     let mut rng = rand::thread_rng();
     let nodes = alloc_node_id_vec(nodes_count);
@@ -397,6 +429,13 @@ fn prepare_cluster(
         conf.raft_store.abnormal_leader_missing_duration = ReadableDuration::secs(3);
         conf.raft_store.max_leader_missing_duration = ReadableDuration::secs(5);
 
+        let mut lightweight_backup = true;
+        if use_builtin_dfs {
+            conf.raft_store.local_file_gc_timeout = ReadableDuration::secs(120);
+            conf.raft_store.local_file_gc_tick_interval = ReadableDuration::secs(10);
+            lightweight_backup = false;
+        }
+
         conf.rocksdb.writecf.block_size = ReadableSize::kb(4);
         conf.rocksdb.writecf.write_buffer_size = ReadableSize::kb(96);
         conf.rocksdb.writecf.target_file_size_base = KV_TARGET_FILE_SIZE;
@@ -405,7 +444,7 @@ fn prepare_cluster(
         conf.rfengine.rlog_file_size =
             rfengine_target_file_size / *[2, 8, 32].choose(&mut rng).unwrap();
         conf.rfengine.batch_compression_threshold = ReadableSize::kb(rng.gen_range(0..2));
-        conf.rfengine.lightweight_backup = true;
+        conf.rfengine.lightweight_backup = lightweight_backup;
         conf.rfengine.wal_chunk_target_file_size = rfengine_target_file_size / 8;
         conf.rfengine.dfs_worker_memory_limit = dfs_worker_memory_limit.into();
         conf.rfengine.wal_secondary_dir = Path::new(&conf.rfengine.wal_sync_dir)
@@ -442,14 +481,16 @@ fn prepare_cluster(
     let mut cluster = ServerClusterBuilder::new(nodes, update_conf_fn)
         .pd(pd_wrapper)
         .build();
-    cluster.start_tikv_workers(
-        alloc_node_id_vec(TIKV_WORKERS_COUNT),
-        TikvWorkerOptions {
-            kv_target_file_size: KV_TARGET_FILE_SIZE,
-            cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
-            ..Default::default()
-        },
-    );
+    if !use_builtin_dfs {
+        cluster.start_tikv_workers(
+            alloc_node_id_vec(TIKV_WORKERS_COUNT),
+            TikvWorkerOptions {
+                kv_target_file_size: KV_TARGET_FILE_SIZE,
+                cop_block_cache_size: COP_BLOCK_CACHE_SIZE,
+                ..Default::default()
+            },
+        );
+    }
     cluster.wait_region_replicated(&[], 3);
     let pd_client = cluster.get_pd_client();
     pd_client.disable_default_operator();
@@ -567,7 +608,8 @@ fn prepare_cluster(
     cluster
 }
 
-async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count in ref store */ {
+async fn verify_cluster(cluster: &mut ServerCluster, use_builtin_dfs: bool) -> usize /* records count in ref store */
+{
     // Verify data.
     let mut handles = vec![];
     for keyspace_id in cluster.keyspace_manager().ref_stores().all_keyspace_ids() {
@@ -595,8 +637,10 @@ async fn verify_cluster(cluster: &mut ServerCluster) -> usize /* records count i
     verify_region_info_accessor(cluster);
     verify_rfengine_keyspace_id(cluster);
 
-    check_br();
-    check_load_data();
+    if !use_builtin_dfs {
+        check_br();
+        check_load_data();
+    }
     check_gc();
     check_drop_table();
 
