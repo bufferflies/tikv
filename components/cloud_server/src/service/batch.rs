@@ -243,13 +243,16 @@ fn future_batch_get_command<E: Engine, L: LockManager, F: KvFormat>(
     let res = storage.batch_get_command(
         gets,
         requests,
-        trackers,
+        trackers.clone(),
         GetCommandResponseConsumer { tx: tx.clone() },
         begin_instant,
     );
     let f = async move {
         // This error can only cause by readpool busy.
         let res = res.await;
+        for tracker in trackers {
+            GLOBAL_TRACKERS.remove(tracker);
+        }
         if let Some(e) = extract_region_error(&res) {
             let mut resp = GetResponse::default();
             resp.set_region_error(e);
