@@ -5,7 +5,7 @@ use std::{
     cmp,
     collections::VecDeque,
     sync::{atomic::Ordering, Arc},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use api_version::ApiV2;
@@ -63,7 +63,7 @@ use tikv_util::{
     box_err,
     codec::bytes::decode_bytes,
     debug, error, info,
-    time::{duration_to_sec, monotonic_raw_now, InstantExt},
+    time::{duration_to_sec, monotonic_raw_now, Instant},
     warn,
     worker::Scheduler,
     Either,
@@ -81,6 +81,7 @@ pub(crate) const SPLIT_FLAG_ENCRYPTION_KEYS: u64 = 0x01;
 pub(crate) const PENDING_CONF_CHANGE_ERR_MSG: &str = "pending conf change";
 
 pub(crate) const SLOW_LOG_DURATION: Duration = Duration::from_millis(30);
+pub(crate) const WAIT_SNAPSHOT_ACK_TICKS: u32 = 60;
 
 /// The returned states of the peer after checking whether it is stale
 #[derive(Debug, PartialEq, Eq)]
@@ -457,6 +458,12 @@ pub(crate) struct Peer {
     pub(crate) last_committed_split_idx: u64,
     /// The index of last sent snapshot
     last_sent_snapshot_idx: u64,
+    /// Track snapshots we have sent but not yet acknowledged by the follower.
+    /// peer_id -> (snapshot_index, sent_at).
+    pending_snapshot_acks: HashMap<u64, (u64, Instant)>,
+    /// Timeout duration to wait for snapshot ack from follower.
+    wait_snapshot_ack_timeout: Duration,
+
     /// preprocessed_index is used to avoid duplicated preprocess execution.
     pub(crate) preprocessed_index: u64,
 
@@ -582,6 +589,7 @@ impl Peer {
         let raft_group = RawNode::new(&raft_cfg, ps, &logger)?;
         let keyspace_id =
             ApiV2::get_u32_keyspace_id_by_key(region.get_start_key()).unwrap_or_default();
+        let wait_snapshot_ack_timeout = cfg.raft_base_tick_interval.0 * WAIT_SNAPSHOT_ACK_TICKS;
         let mut peer = Peer {
             peer,
             region_id: region.get_id(),
@@ -603,6 +611,8 @@ impl Peer {
             last_urgent_proposal_idx: u64::MAX,
             last_committed_split_idx: 0,
             last_sent_snapshot_idx: 0,
+            pending_snapshot_acks: HashMap::default(),
+            wait_snapshot_ack_timeout,
             preprocessed_index: 0,
             learner_skip_idx: 0,
             pending_truncate: None,
@@ -912,6 +922,8 @@ impl Peer {
                     self.last_sent_snapshot_idx = snap_index;
                 }
                 let to_peer_id = msg.get_to_peer().get_id();
+                self.pending_snapshot_acks
+                    .insert(to_peer_id, (snap_index, Instant::now_coarse()));
                 let pr = self.raft_group.raft.prs().get(to_peer_id).unwrap();
                 let store = self.get_store();
                 let truncated_idx = store.truncated_index();
@@ -978,15 +990,12 @@ impl Peer {
                 // unreachable store
                 self.raft_group.report_unreachable(to_peer_id);
                 if msg_type == eraftpb::MessageType::MsgSnapshot {
+                    self.pending_snapshot_acks.remove(&to_peer_id);
                     self.raft_group
                         .report_snapshot(to_peer_id, SnapshotStatus::Failure);
                 }
                 ctx.raft_metrics.send_message.add(msg_type, false);
             } else {
-                if msg_type == MessageType::MsgSnapshot {
-                    self.raft_group
-                        .report_snapshot(to_peer_id, SnapshotStatus::Finish);
-                }
                 ctx.raft_metrics.send_message.add(msg_type, true);
             }
         }
@@ -1060,6 +1069,7 @@ impl Peer {
             self.peer.get_store_id() == 3 && self.region_id == 1,
             |_| Ok(())
         );
+        self.maybe_report_snapshot(&m);
         if self.is_leader() && m.get_from() != raft::INVALID_ID {
             self.peer_heartbeats.insert(m.get_from(), Instant::now());
             // As the leader we know we are not missing.
@@ -1101,6 +1111,53 @@ impl Peer {
         }
         self.raft_group.step(m)?;
         Ok(())
+    }
+
+    fn maybe_report_snapshot(&mut self, m: &eraftpb::Message) {
+        if self.pending_snapshot_acks.is_empty()
+            || !self.is_leader()
+            || m.get_msg_type() != MessageType::MsgAppendResponse
+        {
+            return;
+        }
+        let from = m.get_from();
+        let Some(&(snap_index, _)) = self.pending_snapshot_acks.get(&from) else {
+            return;
+        };
+        if (m.get_term(), m.get_index()) < (self.term(), snap_index) {
+            // stale message
+            return;
+        }
+        let status = if m.get_reject() {
+            SnapshotStatus::Failure
+        } else {
+            SnapshotStatus::Finish
+        };
+        self.pending_snapshot_acks.remove(&from);
+        self.raft_group.report_snapshot(from, status);
+        info!("{} snapshot {:?} from peer {}", self.tag(), status, from);
+    }
+
+    /// Report snapshot failure if follower never acknowledges within timeout.
+    pub(crate) fn check_snapshot_ack_timeout(&mut self) {
+        if self.pending_snapshot_acks.is_empty() {
+            return;
+        }
+        let now = Instant::now_coarse();
+        let expired_peers: Vec<u64> = self
+            .pending_snapshot_acks
+            .iter()
+            .filter_map(|(&peer_id, &(_, sent_at))| {
+                (now.saturating_duration_since(sent_at) > self.wait_snapshot_ack_timeout)
+                    .then_some(peer_id)
+            })
+            .collect();
+        for peer_id in expired_peers {
+            self.pending_snapshot_acks.remove(&peer_id);
+            self.raft_group
+                .report_snapshot(peer_id, SnapshotStatus::Failure);
+            info!("{} snapshot timeout for peer {}", self.tag(), peer_id);
+        }
     }
 
     /// Checks and updates `peer_heartbeats` for the peer.
@@ -1384,6 +1441,9 @@ impl Peer {
                     self.leader_lease.expire();
                 }
                 _ => {}
+            }
+            if ss.raft_state != StateRole::Leader {
+                self.pending_snapshot_acks.clear();
             }
 
             self.notify_role_changed(&ctx.global.pd_scheduler, ss.raft_state);

@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicUsize, Ordering::Relaxed},
         Arc, Mutex,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crossbeam::channel::RecvTimeoutError;
@@ -27,7 +27,7 @@ use tikv_util::{
     debug, error, info,
     mpsc::{Receiver, Sender},
     sys::thread::StdThreadBuildWrapper,
-    time::{duration_to_sec, InstantExt},
+    time::{duration_to_sec, Instant},
     warn,
 };
 

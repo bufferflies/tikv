@@ -11,7 +11,7 @@ use std::{
         Arc,
     },
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use api_version::ApiV2;
@@ -49,6 +49,7 @@ use tikv_util::{
     mpsc::{Receiver, Sender},
     store::{find_peer, is_learner},
     sys::thread::StdThreadBuildWrapper,
+    time::Instant,
     warn,
     worker::{Builder, LazyWorker, Scheduler},
     RingQueue,
