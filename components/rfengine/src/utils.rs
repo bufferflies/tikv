@@ -80,8 +80,8 @@ pub(crate) fn raft_log_file_name(dir: &Path, peer_id: u64, first: u64, last: u64
     ))
 }
 
-pub(crate) fn store_raft_log_file_key(store_id: u64, epoch: u32) -> String {
-    format!("{:016x}/r{:016x}.rlog", store_id, epoch)
+pub(crate) fn store_raft_log_file_key(store_id: u64, delayed_to_epoch: u32) -> String {
+    format!("{:016x}/r{:016x}.rlog", store_id, delayed_to_epoch)
 }
 
 pub fn wal_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) -> String {
@@ -91,29 +91,29 @@ pub fn wal_file_key(store_id: u64, epoch_id: u32, start_off: u64, end_off: u64) 
     )
 }
 
-pub fn snapshot_store_meta_key(store_id: u64, epoch: u32) -> String {
+pub fn snapshot_store_meta_key(store_id: u64, delayed_to_epoch: u32) -> String {
     format!(
         "store_backup/{:016x}/snapshots/m{:08x}.meta",
-        store_id, epoch
+        store_id, delayed_to_epoch
     )
 }
 
-pub fn snapshot_rlog_key(store_id: u64, epoch: u32) -> String {
+pub fn snapshot_rlog_key(store_id: u64, delayed_to_epoch: u32) -> String {
     format!(
         "store_backup/{:016x}/snapshots/r{:08x}.rlog",
-        store_id, epoch
+        store_id, delayed_to_epoch
     )
 }
 
-pub(crate) fn snapshot_rlog_key_suffix(epoch: u32) -> String {
-    format!("{:08x}.rlog", epoch)
+pub(crate) fn snapshot_rlog_key_suffix(delayed_to_epoch: u32) -> String {
+    format!("{:08x}.rlog", delayed_to_epoch)
 }
 
 pub(crate) fn snapshot_rlog_key_prefix(store_id: u64) -> String {
     format!("store_backup/{:016x}/snapshots/r", store_id)
 }
 
-pub fn parse_epoch_from_snapshot_key(key: Option<&str>) -> Option<u32> {
+pub fn parse_delayed_to_epoch_from_snapshot_key(key: Option<&str>) -> Option<u32> {
     key.and_then(|key| {
         let re = Regex::new(r"r([0-9a-fA-F]+)\.rlog").unwrap();
         if let Some(captures) = re.captures(key) {
@@ -471,9 +471,12 @@ mod tests {
             ("".to_string(), None),
         ];
         for case in cases {
-            assert_eq!(parse_epoch_from_snapshot_key(Some(case.0.as_str())), case.1);
+            assert_eq!(
+                parse_delayed_to_epoch_from_snapshot_key(Some(case.0.as_str())),
+                case.1
+            );
         }
-        assert_eq!(parse_epoch_from_snapshot_key(None), None);
+        assert_eq!(parse_delayed_to_epoch_from_snapshot_key(None), None);
     }
 
     #[test]

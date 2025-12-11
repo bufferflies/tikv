@@ -478,7 +478,13 @@ impl LocalWalChunksReader {
                 }
             })
             .unwrap_or_else(|x| {
-                debug_assert_eq!(x, self.chunks.metas.len());
+                debug_assert_eq!(
+                    x,
+                    self.chunks.metas.len(),
+                    "search offset {} on metas {:?}",
+                    offset,
+                    self.chunks.metas
+                );
                 x
             })
     }

@@ -1404,6 +1404,7 @@ pub fn new_test_config(
     config.rfengine.wal_sync_dir = format!("{}/{}/wal", base_dir.to_str().unwrap(), node_id);
     config.rfengine.enable_compact_rate_limiter = rng.gen_bool(0.5);
     config.rfengine.epoch_rotate_len = rng.gen_range(4..=8);
+    config.rfengine.delay_compaction_epoches = config.rfengine.epoch_rotate_len - 4;
     // config.rfengine.wal_secondary_dir = format!("{}/{}/wal2",
     // base_dir.to_str().unwrap(), node_id);
     config.kvengine.block_cache_type = BlockCacheType::Quick;

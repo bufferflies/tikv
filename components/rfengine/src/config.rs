@@ -104,6 +104,10 @@ pub struct Config {
     /// epoches.
     pub epoch_rotate_len: usize,
 
+    /// Delay compaction with latest truncated index to reduce generated rlog
+    /// file size.
+    pub delay_compaction_epoches: usize,
+
     /// modified by test only, skip serde to avoid misconfiguration.
     #[serde(skip)]
     pub(crate) max_batch_size: ReadableSize,
@@ -131,6 +135,7 @@ impl Default for Config {
             compact_bytes_per_sec: ReadableSize::mb(200),
             enable_compact_rate_limiter: false,
             epoch_rotate_len: MIN_EPOCH_ROTATE_LEN,
+            delay_compaction_epoches: 0,
             max_batch_size: ReadableSize::mb(256),
         }
     }
@@ -163,6 +168,16 @@ impl Config {
                 self.epoch_rotate_len, wal_file_count
             );
             self.epoch_rotate_len = wal_file_count;
+            if self.delay_compaction_epoches + MIN_EPOCH_ROTATE_LEN > self.epoch_rotate_len {
+                // adjust delay_compaction_epoches as well.
+                self.delay_compaction_epoches = self.epoch_rotate_len - MIN_EPOCH_ROTATE_LEN;
+            }
+        }
+        if self.delay_compaction_epoches + MIN_EPOCH_ROTATE_LEN > self.epoch_rotate_len {
+            return Err(format!(
+                "invalid delay_compaction_epoches {} with epoch_rotate_len {}",
+                self.delay_compaction_epoches, self.epoch_rotate_len
+            ));
         }
         Ok(())
     }

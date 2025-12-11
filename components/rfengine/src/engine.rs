@@ -25,7 +25,9 @@ use kvengine::dfs::{Dfs, S3Fs};
 use kvproto::raft_serverpb::{RegionLocalState, StoreIdent};
 use protobuf::Message;
 use raft_proto::eraftpb;
-use rfenginepb::{ClusterBackupMeta, KeySpaceBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
+use rfenginepb::{
+    ChangeSet, ClusterBackupMeta, KeySpaceBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta,
+};
 use tikv_util::{
     error,
     errors::Context as _,
@@ -246,7 +248,7 @@ impl RfEngineCore {
             compacted_epoch: compacted_epoch.clone(),
             _lock: lock,
         };
-        let async_offset = en.load(&manifest)?;
+        let (async_epoch_id, async_offset) = en.load(&manifest)?;
         if cfg.disable_compaction {
             return Ok(en);
         }
@@ -254,7 +256,7 @@ impl RfEngineCore {
             let async_wal_writer = if en.is_async_wal_enabled() {
                 let mut async_wal_writer =
                     WalWriter::new(dir, cfg, compacted_epoch.clone(), WriterType::Async);
-                async_wal_writer.open_file(manifest.epoch_id + 1, async_offset)?;
+                async_wal_writer.open_file(async_epoch_id, async_offset)?;
                 Some(async_wal_writer)
             } else {
                 None
@@ -299,11 +301,10 @@ impl RfEngineCore {
             } else {
                 None
             };
-            let epoch_id = en.current_epoch_id.load(Ordering::SeqCst);
             let mut service_worker = ServiceWorker::new(
                 dir.to_owned(),
                 cfg,
-                epoch_id,
+                async_epoch_id,
                 async_wal_writer,
                 service_rx,
                 manifest,
@@ -568,13 +569,18 @@ fn restore_all_raft_logs(
     snapshot_rlog: Option<String>,
 ) -> Result<()> {
     let store_id = store_meta.store_id;
-    let raft_file_key = snapshot_rlog
-        .unwrap_or_else(|| store_raft_log_file_key(store_id, store_meta.get_manifest().epoch_id));
+    let delayed_to_epoch_id = get_delayed_to_epoch_id(store_meta.get_manifest());
+    let raft_file_key =
+        snapshot_rlog.unwrap_or_else(|| store_raft_log_file_key(store_id, delayed_to_epoch_id));
     let raft_file = object_storage
         .get_objects(vec![(raft_file_key, GetObjectOptions::default())], None)
         .unwrap();
     let (_, rlog_data) = raft_file.first().unwrap();
     restore_all_raft_logs_with_snap_rlog_file(None, store_meta, dir, rlog_data)
+}
+
+pub(crate) fn get_delayed_to_epoch_id(manifest: &ChangeSet) -> u32 {
+    manifest.get_epoch_id() + manifest.get_delayed_epoches()
 }
 
 fn decompress_snap_rlog_file(compression_type: u32, content: &[u8]) -> Result<Cow<'_, [u8]>> {
@@ -634,8 +640,9 @@ fn restore_keyspace_raft_logs(
     snapshot_rlog: Option<String>,
 ) {
     let store_id = store_meta.store_id;
-    let raft_file_key = snapshot_rlog
-        .unwrap_or_else(|| store_raft_log_file_key(store_id, store_meta.get_manifest().epoch_id));
+    let delayed_to_epoch_id = get_delayed_to_epoch_id(store_meta.get_manifest());
+    let raft_file_key =
+        snapshot_rlog.unwrap_or_else(|| store_raft_log_file_key(store_id, delayed_to_epoch_id));
     let option = GetObjectOptions {
         start_off: Some(store_meta.raft_meta_start_off),
         end_off: None,
@@ -704,8 +711,9 @@ pub fn find_latest_snapshot(
                 None
             } else {
                 objects.into_iter().rev().find(|obj| {
-                    let obj_epoch = parse_epoch_from_snapshot_key(Some(obj.key.deref())).unwrap();
-                    obj_epoch < epoch_id
+                    let snap_delayed_to_epoch =
+                        parse_delayed_to_epoch_from_snapshot_key(Some(obj.key.deref())).unwrap();
+                    snap_delayed_to_epoch < epoch_id
                 })
             }
         }

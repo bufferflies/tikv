@@ -242,6 +242,16 @@ impl ServiceWorker {
                 self.dfs_worker_handle.as_ref().unwrap().try_send(task);
             }
         }
+        let mut truncated_idxes = vec![];
+        for batch in wb {
+            if batch.truncated_idx > 0 {
+                truncated_idxes.push((batch.peer_id, batch.truncated_idx));
+            }
+        }
+        let _ = self
+            .compact_worker_handle
+            .task_sender
+            .send(CompactTask::UpdateTruncatedIndexes { truncated_idxes });
     }
 
     /// `partial_content`:
@@ -358,10 +368,10 @@ impl ServiceWorker {
     }
 
     fn handle_rotate(&mut self, epoch_id: u32) {
+        self.epoch_id.store(epoch_id + 1, Ordering::SeqCst);
         if let Some(writer) = self.async_wal_writer.as_mut() {
             debug_assert_eq!(writer.epoch_id, epoch_id);
             let file_off = writer.file_off;
-            self.epoch_id.store(epoch_id + 1, Ordering::SeqCst);
             writer.rotate().unwrap();
             if let Some(dfs_worker_handle) = &self.dfs_worker_handle {
                 // Send rotate task to object storage worker.
@@ -369,7 +379,7 @@ impl ServiceWorker {
             }
         }
         self.compact_worker_handle
-            .try_send(CompactTask::Compact { epoch_id });
+            .try_send(CompactTask::Rotate { epoch_id });
     }
 
     fn handle_close(&mut self, force: bool) {

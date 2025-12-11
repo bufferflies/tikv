@@ -18,6 +18,7 @@ package rfpb;
 
 message ChangeSet {
     uint32 epoch_id = 1;
+    uint32 delayed_epoches = 3;
     repeated PeerMeta peers = 2;
 }
 

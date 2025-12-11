@@ -28,6 +28,7 @@ const REWRITE_DIFF: u32 = 10;
 #[derive(Debug)]
 pub(crate) struct Manifest {
     pub(crate) epoch_id: u32,
+    pub(crate) delayed_epoches: u32,
     pub(crate) file_path: PathBuf,
     pub(crate) file: File,
     pub(crate) peers: HashMap<u64, PeerMetaFiles>,
@@ -97,6 +98,7 @@ impl Manifest {
             .open(&file_path)?;
         let mut manifest = Self {
             epoch_id: 0,
+            delayed_epoches: 0,
             engine_id,
             file_path,
             file,
@@ -157,6 +159,7 @@ impl Manifest {
     fn apply_change_set(&mut self, cs: &rfenginepb::ChangeSet) -> crate::Result<()> {
         assert!(cs.epoch_id > self.epoch_id);
         self.epoch_id = cs.epoch_id;
+        self.delayed_epoches = cs.delayed_epoches;
         if self.first_epoch == 0 {
             self.first_epoch = cs.epoch_id;
         }
@@ -205,6 +208,7 @@ impl Manifest {
     pub(crate) fn to_change_set(&self, exclude_tombstone: bool) -> rfenginepb::ChangeSet {
         let mut cs = rfenginepb::ChangeSet::default();
         cs.epoch_id = self.epoch_id;
+        cs.delayed_epoches = self.delayed_epoches;
         for (&peer_id, peer_meta) in &self.peers {
             if exclude_tombstone && peer_meta.truncated_idx == TRUNCATE_ALL_INDEX {
                 continue;

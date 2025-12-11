@@ -6,6 +6,7 @@ use std::{
     fmt::Debug,
     fs,
     io::{Read, Seek, SeekFrom},
+    mem,
     os::unix::fs::FileExt,
     path::PathBuf,
     sync::{
@@ -33,7 +34,7 @@ use crate::{
     get_integral_wal_chunks, get_lz4_decompressed_size, last_wal_chunk_file_key,
     manifest::Manifest,
     metrics::{self, RFENGINE_DFS_WORKER_HEALTHY_GAUGE},
-    parse_epoch_from_snapshot_key, snapshot_store_meta_key, wal_chunk_file_key,
+    parse_delayed_to_epoch_from_snapshot_key, snapshot_store_meta_key, wal_chunk_file_key,
     wal_chunk_file_prefix, wal_file_name,
     writer::EPOCH_SNAPSHOT_LEN,
     Error, Result, WalChunkMeta, MAX_EPOCH_BACKWARD,
@@ -81,8 +82,50 @@ struct BackgroundWal {
 }
 
 struct BackgroundSnapshot {
-    epoch_id: u32,
+    delayed_to_epoch_id: u32,
     join_handle: JoinHandle<Result<()>>,
+}
+
+enum SnapshotState {
+    Idle,
+    Preparing,
+    WaitingWal(PreparedSnapshot),
+    Persisting(BackgroundSnapshot),
+}
+
+impl SnapshotState {
+    fn get_delayed_to_epoch(&self) -> Option<u32> {
+        match self {
+            SnapshotState::WaitingWal(prepared) => Some(prepared.get_delayed_to_epoch()),
+            _ => None,
+        }
+    }
+
+    fn take_prepared_snapshot(&mut self) -> PreparedSnapshot {
+        match mem::replace(self, SnapshotState::Idle) {
+            SnapshotState::WaitingWal(prepared) => prepared,
+            _ => unreachable!(),
+        }
+    }
+
+    fn is_persisting_finished(&self) -> Option<bool> {
+        match self {
+            SnapshotState::Persisting(background_snapshot) => {
+                Some(background_snapshot.join_handle.is_finished())
+            }
+            _ => None,
+        }
+    }
+
+    fn try_take_background_snapshot(&mut self) -> Option<BackgroundSnapshot> {
+        if !matches!(self, SnapshotState::Persisting(_)) {
+            return None;
+        }
+        match mem::replace(self, SnapshotState::Idle) {
+            SnapshotState::Persisting(background_snapshot) => Some(background_snapshot),
+            _ => unreachable!(),
+        }
+    }
 }
 
 pub(crate) struct ObjectStorageWorker {
@@ -102,9 +145,8 @@ pub(crate) struct ObjectStorageWorker {
     memory_limiter: MemoryLimiter,
     background_uploads: VecDeque<BackgroundWal>,
     upload_results: VecDeque<(WalChunkMeta, bool)>,
-    preparing_snap: bool,
-    persisting_snap: Option<BackgroundSnapshot>,
-    persisted_snap_epoch: u32,
+    snapshot_state: SnapshotState,
+    persisted_snap_delayed_to_epoch: u32,
 
     // When dfs worker failed to persist chunk, the healthy would be set to false and it will
     // not be recovered until next success snapshot, so we skip the epoch before the next
@@ -152,9 +194,8 @@ impl ObjectStorageWorker {
             memory_limiter,
             background_uploads: Default::default(),
             upload_results: Default::default(),
-            preparing_snap: false,
-            persisting_snap: None,
-            persisted_snap_epoch: 0,
+            snapshot_state: SnapshotState::Idle,
+            persisted_snap_delayed_to_epoch: 0,
             skip_sync_before_epoch: 0,
         }
     }
@@ -172,10 +213,10 @@ impl ObjectStorageWorker {
         if self.is_snap_lag_too_much() {
             return Err(Error::Dfs("snapshot lag too much".to_string()));
         }
-        // We start to check WAL integrity from the persisted_snap_epoch + 1, so if
-        // there is chunk missing and we not able to rebuild, the init failed and
-        // the healthy would be remain false.
-        let mut check_epoch = self.persisted_snap_epoch + 1;
+        // We start to check WAL integrity from the persisted_snap_delayed_to_epoch + 1,
+        // so if there is chunk missing and we not able to rebuild, the init
+        // failed and the healthy would be remain false.
+        let mut check_epoch = self.persisted_snap_delayed_to_epoch + 1;
         let store_id = self.get_engine_id();
         loop {
             if check_epoch >= self.epoch_id {
@@ -227,7 +268,7 @@ impl ObjectStorageWorker {
     }
 
     fn need_snapshot_after_init(&self) -> bool {
-        self.persisted_snap_epoch + EPOCH_SNAPSHOT_LEN <= self.epoch_id
+        self.persisted_snap_delayed_to_epoch + EPOCH_SNAPSHOT_LEN <= self.epoch_id
     }
 
     fn init_snapshot(&mut self) {
@@ -235,8 +276,10 @@ impl ObjectStorageWorker {
         let store_id = self.get_engine_id();
         match find_latest_snapshot(self.s3fs.clone(), &prefix, store_id, self.epoch_id) {
             Ok(snap_key) => {
-                if let Some(snap_epoch) = parse_epoch_from_snapshot_key(snap_key.as_deref()) {
-                    self.persisted_snap_epoch = snap_epoch;
+                if let Some(snap_delayed_to_epoch) =
+                    parse_delayed_to_epoch_from_snapshot_key(snap_key.as_deref())
+                {
+                    self.persisted_snap_delayed_to_epoch = snap_delayed_to_epoch;
                 }
             }
             Err(err) => {
@@ -262,7 +305,7 @@ impl ObjectStorageWorker {
                     self.compact_worker_tx
                         .send(CompactTask::PrepareSnapshot)
                         .unwrap();
-                    self.preparing_snap = true;
+                    self.snapshot_state = SnapshotState::Preparing;
                 }
                 info!("dfs worker init ok, set healthy");
                 self.healthy.set_healthy();
@@ -275,6 +318,7 @@ impl ObjectStorageWorker {
                 self.compact_worker_tx
                     .send(CompactTask::PrepareSnapshot)
                     .unwrap();
+                self.snapshot_state = SnapshotState::Preparing;
             }
         }
         loop {
@@ -311,6 +355,9 @@ impl ObjectStorageWorker {
                         if let Err(err) = self.handle_sync(epoch_id, file_off) {
                             error!("dfs worker handle_sync failed, set unhealthy"; "err" => ?err);
                             self.set_unhealthy(epoch_id);
+                            // always update epoch_id on rotate, so the epoch_id never fall
+                            // behind and we never rebuild_wal after first sync.
+                            self.reset(epoch_id + 1);
                             return;
                         }
                     }
@@ -325,18 +372,16 @@ impl ObjectStorageWorker {
                     self.wait_uploads();
                     self.wait_snap_and_recover_healthy();
                 }
-                ObjectStorageTask::Snapshot(res) => {
-                    self.preparing_snap = false;
-                    match res {
-                        Ok(prepared_snap) => {
-                            self.handle_snapshot(prepared_snap);
-                        }
-                        Err(err) => {
-                            error!("dfs worker prepare snapshot failed, set unhealthy"; "err" => ?err);
-                            self.set_unhealthy(self.epoch_id);
-                        }
+                ObjectStorageTask::Snapshot(res) => match res {
+                    Ok(prepared_snap) => {
+                        self.handle_snapshot(prepared_snap);
                     }
-                }
+                    Err(err) => {
+                        error!("dfs worker prepare snapshot failed, set unhealthy"; "err" => ?err);
+                        self.set_unhealthy(self.epoch_id);
+                        self.snapshot_state = SnapshotState::Idle;
+                    }
+                },
                 ObjectStorageTask::Close => unreachable!(),
             }
         }
@@ -357,6 +402,14 @@ impl ObjectStorageWorker {
         match join_res {
             Ok(Ok(())) => {
                 self.upload_results.push_back((upload.chunk, true));
+                if let Some(delayed_to_epoch) = self.snapshot_state.get_delayed_to_epoch() {
+                    // Try to wake waiting prepared snapshot.
+                    let uploading_wal_epoch = self.uploading_wal_epoch().unwrap_or(u32::MAX);
+                    if delayed_to_epoch < uploading_wal_epoch {
+                        let prepared = self.snapshot_state.take_prepared_snapshot();
+                        self.persist_snapshot(prepared);
+                    }
+                }
             }
             res => {
                 error!(
@@ -367,8 +420,20 @@ impl ObjectStorageWorker {
                 );
                 self.set_unhealthy(upload.chunk.epoch);
                 self.upload_results.push_back((upload.chunk, false));
+                if let Some(delayed_to_epoch) = self.snapshot_state.get_delayed_to_epoch() {
+                    error!(
+                        "{}: discard waiting snapshot delayed to wal {}",
+                        self.get_engine_id(),
+                        delayed_to_epoch,
+                    );
+                    self.snapshot_state = SnapshotState::Idle;
+                }
             }
         }
+    }
+
+    fn uploading_wal_epoch(&self) -> Option<u32> {
+        self.background_uploads.front().map(|w| w.chunk.epoch)
     }
 
     fn set_unhealthy(&mut self, failed_epoch: u32) {
@@ -380,22 +445,16 @@ impl ObjectStorageWorker {
     }
 
     fn try_wait_snap_and_recover_healthy(&mut self) {
-        if !self
-            .persisting_snap
-            .as_ref()
-            .is_some_and(|s| s.join_handle.is_finished())
-        {
+        if self.snapshot_state.is_persisting_finished() != Some(true) {
             return;
         }
         self.wait_snap_and_recover_healthy();
     }
 
     fn wait_snap_and_recover_healthy(&mut self) {
-        let Some(snap) = self.persisting_snap.take() else {
+        let Some(snap) = self.snapshot_state.try_take_background_snapshot() else {
             return;
         };
-        self.upload_results
-            .retain(|(chunk, _)| chunk.epoch > snap.epoch_id);
         let join_res = self.s3fs.get_runtime().block_on(snap.join_handle);
         match join_res {
             Ok(Ok(())) => {
@@ -403,14 +462,14 @@ impl ObjectStorageWorker {
                     "{} dfs worker joined snapshot recovery",
                     self.get_engine_id()
                 );
-                self.persisted_snap_epoch = snap.epoch_id;
+                self.persisted_snap_delayed_to_epoch = snap.delayed_to_epoch_id;
                 if !self.healthy.is_healthy() {
                     for (chunk, success) in self.upload_results.iter() {
                         if !success {
                             warn!(
                                 "{} dfs worker unable to recover healthy by snapshot {} as chunk {:?} failed",
                                 self.get_engine_id(),
-                                snap.epoch_id,
+                                snap.delayed_to_epoch_id,
                                 chunk,
                             );
                             return;
@@ -419,18 +478,18 @@ impl ObjectStorageWorker {
                     info!(
                         "{} dfs worker recovered healthy by snapshot {}",
                         self.get_engine_id(),
-                        snap.epoch_id
+                        snap.delayed_to_epoch_id
                     );
                     self.healthy.set_healthy();
                 }
             }
             res => {
                 error!(
-                    "dfs worker put snap epoch {} failed, error {:?}",
-                    snap.epoch_id, res
+                    "dfs worker put snapshot {} failed, error {:?}",
+                    snap.delayed_to_epoch_id, res
                 );
                 if self.is_snap_lag_too_much() {
-                    self.set_unhealthy(snap.epoch_id);
+                    self.set_unhealthy(snap.delayed_to_epoch_id);
                 }
             }
         }
@@ -621,36 +680,57 @@ impl ObjectStorageWorker {
         }
         self.reset(epoch_id + 1);
         if epoch_id % EPOCH_SNAPSHOT_LEN == 0 {
-            if self.preparing_snap {
+            if !matches!(self.snapshot_state, SnapshotState::Idle) {
                 warn!(
-                    "{}: prepare_snap not finished, skip snap epoch {}",
-                    self.get_engine_id(),
-                    epoch_id
-                );
-                return;
-            }
-            if self.persisting_snap.is_some() {
-                warn!(
-                    "{}: persisting_snap not finished, skip snap epoch {}",
+                    "{}: snapshot state is not idle, skip snap epoch {}",
                     self.get_engine_id(),
                     epoch_id
                 );
                 return;
             }
             let _ = self.compact_worker_tx.send(CompactTask::PrepareSnapshot);
-            self.preparing_snap = true;
+            self.snapshot_state = SnapshotState::Preparing;
         }
     }
 
     fn is_snap_lag_too_much(&self) -> bool {
-        self.persisted_snap_epoch + MAX_EPOCH_BACKWARD <= self.epoch_id
+        self.persisted_snap_delayed_to_epoch + MAX_EPOCH_BACKWARD <= self.epoch_id
     }
 
     fn handle_snapshot(&mut self, prepared_snap: PreparedSnapshot) {
+        let uploading_wal_epoch = self.uploading_wal_epoch().unwrap_or(u32::MAX);
+        if prepared_snap.get_delayed_to_epoch() >= uploading_wal_epoch {
+            // wait for the delayed wal epoches to finish upload to eliminate the
+            // possibility that the delayed wal may fail.
+            self.snapshot_state = SnapshotState::WaitingWal(prepared_snap);
+            return;
+        }
+        self.persist_snapshot(prepared_snap);
+    }
+
+    fn persist_snapshot(&mut self, prepared_snap: PreparedSnapshot) {
         let engine_id = self.get_engine_id();
         let epoch_id = prepared_snap.store_meta.epoch;
+        self.upload_results.retain(|(wal, _)| wal.epoch > epoch_id);
+        // Make sure all the delayed wal chunks has been successfully written to
+        // Dfs So we can be sure the snapshot is valid.
+        let delayed_to_epoch_id = prepared_snap.get_delayed_to_epoch();
+        let all_delayed_epoch_persisted = self
+            .upload_results
+            .iter()
+            .all(|(wal, ok)| *ok || wal.epoch > delayed_to_epoch_id);
+        if !all_delayed_epoch_persisted {
+            debug_assert!(!self.healthy.is_healthy());
+            error!(
+                "{}: skip persist snapshot as delayed wal failed to upload",
+                engine_id
+            );
+            self.snapshot_state = SnapshotState::Idle;
+            return;
+        }
         // Also need snapshot backup_meta.
-        let meta_key = snapshot_store_meta_key(engine_id, epoch_id);
+        // Use delayed_to_epoch_id
+        let meta_key = snapshot_store_meta_key(engine_id, delayed_to_epoch_id);
         let meta_data = prepared_snap.store_meta.write_to_bytes().unwrap();
         let meta_obj = (meta_key, Bytes::from(meta_data));
 
@@ -667,8 +747,8 @@ impl ObjectStorageWorker {
                 }
                 Ok(())
             });
-        self.persisting_snap = Some(BackgroundSnapshot {
-            epoch_id,
+        self.snapshot_state = SnapshotState::Persisting(BackgroundSnapshot {
+            delayed_to_epoch_id,
             join_handle,
         });
     }
@@ -932,6 +1012,12 @@ pub(crate) enum ObjectStorageTask {
 pub(crate) struct PreparedSnapshot {
     pub(crate) store_meta: StoreBackupMeta,
     pub(crate) rlog_obj: (String, Bytes),
+}
+
+impl PreparedSnapshot {
+    fn get_delayed_to_epoch(&self) -> u32 {
+        self.store_meta.epoch + self.store_meta.get_manifest().get_delayed_epoches()
+    }
 }
 
 impl Debug for PreparedSnapshot {

@@ -14,7 +14,7 @@ use tikv_util::{errors::Context as _, info, warn};
 use crate::{log_batch::RaftLogOp, manifest::Manifest, service_worker::ServiceTask, *};
 
 impl RfEngineCore {
-    pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<u64> {
+    pub(crate) fn load(&mut self, manifest: &Manifest) -> Result<(u32, u64)> {
         for (&peer_id, peer_meta) in &manifest.peers {
             let guard = self.peers.peers.guard();
             let peer_ref = self.get_or_init_peer_data(
@@ -37,25 +37,52 @@ impl RfEngineCore {
                 )?;
             }
         }
-        let mut epoch_id = manifest.epoch_id + 1;
-        let mut wal_offset = 0;
-        let mut async_offset = 0;
-        if wal_exists(self.wal_dir(), epoch_id, self.epoch_rotate_len) {
-            (wal_offset, async_offset) = self.load_wal_file(epoch_id, true)?;
-        }
-        while wal_exists(self.wal_dir(), epoch_id + 1, self.epoch_rotate_len) {
-            self.try_send_task(ServiceTask::Rotate { epoch_id });
-            epoch_id += 1;
-            let (offset, _) = self.load_wal_file(epoch_id, false)?;
-            wal_offset = offset;
+        let first_wal_epoch = manifest.epoch_id + 1;
+        let async_epoch =
+            Self::get_last_wal_epoch(&self.dir, first_wal_epoch, self.epoch_rotate_len);
+        let sync_epoch =
+            Self::get_last_wal_epoch(self.wal_dir(), first_wal_epoch, self.epoch_rotate_len);
+        let mut sync_wal_offset = 0;
+        let mut async_wal_offset = 0;
+        for epoch in first_wal_epoch..=sync_epoch {
+            let send_rotate = epoch > async_epoch;
+            let send_write = epoch >= async_epoch;
+            let is_async_epoch = epoch == async_epoch;
+            let is_sync_epoch = epoch == sync_epoch;
+            if self.is_async_wal_enabled() && send_rotate {
+                self.try_send_task(ServiceTask::Rotate {
+                    epoch_id: epoch - 1,
+                });
+            }
+            let (sync_offset, async_offset) =
+                self.load_wal_file(epoch, is_async_epoch, send_write)?;
+            if is_sync_epoch {
+                sync_wal_offset = sync_offset;
+            }
+            if is_async_epoch {
+                async_wal_offset = async_offset;
+            }
         }
         let mut writer = self.writer.lock().unwrap();
-        writer.open_file(epoch_id, wal_offset)?;
-        self.current_epoch_id.store(epoch_id, Ordering::SeqCst);
-        Ok(async_offset)
+        writer.open_file(sync_epoch, sync_wal_offset)?;
+        self.current_epoch_id.store(sync_epoch, Ordering::SeqCst);
+        Ok((async_epoch, async_wal_offset))
     }
 
-    pub(crate) fn load_wal_file(&mut self, epoch_id: u32, load_async: bool) -> Result<(u64, u64)> {
+    fn get_last_wal_epoch(dir: &Path, since_epoch: u32, epoch_rotate_len: usize) -> u32 {
+        let mut epoch = since_epoch;
+        while wal_exists(dir, epoch + 1, epoch_rotate_len) {
+            epoch += 1;
+        }
+        epoch
+    }
+
+    pub(crate) fn load_wal_file(
+        &mut self,
+        epoch_id: u32,
+        load_async: bool,
+        send_write: bool,
+    ) -> Result<(u64, u64)> {
         info!("load wal {}", epoch_id);
         let mut async_batch_cnt = 0;
         let mut async_offset = 0;
@@ -84,11 +111,12 @@ impl RfEngineCore {
         let mut it = WalIterator::new(self.wal_dir(), epoch_id, self.epoch_rotate_len)?;
         let sync_res = it.iterate_batch(|data, _| {
             sync_batch_idx += 1;
-            let mut wb = if self.is_async_wal_enabled() && sync_batch_idx > async_batch_cnt {
-                Some(WriteBatch::new())
-            } else {
-                None
-            };
+            let mut wb =
+                if self.is_async_wal_enabled() && sync_batch_idx > async_batch_cnt && send_write {
+                    Some(WriteBatch::new())
+                } else {
+                    None
+                };
             iterate_peer_batch(data, |peer_batch| {
                 let guard = self.peers.peers.guard();
                 let peer_ref = self.get_or_init_peer_data(

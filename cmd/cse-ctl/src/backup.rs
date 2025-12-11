@@ -9,7 +9,7 @@ use native_br::{
     backup::{execute_lightweight_backup, BackupConfig},
     common::get_all_incremental_backups,
 };
-use rfengine::parse_epoch_from_snapshot_key;
+use rfengine::parse_delayed_to_epoch_from_snapshot_key;
 use tikv_util::info;
 const BACKUP_INTERVAL: u64 = 30; // seconds.
 
@@ -126,14 +126,15 @@ pub fn execute_show_backup(args: ShowBackupArgs) {
                     store.epoch,
                 )
                 .unwrap();
-                let snap_epoch =
-                    parse_epoch_from_snapshot_key(snap_key.as_deref()).unwrap_or_default();
+                let snap_delayed_to_epoch =
+                    parse_delayed_to_epoch_from_snapshot_key(snap_key.as_deref())
+                        .unwrap_or_default();
                 println!(
                     "  Backup epoch: {}, latest snapshot epoch: {}, offset: {}, {} epoch need to replay",
                     store.epoch,
-                    snap_epoch,
+                    snap_delayed_to_epoch,
                     store.offset,
-                    store.epoch - snap_epoch
+                    store.epoch - snap_delayed_to_epoch
                 );
                 // Get latest snapshot epoch
             } else {

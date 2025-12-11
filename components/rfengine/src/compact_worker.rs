@@ -55,8 +55,8 @@ pub(crate) struct WorkerHandle {
 
 impl WorkerHandle {
     pub(crate) fn try_send(&self, task: CompactTask) {
-        if let Err(SendError(t)) = self.task_sender.send(task) {
-            warn!("failed to send task {:?}", t);
+        if let Err(SendError(_)) = self.task_sender.send(task) {
+            warn!("failed to send task");
         }
     }
 }
@@ -69,6 +69,8 @@ pub(crate) struct CompactWorker {
     buf: Vec<u8>,
     compacted_epoch: Arc<AtomicU32>,
     epoch_rotate_len: usize,
+    delay_compaction_epoches: u32,
+    truncated_indexes: HashMap<u64, u64>, // peer_id -> truncated_index
 
     // Used to cache small rlogs to reduce disk IO when taking snapshot.
     rlog_cache: RlogCache,
@@ -103,6 +105,7 @@ impl CompactWorker {
             (RlogCache::none(), CompressionType::NoCompression)
         };
         let epoch_rotate_len = cfg.epoch_rotate_len;
+        let delay_compaction_epoches = cfg.delay_compaction_epoches as u32;
         let sync_concurrency = cfg.compact_wal_sync_concurrency;
         let rlog_file_size = cfg.rlog_file_size.0 as u32;
         Self {
@@ -113,6 +116,8 @@ impl CompactWorker {
             buf: vec![],
             compacted_epoch,
             epoch_rotate_len,
+            delay_compaction_epoches,
+            truncated_indexes: HashMap::new(),
             rlog_cache,
             rlog_compression_type: compress_type,
             rate_limiter,
@@ -125,7 +130,10 @@ impl CompactWorker {
     pub(crate) fn run(&mut self) {
         while let Ok(task) = self.task_rx.recv() {
             match task {
-                CompactTask::Compact { epoch_id } => self.handle_compact(epoch_id),
+                CompactTask::UpdateTruncatedIndexes {
+                    truncated_idxes: truncated,
+                } => self.handle_update_truncated_idxes(truncated),
+                CompactTask::Rotate { epoch_id } => self.handle_rotate(epoch_id),
                 CompactTask::PrepareSnapshot => {
                     self.handle_prepare_snapshot_backup();
                 }
@@ -134,7 +142,7 @@ impl CompactWorker {
         }
     }
 
-    fn handle_compact_with_backoff(&mut self, epoch_id: u32) {
+    fn handle_compact_with_backoff(&mut self, epoch_id: u32, delayed_epoches: u32) {
         let mut back_off = backoff::ExponentialBackoff::new(
             Duration::from_secs(5),
             Duration::from_secs(60),
@@ -146,7 +154,7 @@ impl CompactWorker {
             if next_delay.is_err() {
                 panic!("compact epoch {} retry times exceeded", epoch_id);
             }
-            match self.compact(epoch_id) {
+            match self.compact(epoch_id, delayed_epoches) {
                 Ok(_) => break,
                 Err(err) => {
                     error!(
@@ -162,20 +170,53 @@ impl CompactWorker {
         }
     }
 
-    fn handle_compact(&mut self, epoch_id: u32) {
-        info!("handle compact {}", epoch_id);
-        if let Err(err) = self.compact(epoch_id) {
-            let engine_id = self.manifest.get_engine_id();
-            error!(
-                "{}: failed to compact epoch {} {:?}",
-                engine_id, epoch_id, err
-            );
-            self.handle_compact_with_backoff(epoch_id);
-            info!("handle compact {} success after retry", epoch_id);
+    fn handle_update_truncated_idxes(&mut self, truncated_idxes: Vec<(u64, u64)>) {
+        for (peer_id, truncated_idx) in truncated_idxes {
+            let old_truncated_idx = self
+                .truncated_indexes
+                .get(&peer_id)
+                .cloned()
+                .unwrap_or_default();
+            if old_truncated_idx < truncated_idx {
+                self.truncated_indexes.insert(peer_id, truncated_idx);
+            } else {
+                let unsafe_recover_restore = old_truncated_idx == TRUNCATE_ALL_INDEX
+                    && truncated_idx != TRUNCATE_ALL_INDEX
+                    && truncated_idx > 0;
+                if unsafe_recover_restore {
+                    self.truncated_indexes.insert(peer_id, truncated_idx);
+                }
+            }
         }
     }
 
-    fn compact(&mut self, epoch_id: u32) -> Result<()> {
+    fn handle_rotate(&mut self, epoch_id: u32) {
+        let engine_id = self.manifest.get_engine_id();
+        let delay_epoches = self.delay_compaction_epoches;
+        let compact_epoch = epoch_id.saturating_sub(delay_epoches);
+        if compact_epoch <= self.manifest.epoch_id {
+            // Do not compact an smaller epoch.
+            info!(
+                "{}: skip duplicated epoch compaction at epoch {}",
+                engine_id, compact_epoch
+            );
+            return;
+        }
+        info!(
+            "{}: handle rotate {}, compact {}",
+            engine_id, epoch_id, compact_epoch
+        );
+        if let Err(err) = self.compact(compact_epoch, delay_epoches) {
+            error!(
+                "{}: failed to compact epoch {} {:?}",
+                engine_id, compact_epoch, err
+            );
+            self.handle_compact_with_backoff(compact_epoch, delay_epoches);
+            info!("handle compact {} success after retry", compact_epoch);
+        }
+    }
+
+    fn compact(&mut self, epoch_id: u32, delayed_epoches: u32) -> Result<()> {
         let timer = Instant::now_coarse();
         let mut batch = WriteBatch::default();
         let mut it = WalIterator::new(&self.dir, epoch_id, self.epoch_rotate_len)?;
@@ -186,6 +227,7 @@ impl CompactWorker {
         })?;
         let mut change_set = rfenginepb::ChangeSet::default();
         change_set.set_epoch_id(epoch_id);
+        change_set.set_delayed_epoches(delayed_epoches);
         let mut generated_files = 0;
         let mut cached_files = 0;
         for (_, mut peer_batch) in batch.peers {
@@ -210,7 +252,12 @@ impl CompactWorker {
                 state_pb.set_value(v.to_vec());
                 peer_meta_pb.mut_states().push(state_pb);
             }
-            peer_batch.truncate(peer_batch.truncated_idx);
+            let latest_truncated_idx = self
+                .truncated_indexes
+                .get(&peer_batch.peer_id)
+                .cloned()
+                .unwrap_or(peer_batch.truncated_idx);
+            peer_batch.truncate(latest_truncated_idx);
             if !peer_batch.raft_logs.is_empty() {
                 let files = self.write_raft_log_files(peer_batch)?;
                 for (file, is_cached) in files {
@@ -231,7 +278,8 @@ impl CompactWorker {
         let pending_tasks = self.task_rx.len();
         let cache_size = self.rlog_cache.cache_size();
         info!(
-            "{}: compact wal", engine_id;
+            "{}: compact wal {}", engine_id, epoch_id;
+            "delayed_epoches" => delayed_epoches,
             "size" => it.offset,
             "generated_files" => generated_files,
             "cached_files" => cached_files,
@@ -446,10 +494,11 @@ impl CompactWorker {
                 .and_modify(|k| k.append(&mut files))
                 .or_insert_with(|| files);
         }
+        let delayed_to_epoch_id = manifest.get_epoch_id() + manifest.get_delayed_epoches();
         let object_key = if is_snapshot {
-            snapshot_rlog_key(store_id, manifest.get_epoch_id())
+            snapshot_rlog_key(store_id, delayed_to_epoch_id)
         } else {
-            store_raft_log_file_key(store_id, manifest.get_epoch_id())
+            store_raft_log_file_key(store_id, delayed_to_epoch_id)
         };
         // Reserve 10MB for `rlog_meta`, which should be enough in most scenarios.
         let mut object = BytesMut::with_capacity(raft_log_size + 10 * 1024 * 1024);
@@ -616,9 +665,9 @@ pub(crate) fn wal_file_name(dir: &Path, epoch_id: u32, epoch_rotate_len: usize) 
     dir.join(format!("{}.wal", idx))
 }
 
-#[derive(Debug)]
 pub(crate) enum CompactTask {
-    Compact { epoch_id: u32 },
+    Rotate { epoch_id: u32 },
+    UpdateTruncatedIndexes { truncated_idxes: Vec<(u64, u64)> }, // Vec<(peer_id, truncated_idx)>
     PrepareSnapshot,
     Close,
 }
@@ -938,7 +987,8 @@ mod tests {
         let (key, object) = worker
             .backup_raft_log_files(&cs, &mut store_meta, false)
             .unwrap();
-        let raft_file_key = store_raft_log_file_key(engine_id, epoch);
+        let delayed_to_epoch = get_delayed_to_epoch_id(&cs);
+        let raft_file_key = store_raft_log_file_key(engine_id, delayed_to_epoch);
         assert_eq!(raft_file_key, key);
         let mut raft_meta = StoreRaftLogBackupMeta::default();
         let size = object.len();
@@ -1090,7 +1140,8 @@ mod tests {
         let (key, object) = worker
             .backup_raft_log_files(&cs, &mut store_meta, false)
             .unwrap();
-        let raft_file_key = store_raft_log_file_key(engine_id, cs.epoch_id);
+        let delayed_to_epoch_id = get_delayed_to_epoch_id(&cs);
+        let raft_file_key = store_raft_log_file_key(engine_id, delayed_to_epoch_id);
         assert_eq!(raft_file_key, key);
 
         let mut raft_meta = StoreRaftLogBackupMeta::default();

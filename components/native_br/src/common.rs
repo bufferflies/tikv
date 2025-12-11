@@ -29,7 +29,7 @@ use kvproto::{metapb, metapb::Store};
 use pd_client::{PdClient, RpcClient};
 use protobuf::Message;
 use rfengine::{
-    find_latest_snapshot, get_integral_wal_chunks, parse_epoch_from_snapshot_key,
+    find_latest_snapshot, get_integral_wal_chunks, parse_delayed_to_epoch_from_snapshot_key,
     snapshot_store_meta_key, wal_chunk_file_prefix, wal_chunk_file_suffix, RfEngine, WalChunkMeta,
     MAX_EPOCH_BACKWARD,
 };
@@ -945,8 +945,8 @@ pub fn collect_snapshot_meta_rlog_files(
         epoch_id, store_id,
     );
     let snap_key = find_latest_snapshot(dfs.clone(), prefix, store_id, epoch_id)?;
-    let snap_epoch = parse_epoch_from_snapshot_key(snap_key.as_deref());
-    if snap_epoch.is_none() {
+    let snap_delayed_to_epoch = parse_delayed_to_epoch_from_snapshot_key(snap_key.as_deref());
+    if snap_delayed_to_epoch.is_none() {
         // If no snapshot available and the epoch_id > MAX_EPOCH_BACKWARD, it means
         // data incomplete.
         if epoch_id > MAX_EPOCH_BACKWARD {
@@ -967,15 +967,15 @@ pub fn collect_snapshot_meta_rlog_files(
             ..Default::default()
         });
     }
-    let snap_epoch = snap_epoch.unwrap();
+    let snap_delayed_to_epoch = snap_delayed_to_epoch.unwrap();
     info!(
-        "fetch last snapshot {} snap epoch {} before backup epoch {} for store {}",
+        "fetch last snapshot {} snap_delayed_to_epoch {} before backup epoch {} for store {}",
         snap_key.as_deref().unwrap(),
-        snap_epoch,
+        snap_delayed_to_epoch,
         epoch_id,
         store_id
     );
-    let store_meta_key = snapshot_store_meta_key(store_id, snap_epoch);
+    let store_meta_key = snapshot_store_meta_key(store_id, snap_delayed_to_epoch);
     let full_key = format!("{}/{}", dfs.get_prefix(), store_meta_key);
     let meta_data = dfs
         .get_runtime()
@@ -998,7 +998,9 @@ pub fn collect_snapshot_meta_rlog_files(
     store_backup_meta
         .merge_from_bytes(meta_data.chunk())
         .unwrap();
-    assert_eq!(snap_epoch, store_backup_meta.get_manifest().epoch_id);
+    let snap_epoch = store_backup_meta.get_manifest().get_epoch_id();
+    let delayed_epoches = store_backup_meta.get_manifest().get_delayed_epoches();
+    assert_eq!(snap_delayed_to_epoch, snap_epoch + delayed_epoches);
 
     info!(
         "collect snapshot rlog {:?} for store {}",

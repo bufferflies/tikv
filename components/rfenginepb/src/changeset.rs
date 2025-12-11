@@ -30,6 +30,7 @@ const _PROTOBUF_VERSION_CHECK: () = ::protobuf::VERSION_2_8_0;
 pub struct ChangeSet {
     // message fields
     pub epoch_id: u32,
+    pub delayed_epoches: u32,
     pub peers: ::protobuf::RepeatedField<PeerMeta>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -60,6 +61,21 @@ impl ChangeSet {
     // Param is passed by value, moved
     pub fn set_epoch_id(&mut self, v: u32) {
         self.epoch_id = v;
+    }
+
+    // uint32 delayed_epoches = 3;
+
+
+    pub fn get_delayed_epoches(&self) -> u32 {
+        self.delayed_epoches
+    }
+    pub fn clear_delayed_epoches(&mut self) {
+        self.delayed_epoches = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_delayed_epoches(&mut self, v: u32) {
+        self.delayed_epoches = v;
     }
 
     // repeated .rfpb.PeerMeta peers = 2;
@@ -109,6 +125,13 @@ impl ::protobuf::Message for ChangeSet {
                     let tmp = is.read_uint32()?;
                     self.epoch_id = tmp;
                 },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.delayed_epoches = tmp;
+                },
                 2 => {
                     ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.peers)?;
                 },
@@ -127,6 +150,9 @@ impl ::protobuf::Message for ChangeSet {
         if self.epoch_id != 0 {
             my_size += ::protobuf::rt::value_size(1, self.epoch_id, ::protobuf::wire_format::WireTypeVarint);
         }
+        if self.delayed_epoches != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.delayed_epoches, ::protobuf::wire_format::WireTypeVarint);
+        }
         for value in &self.peers {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
@@ -139,6 +165,9 @@ impl ::protobuf::Message for ChangeSet {
     fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
         if self.epoch_id != 0 {
             os.write_uint32(1, self.epoch_id)?;
+        }
+        if self.delayed_epoches != 0 {
+            os.write_uint32(3, self.delayed_epoches)?;
         }
         for v in &self.peers {
             os.write_tag(2, ::protobuf::wire_format::WireTypeLengthDelimited)?;
@@ -192,6 +221,11 @@ impl ::protobuf::Message for ChangeSet {
                     |m: &ChangeSet| { &m.epoch_id },
                     |m: &mut ChangeSet| { &mut m.epoch_id },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "delayed_epoches",
+                    |m: &ChangeSet| { &m.delayed_epoches },
+                    |m: &mut ChangeSet| { &mut m.delayed_epoches },
+                ));
                 fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<PeerMeta>>(
                     "peers",
                     |m: &ChangeSet| { &m.peers },
@@ -220,6 +254,7 @@ impl ::protobuf::Message for ChangeSet {
 impl ::protobuf::Clear for ChangeSet {
     fn clear(&mut self) {
         self.epoch_id = 0;
+        self.delayed_epoches = 0;
         self.peers.clear();
         self.unknown_fields.clear();
     }
@@ -231,6 +266,7 @@ impl ::protobuf::PbPrint for ChangeSet {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.epoch_id, "epoch_id", buf);
+        ::protobuf::PbPrint::fmt(&self.delayed_epoches, "delayed_epoches", buf);
         ::protobuf::PbPrint::fmt(&self.peers, "peers", buf);
         if old_len < buf.len() {
           buf.push(' ');
@@ -243,6 +279,7 @@ impl ::std::fmt::Debug for ChangeSet {
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
         let mut s = String::new();
         ::protobuf::PbPrint::fmt(&self.epoch_id, "epoch_id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.delayed_epoches, "delayed_epoches", &mut s);
         ::protobuf::PbPrint::fmt(&self.peers, "peers", &mut s);
         write!(f, "{}", s)
     }
@@ -3526,50 +3563,51 @@ impl ::protobuf::reflect::ProtobufValue for StoreRaftLogBackupMeta {
 }
 
 static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x0fchangeset.proto\x12\x04rfpb\"B\n\tChangeSet\x12\x12\n\x08epoch_id\
-    \x18\x01\x20\x01(\rB\0\x12\x1f\n\x05peers\x18\x02\x20\x03(\x0b2\x0e.rfpb\
-    .PeerMetaB\0:\0\"\xad\x01\n\x08PeerMeta\x12\x11\n\x07peer_id\x18\x01\x20\
-    \x01(\x04B\0\x12\x13\n\tregion_id\x18\x02\x20\x01(\x04B\0\x12\x19\n\x0ft\
-    runcated_index\x18\x03\x20\x01(\x04B\0\x12!\n\x06states\x18\x04\x20\x03(\
-    \x0b2\x0f.rfpb.PeerStateB\0\x12\"\n\x05files\x18\x05\x20\x03(\x0b2\x11.r\
-    fpb.RaftLogFileB\0\x12\x15\n\x0bkeyspace_id\x18\x06\x20\x01(\rB\0:\0\"-\
-    \n\tPeerState\x12\r\n\x03key\x18\x01\x20\x01(\x0cB\0\x12\x0f\n\x05value\
-    \x18\x02\x20\x01(\x0cB\0:\0\"<\n\x0bRaftLogFile\x12\x15\n\x0bfirst_index\
-    \x18\x01\x20\x01(\x04B\0\x12\x14\n\nlast_index\x18\x02\x20\x01(\x04B\0:\
-    \0\"\xe8\x02\n\x0fStoreBackupMeta\x12\x12\n\x08store_id\x18\x01\x20\x01(\
-    \x04B\0\x12#\n\x08manifest\x18\x02\x20\x01(\x0b2\x0f.rfpb.ChangeSetB\0\
-    \x12$\n\nwal_chunks\x18\x03\x20\x03(\x0b2\x0e.rfpb.WalChunkB\0\x12\x1d\n\
-    \x13raft_meta_start_off\x18\x04\x20\x01(\x04B\0\x12\x0f\n\x05epoch\x18\
-    \x05\x20\x01(\rB\0\x12\x10\n\x06offset\x18\x06\x20\x01(\x04B\0\x12E\n\rk\
-    eyspace_size\x18\x07\x20\x03(\x0b2,.rfpb.StoreBackupMeta.keyspace_size_M\
-    apEntryB\0\x12#\n\x19has_missing_commit_record\x18\x08\x20\x01(\x08B\0\
-    \x1aF\n\x16keyspace_size_MapEntry\x12\t\n\x03key\x18\x01(\r\x12\x1d\n\
-    \x05value\x18\x02(\x0b2\x10.rfpb.BackupSize:\x028\x01:\0\"\x1e\n\nBackup\
-    Size\x12\x0e\n\x04size\x18\x01\x20\x01(\x04B\0:\0\"E\n\x08WalChunk\x12\
-    \x0f\n\x05epoch\x18\x01\x20\x01(\rB\0\x12\x13\n\tstart_off\x18\x02\x20\
-    \x01(\x04B\0\x12\x11\n\x07end_off\x18\x03\x20\x01(\x04B\0:\0\"\xfb\x02\n\
-    \x11ClusterBackupMeta\x12'\n\x06stores\x18\x01\x20\x03(\x0b2\x15.rfpb.St\
-    oreBackupMetaB\0\x12\x14\n\ncluster_id\x18\x02\x20\x01(\x04B\0\x12\x13\n\
-    \tbackup_ts\x18\x03\x20\x01(\x04B\0\x12\x12\n\x08alloc_id\x18\x04\x20\
-    \x01(\x04B\0\x12\x11\n\x07safe_ts\x18\x05\x20\x01(\x04B\0\x12G\n\rkeyspa\
-    ce_meta\x18\x06\x20\x03(\x0b2..rfpb.ClusterBackupMeta.keyspace_meta_MapE\
-    ntryB\0\x12\x17\n\rmeta_revision\x18\x07\x20\x01(\x03B\0\x12\x18\n\x0eis\
-    _lightweight\x18\x08\x20\x01(\x08B\0\x12\x17\n\rtolerated_err\x18\t\x20\
-    \x01(\rB\0\x12\x1e\n\x14tolerated_err_stores\x18\n\x20\x03(\x04B\0\x1a4\
-    \n\x16keyspace_meta_MapEntry\x12\t\n\x03key\x18\x01(\x0c\x12\x0b\n\x05va\
-    lue\x18\x02(\x0c:\x028\x01:\0\"}\n\x11RaftLogBackupFile\x12\x11\n\x07pee\
-    r_id\x18\x01\x20\x01(\x04B\0\x12\x15\n\x0bfirst_index\x18\x02\x20\x01(\
-    \x04B\0\x12\x14\n\nlast_index\x18\x03\x20\x01(\x04B\0\x12\x13\n\tstart_o\
-    ff\x18\x04\x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x05\x20\x01(\x04B\0:\
-    \0\"W\n\x12KeySpaceBackupMeta\x12\x15\n\x0bkeyspace_id\x18\x01\x20\x01(\
-    \rB\0\x12(\n\x05files\x18\x02\x20\x03(\x0b2\x17.rfpb.RaftLogBackupFileB\
-    \0:\0\"D\n\x11RaftLogMetaHeader\x12\x11\n\x07version\x18\x01\x20\x01(\
-    \x04B\0\x12\x1a\n\x10compression_type\x18\x02\x20\x01(\rB\0:\0\"\xd7\x01\
-    \n\x16StoreRaftLogBackupMeta\x12)\n\x06header\x18\x01\x20\x01(\x0b2\x17.\
-    rfpb.RaftLogMetaHeaderB\0\x12D\n\traft_logs\x18\x02\x20\x03(\x0b2/.rfpb.\
-    StoreRaftLogBackupMeta.raft_logs_MapEntryB\0\x1aJ\n\x12raft_logs_MapEntr\
-    y\x12\t\n\x03key\x18\x01(\r\x12%\n\x05value\x18\x02(\x0b2\x18.rfpb.KeySp\
-    aceBackupMeta:\x028\x01:\0B\0b\x06proto3\
+    \n\x0fchangeset.proto\x12\x04rfpb\"]\n\tChangeSet\x12\x12\n\x08epoch_id\
+    \x18\x01\x20\x01(\rB\0\x12\x19\n\x0fdelayed_epoches\x18\x03\x20\x01(\rB\
+    \0\x12\x1f\n\x05peers\x18\x02\x20\x03(\x0b2\x0e.rfpb.PeerMetaB\0:\0\"\
+    \xad\x01\n\x08PeerMeta\x12\x11\n\x07peer_id\x18\x01\x20\x01(\x04B\0\x12\
+    \x13\n\tregion_id\x18\x02\x20\x01(\x04B\0\x12\x19\n\x0ftruncated_index\
+    \x18\x03\x20\x01(\x04B\0\x12!\n\x06states\x18\x04\x20\x03(\x0b2\x0f.rfpb\
+    .PeerStateB\0\x12\"\n\x05files\x18\x05\x20\x03(\x0b2\x11.rfpb.RaftLogFil\
+    eB\0\x12\x15\n\x0bkeyspace_id\x18\x06\x20\x01(\rB\0:\0\"-\n\tPeerState\
+    \x12\r\n\x03key\x18\x01\x20\x01(\x0cB\0\x12\x0f\n\x05value\x18\x02\x20\
+    \x01(\x0cB\0:\0\"<\n\x0bRaftLogFile\x12\x15\n\x0bfirst_index\x18\x01\x20\
+    \x01(\x04B\0\x12\x14\n\nlast_index\x18\x02\x20\x01(\x04B\0:\0\"\xe8\x02\
+    \n\x0fStoreBackupMeta\x12\x12\n\x08store_id\x18\x01\x20\x01(\x04B\0\x12#\
+    \n\x08manifest\x18\x02\x20\x01(\x0b2\x0f.rfpb.ChangeSetB\0\x12$\n\nwal_c\
+    hunks\x18\x03\x20\x03(\x0b2\x0e.rfpb.WalChunkB\0\x12\x1d\n\x13raft_meta_\
+    start_off\x18\x04\x20\x01(\x04B\0\x12\x0f\n\x05epoch\x18\x05\x20\x01(\rB\
+    \0\x12\x10\n\x06offset\x18\x06\x20\x01(\x04B\0\x12E\n\rkeyspace_size\x18\
+    \x07\x20\x03(\x0b2,.rfpb.StoreBackupMeta.keyspace_size_MapEntryB\0\x12#\
+    \n\x19has_missing_commit_record\x18\x08\x20\x01(\x08B\0\x1aF\n\x16keyspa\
+    ce_size_MapEntry\x12\t\n\x03key\x18\x01(\r\x12\x1d\n\x05value\x18\x02(\
+    \x0b2\x10.rfpb.BackupSize:\x028\x01:\0\"\x1e\n\nBackupSize\x12\x0e\n\x04\
+    size\x18\x01\x20\x01(\x04B\0:\0\"E\n\x08WalChunk\x12\x0f\n\x05epoch\x18\
+    \x01\x20\x01(\rB\0\x12\x13\n\tstart_off\x18\x02\x20\x01(\x04B\0\x12\x11\
+    \n\x07end_off\x18\x03\x20\x01(\x04B\0:\0\"\xfb\x02\n\x11ClusterBackupMet\
+    a\x12'\n\x06stores\x18\x01\x20\x03(\x0b2\x15.rfpb.StoreBackupMetaB\0\x12\
+    \x14\n\ncluster_id\x18\x02\x20\x01(\x04B\0\x12\x13\n\tbackup_ts\x18\x03\
+    \x20\x01(\x04B\0\x12\x12\n\x08alloc_id\x18\x04\x20\x01(\x04B\0\x12\x11\n\
+    \x07safe_ts\x18\x05\x20\x01(\x04B\0\x12G\n\rkeyspace_meta\x18\x06\x20\
+    \x03(\x0b2..rfpb.ClusterBackupMeta.keyspace_meta_MapEntryB\0\x12\x17\n\r\
+    meta_revision\x18\x07\x20\x01(\x03B\0\x12\x18\n\x0eis_lightweight\x18\
+    \x08\x20\x01(\x08B\0\x12\x17\n\rtolerated_err\x18\t\x20\x01(\rB\0\x12\
+    \x1e\n\x14tolerated_err_stores\x18\n\x20\x03(\x04B\0\x1a4\n\x16keyspace_\
+    meta_MapEntry\x12\t\n\x03key\x18\x01(\x0c\x12\x0b\n\x05value\x18\x02(\
+    \x0c:\x028\x01:\0\"}\n\x11RaftLogBackupFile\x12\x11\n\x07peer_id\x18\x01\
+    \x20\x01(\x04B\0\x12\x15\n\x0bfirst_index\x18\x02\x20\x01(\x04B\0\x12\
+    \x14\n\nlast_index\x18\x03\x20\x01(\x04B\0\x12\x13\n\tstart_off\x18\x04\
+    \x20\x01(\x04B\0\x12\x11\n\x07end_off\x18\x05\x20\x01(\x04B\0:\0\"W\n\
+    \x12KeySpaceBackupMeta\x12\x15\n\x0bkeyspace_id\x18\x01\x20\x01(\rB\0\
+    \x12(\n\x05files\x18\x02\x20\x03(\x0b2\x17.rfpb.RaftLogBackupFileB\0:\0\
+    \"D\n\x11RaftLogMetaHeader\x12\x11\n\x07version\x18\x01\x20\x01(\x04B\0\
+    \x12\x1a\n\x10compression_type\x18\x02\x20\x01(\rB\0:\0\"\xd7\x01\n\x16S\
+    toreRaftLogBackupMeta\x12)\n\x06header\x18\x01\x20\x01(\x0b2\x17.rfpb.Ra\
+    ftLogMetaHeaderB\0\x12D\n\traft_logs\x18\x02\x20\x03(\x0b2/.rfpb.StoreRa\
+    ftLogBackupMeta.raft_logs_MapEntryB\0\x1aJ\n\x12raft_logs_MapEntry\x12\t\
+    \n\x03key\x18\x01(\r\x12%\n\x05value\x18\x02(\x0b2\x18.rfpb.KeySpaceBack\
+    upMeta:\x028\x01:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {
