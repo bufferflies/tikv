@@ -1283,6 +1283,38 @@ def gRPC() -> RowPanel:
                     ),
                 ],
             ),
+            stat_panel(
+                title="gRPC Compression Status for Msg",
+                targets=[
+                    target(
+                        expr=expr_simple("tikv_grpc_compression_type_for_msg"),
+                        legend_format="{{ instance }}",
+                    ),
+                ],
+                mappings=[
+                    StatValueMappings(
+                        StatValueMappingItem("none", "0", "green"),
+                        StatValueMappingItem("deflate", "1", "yellow"),
+                        StatValueMappingItem("gzip", "2", "red"),
+                    ),
+                ],
+            ),
+            stat_panel(
+                title="gRPC Compression Status for Raft Replication",
+                targets=[
+                    target(
+                        expr=expr_simple("tikv_grpc_compression_type_for_raft"),
+                        legend_format="{{ instance }}",
+                    ),
+                ],
+                mappings=[
+                    StatValueMappings(
+                        StatValueMappingItem("none", "0", "green"),
+                        StatValueMappingItem("deflate", "1", "yellow"),
+                        StatValueMappingItem("gzip", "2", "red"),
+                    ),
+                ],
+            ),
         ]
     )
     return layout.row_panel
