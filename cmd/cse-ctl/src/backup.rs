@@ -138,22 +138,7 @@ pub fn execute_show_backup(args: ShowBackupArgs) {
                 );
                 // Get latest snapshot epoch
             } else {
-                println!("  WAL chunks:");
-                for file_key in store.get_wal_chunks().iter().map(|chunk| {
-                    rfengine::wal_file_key(
-                        store.store_id,
-                        chunk.epoch,
-                        chunk.start_off,
-                        chunk.end_off,
-                    )
-                }) {
-                    println!(
-                        "    Backup epoch: {}, file_key: {}",
-                        store.get_manifest().epoch_id,
-                        file_key
-                    );
-                }
-                // TODO: output some readable information of `store.manifest`.
+                println!("legacy backup not supported");
             }
         }
     }

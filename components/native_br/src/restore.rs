@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -100,24 +100,20 @@ pub fn restore_tikv(
             }
         }
     });
-    let is_lightweight = cluster_backup.get_is_lightweight();
+    assert!(cluster_backup.is_lightweight);
     if store_id > 0 {
         let tikv_conf = generate_store_config(path, config.wal_target_size);
-        if is_lightweight {
-            let truncate_ts = cluster_backup.backup_ts;
-            info!(
-                "start replay wal for store {} with truncate_ts {}",
-                store_id, truncate_ts
-            );
-        }
+        let truncate_ts = cluster_backup.backup_ts;
+        info!(
+            "start replay wal for store {} with truncate_ts {}",
+            store_id, truncate_ts
+        );
         setup_raft_engine(
             &tag,
             store_id,
             alloc_id,
             &cluster_backup,
-            is_lightweight,
             &tikv_conf,
-            path,
             Arc::new(s3fs),
             config.lower_memory,
         )
@@ -247,70 +243,53 @@ fn setup_raft_engine(
     store_id: u64,
     alloc_id: u64,
     cluster_backup: &ClusterBackupMeta,
-    lightweight: bool,
     conf: &TikvConfig,
-    path: &str,
     dfs: Arc<S3Fs>,
     lower_memory: bool,
 ) -> Result<()> {
-    let snap_epoch_opt = if lightweight {
-        let rlog_files = collect_snapshot_meta_rlog_files(
-            dfs.clone(),
-            &dfs.get_prefix(),
-            cluster_backup,
-            store_id,
-            None,
-        )?;
-        rfengine::lightweight_restore(
-            store_id,
-            None,
-            Path::new(&conf.raft_store.raftdb_path),
-            rlog_files.snap_epoch,
-            rlog_files.snap_meta,
-            rlog_files.snap_rlog,
-            conf.rfengine.epoch_rotate_len,
-        )
-        .map_err(|x| Error::RfEngine(x))?;
-        Some(rlog_files.snap_epoch)
-    } else {
-        rfengine::restore(
-            dfs.clone(),
-            cluster_backup,
-            store_id,
-            &PathBuf::from(path),
-            None,
-            conf.rfengine.epoch_rotate_len,
-        );
-        None
-    };
+    let rlog_files = collect_snapshot_meta_rlog_files(
+        dfs.clone(),
+        &dfs.get_prefix(),
+        cluster_backup,
+        store_id,
+        None,
+    )?;
+    rfengine::lightweight_restore(
+        store_id,
+        None,
+        Path::new(&conf.raft_store.raftdb_path),
+        rlog_files.snap_epoch,
+        rlog_files.snap_meta,
+        rlog_files.snap_rlog,
+        conf.rfengine.epoch_rotate_len,
+    )
+    .map_err(|x| Error::RfEngine(x))?;
+    let snap_epoch = rlog_files.snap_epoch;
 
     let rf_engine = TikvServer::init_raft_engine(conf, None)?;
     rf_engine.set_engine_id(store_id);
-
-    if lightweight {
-        let cache_dir = if lower_memory {
-            let dir = Path::new(&conf.storage.data_dir).join("cache");
-            box_try!(fs::create_dir_all(&dir));
-            Some(dir)
-        } else {
-            None
-        };
-        let ctx = ReplayWalLogsContext {
-            pd_client: Arc::new(MockPdClient {}),
-            dfs,
-            store_id,
-            cluster_backup,
-            rf_engine: &rf_engine,
-            complete_wal_chunks: true,
-            full_restore: true,
-            fetch_wal_timeout: Duration::from_secs(1), /* NOTE: Retry is unnecessary for full
-                                                        * restoration. */
-            cache_dir,
-            wal_chunks_cache: None,
-            from_archive: false,
-        };
-        replay_wal_logs_from_backup(tag, &ctx, snap_epoch_opt.unwrap())?;
-    }
+    let cache_dir = if lower_memory {
+        let dir = Path::new(&conf.storage.data_dir).join("cache");
+        box_try!(fs::create_dir_all(&dir));
+        Some(dir)
+    } else {
+        None
+    };
+    let ctx = ReplayWalLogsContext {
+        pd_client: Arc::new(MockPdClient {}),
+        dfs,
+        store_id,
+        cluster_backup,
+        rf_engine: &rf_engine,
+        complete_wal_chunks: true,
+        full_restore: true,
+        fetch_wal_timeout: Duration::from_secs(1), /* NOTE: Retry is unnecessary for full
+                                                    * restoration. */
+        cache_dir,
+        wal_chunks_cache: None,
+        from_archive: false,
+    };
+    replay_wal_logs_from_backup(tag, &ctx, snap_epoch)?;
     setup_raft_engine_new_store_id(&rf_engine, cluster_backup, store_id, alloc_id);
 
     Ok(())

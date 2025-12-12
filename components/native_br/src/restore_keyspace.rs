@@ -941,24 +941,6 @@ impl BackupCluster {
         Ok(rf_engine)
     }
 
-    fn setup_raft_engine_for_normal(
-        store_id: u64,
-        cluster_backup: &ClusterBackupMeta,
-        conf: &TikvConfig,
-        dfs: Arc<S3Fs>,
-    ) -> Result<RfEngine> {
-        rfengine::restore(
-            dfs.clone(),
-            cluster_backup,
-            store_id,
-            Path::new(&conf.raft_store.raftdb_path),
-            None, // TODO: pass `Some(keyspace_id)` in.
-            conf.rfengine.epoch_rotate_len,
-        );
-        let rf_engine = TikvServer::init_raft_engine(conf, None)?;
-        Ok(rf_engine)
-    }
-
     pub fn setup_raft_engine(
         tag: &str,
         store_id: u64,
@@ -973,24 +955,25 @@ impl BackupCluster {
         restore_conf: &RestoreConfig,
         object_cache: Option<ObjectCache>,
     ) -> Result<RfEngine> {
-        if cluster_backup.is_lightweight {
-            Self::setup_raft_engine_for_lightweight(
-                tag,
-                store_id,
-                keyspace_id,
-                cluster_backup,
-                conf,
-                pd_client,
-                dfs,
-                fetch_wal_timeout,
-                archiving,
-                archive_store_meta,
-                restore_conf,
-                object_cache,
-            )
-        } else {
-            Self::setup_raft_engine_for_normal(store_id, cluster_backup, conf, dfs)
+        if !cluster_backup.is_lightweight {
+            return Err(Error::BackupError(
+                "only support lightweight restore".to_string(),
+            ));
         }
+        Self::setup_raft_engine_for_lightweight(
+            tag,
+            store_id,
+            keyspace_id,
+            cluster_backup,
+            conf,
+            pd_client,
+            dfs,
+            fetch_wal_timeout,
+            archiving,
+            archive_store_meta,
+            restore_conf,
+            object_cache,
+        )
     }
 
     // Take all raw metas to release memory.

@@ -400,7 +400,7 @@ impl CompactWorker {
         backup_meta.set_epoch(epoch_id);
 
         let manifest = self.manifest.to_change_set(true); // Exclude tombstone peers.
-        let rlog_obj_res = self.backup_raft_log_files(&manifest, &mut backup_meta, true);
+        let rlog_obj_res = self.backup_raft_log_files(&manifest, &mut backup_meta);
         if rlog_obj_res.is_err() {
             let rlog_obj_err = rlog_obj_res.unwrap_err();
             warn!(
@@ -458,7 +458,6 @@ impl CompactWorker {
         &mut self,
         manifest: &rfenginepb::ChangeSet,
         store_meta: &mut StoreBackupMeta,
-        is_snapshot: bool,
     ) -> Result<(String, Bytes)> {
         let store_id = self.manifest.get_engine_id();
         // keyspace_id -> Vec<(peer_id, RaftLogFile)>
@@ -494,12 +493,8 @@ impl CompactWorker {
                 .and_modify(|k| k.append(&mut files))
                 .or_insert_with(|| files);
         }
-        let delayed_to_epoch_id = manifest.get_epoch_id() + manifest.get_delayed_epoches();
-        let object_key = if is_snapshot {
-            snapshot_rlog_key(store_id, delayed_to_epoch_id)
-        } else {
-            store_raft_log_file_key(store_id, delayed_to_epoch_id)
-        };
+        let delayed_to_epoch_id = get_delayed_to_epoch_id(manifest);
+        let object_key = snapshot_rlog_key(store_id, delayed_to_epoch_id);
         // Reserve 10MB for `rlog_meta`, which should be enough in most scenarios.
         let mut object = BytesMut::with_capacity(raft_log_size + 10 * 1024 * 1024);
         let mut rlog_meta = StoreRaftLogBackupMeta::default();
@@ -875,7 +870,7 @@ mod tests {
     use crate::{
         log_batch::{RaftLogOp, RaftLogs},
         manifest::{persist_change_set, Manifest},
-        raft_log_file_name, region_state_key, store_raft_log_file_key,
+        raft_log_file_name, region_state_key,
         test_util::{get_txn_endkey_prefix, get_txn_startkey_prefix, init_logger},
         write_batch::PeerBatch,
         CompactWorker, RfEngine, RfEngineConfig, WalWriter, WriterType,
@@ -984,11 +979,9 @@ mod tests {
         }
         assert!(!with_cache || cached_file_cnt > 0);
         let mut store_meta = StoreBackupMeta::default();
-        let (key, object) = worker
-            .backup_raft_log_files(&cs, &mut store_meta, false)
-            .unwrap();
+        let (key, object) = worker.backup_raft_log_files(&cs, &mut store_meta).unwrap();
         let delayed_to_epoch = get_delayed_to_epoch_id(&cs);
-        let raft_file_key = store_raft_log_file_key(engine_id, delayed_to_epoch);
+        let raft_file_key = snapshot_rlog_key(engine_id, delayed_to_epoch);
         assert_eq!(raft_file_key, key);
         let mut raft_meta = StoreRaftLogBackupMeta::default();
         let size = object.len();
@@ -1137,11 +1130,9 @@ mod tests {
 
         // 1. backup
         let mut store_meta = StoreBackupMeta::default();
-        let (key, object) = worker
-            .backup_raft_log_files(&cs, &mut store_meta, false)
-            .unwrap();
+        let (key, object) = worker.backup_raft_log_files(&cs, &mut store_meta).unwrap();
         let delayed_to_epoch_id = get_delayed_to_epoch_id(&cs);
-        let raft_file_key = store_raft_log_file_key(engine_id, delayed_to_epoch_id);
+        let raft_file_key = snapshot_rlog_key(engine_id, delayed_to_epoch_id);
         assert_eq!(raft_file_key, key);
 
         let mut raft_meta = StoreRaftLogBackupMeta::default();

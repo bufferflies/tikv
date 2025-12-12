@@ -8,7 +8,7 @@ use std::{
     fs::{create_dir_all, File, OpenOptions},
     mem,
     ops::{Deref, DerefMut},
-    os::unix::fs::{FileExt, MetadataExt},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
@@ -19,15 +19,13 @@ use std::{
 
 use api_version::ApiV2;
 use bytes::{Buf, Bytes};
-use engine_traits::{GetObjectOptions, ObjectStorage};
+use engine_traits::ObjectStorage;
 use file_system::{open_direct_file, IoRateLimitMode, IoRateLimiter};
 use kvengine::dfs::{Dfs, S3Fs};
 use kvproto::raft_serverpb::{RegionLocalState, StoreIdent};
 use protobuf::Message;
 use raft_proto::eraftpb;
-use rfenginepb::{
-    ChangeSet, ClusterBackupMeta, KeySpaceBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta,
-};
+use rfenginepb::{ChangeSet, KeySpaceBackupMeta, StoreBackupMeta, StoreRaftLogBackupMeta};
 use tikv_util::{
     error,
     errors::Context as _,
@@ -562,23 +560,6 @@ impl RfEngineCore {
     }
 }
 
-fn restore_all_raft_logs(
-    object_storage: &Arc<dyn ObjectStorage>,
-    store_meta: &StoreBackupMeta,
-    dir: &Path,
-    snapshot_rlog: Option<String>,
-) -> Result<()> {
-    let store_id = store_meta.store_id;
-    let delayed_to_epoch_id = get_delayed_to_epoch_id(store_meta.get_manifest());
-    let raft_file_key =
-        snapshot_rlog.unwrap_or_else(|| store_raft_log_file_key(store_id, delayed_to_epoch_id));
-    let raft_file = object_storage
-        .get_objects(vec![(raft_file_key, GetObjectOptions::default())], None)
-        .unwrap();
-    let (_, rlog_data) = raft_file.first().unwrap();
-    restore_all_raft_logs_with_snap_rlog_file(None, store_meta, dir, rlog_data)
-}
-
 pub(crate) fn get_delayed_to_epoch_id(manifest: &ChangeSet) -> u32 {
     manifest.get_epoch_id() + manifest.get_delayed_epoches()
 }
@@ -630,62 +611,6 @@ fn restore_all_raft_logs_with_snap_rlog_file(
         }
     }
     Ok(())
-}
-
-fn restore_keyspace_raft_logs(
-    object_storage: &Arc<dyn ObjectStorage>,
-    store_meta: &StoreBackupMeta,
-    dir: &Path,
-    keyspace_id: u32,
-    snapshot_rlog: Option<String>,
-) {
-    let store_id = store_meta.store_id;
-    let delayed_to_epoch_id = get_delayed_to_epoch_id(store_meta.get_manifest());
-    let raft_file_key =
-        snapshot_rlog.unwrap_or_else(|| store_raft_log_file_key(store_id, delayed_to_epoch_id));
-    let option = GetObjectOptions {
-        start_off: Some(store_meta.raft_meta_start_off),
-        end_off: None,
-    };
-    let raft_meta_data = object_storage
-        .get_objects(vec![(raft_file_key.clone(), option)], None)
-        .unwrap();
-    let (_, rlog_meta_data) = raft_meta_data.first().unwrap();
-    let mut raft_meta = StoreRaftLogBackupMeta::default();
-    raft_meta.merge_from_bytes(rlog_meta_data.chunk()).unwrap();
-    let keyspace_meta = raft_meta.raft_logs.get(&keyspace_id);
-    if keyspace_meta.is_none() {
-        info!("There is no raft log files for keyspace {}", keyspace_id);
-        return;
-    }
-    let raft_files = keyspace_meta.unwrap().get_files();
-    info!(
-        "Restore {} raft files for keyspace {}",
-        raft_files.len(),
-        keyspace_id
-    );
-    if raft_files.is_empty() {
-        return;
-    }
-    let option = GetObjectOptions {
-        start_off: Some(raft_files.first().unwrap().start_off),
-        end_off: Some(raft_files.last().unwrap().end_off),
-    };
-    let keyspace_raft_data = object_storage
-        .get_objects(vec![(raft_file_key, option)], None)
-        .unwrap();
-    let (_, keyspace_raft_data) = keyspace_raft_data.first().unwrap();
-    let mut cur_offset = 0;
-    for file in raft_files {
-        let path = raft_log_file_name(dir, file.peer_id, file.first_index, file.last_index);
-        let data_len = (file.end_off - file.start_off) as usize;
-        fs::write(
-            path,
-            &keyspace_raft_data.chunk()[cur_offset..cur_offset + data_len],
-        )
-        .unwrap();
-        cur_offset += data_len;
-    }
 }
 
 pub fn find_latest_snapshot(
@@ -786,66 +711,6 @@ fn filter_manifest_peers_for_keyspace(cs: &mut rfenginepb::ChangeSet, keyspace_i
                 || get_keyspace_id_from_peer(peer).is_some_and(|x| x == keyspace_id)
         })
         .for_each(|peer| cs.mut_peers().push(peer));
-}
-
-// If keyspace is none, restore all keyspaces, else, only restore given one.
-pub fn restore(
-    object_storage: Arc<dyn ObjectStorage>,
-    cluster_backup: &ClusterBackupMeta,
-    store_id: u64,
-    dir: &Path,
-    keyspace: Option<u32>,
-    epoch_rotate_len: usize,
-) {
-    let store_meta = cluster_backup
-        .get_stores()
-        .iter()
-        .find(|x| x.store_id == store_id)
-        .expect("store not found");
-    init_wal_files(dir, None, None, epoch_rotate_len).unwrap();
-    let wal_chunks = store_meta.get_wal_chunks();
-    if !wal_chunks.is_empty() {
-        let keys: Vec<(String, GetObjectOptions)> = wal_chunks
-            .iter()
-            .map(|chunk| {
-                (
-                    wal_file_key(store_id, chunk.epoch, chunk.start_off, chunk.end_off),
-                    GetObjectOptions::default(),
-                )
-            })
-            .collect();
-        let mut objects = object_storage.get_objects(keys, None).unwrap();
-        objects.sort_by(|(a, _), (b, _)| a.cmp(b));
-        let wal_path = wal_file_name(
-            dir,
-            store_meta.get_manifest().epoch_id + 1,
-            epoch_rotate_len,
-        );
-        let file = OpenOptions::new().write(true).open(wal_path).unwrap();
-        for (i, (_, data)) in objects.into_iter().enumerate() {
-            file.write_all_at(&data, store_meta.get_wal_chunks()[i].start_off)
-                .unwrap();
-        }
-        let end_off = wal_chunks.last().unwrap().end_off;
-        let eof = vec![0u8; 4096];
-        file.write_all_at(&eof, end_off).unwrap();
-        file.sync_data().unwrap();
-    }
-    match keyspace {
-        Some(keyspace_id) => {
-            restore_keyspace_raft_logs(&object_storage, store_meta, dir, keyspace_id, None)
-        }
-        None => restore_all_raft_logs(&object_storage, store_meta, dir, None).unwrap(),
-    }
-    let manifest_file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(manifest_path(dir))
-        .unwrap();
-    if store_meta.has_manifest() {
-        persist_change_set(&manifest_file, 0, store_meta.get_manifest()).unwrap();
-    }
 }
 
 pub(crate) fn init_wal_files(

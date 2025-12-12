@@ -30,8 +30,10 @@ use tokio::task::JoinHandle;
 
 use crate::{
     compact_worker::CompactTask,
-    compress_lz4, decompress_lz4, decompress_lz4_to_buffer, find_latest_snapshot,
-    get_integral_wal_chunks, get_lz4_decompressed_size, last_wal_chunk_file_key,
+    compress_lz4, decompress_lz4, decompress_lz4_to_buffer,
+    engine::get_delayed_to_epoch_id,
+    find_latest_snapshot, get_integral_wal_chunks, get_lz4_decompressed_size,
+    last_wal_chunk_file_key,
     manifest::Manifest,
     metrics::{self, RFENGINE_DFS_WORKER_HEALTHY_GAUGE},
     parse_delayed_to_epoch_from_snapshot_key, snapshot_store_meta_key, wal_chunk_file_key,
@@ -1016,7 +1018,7 @@ pub(crate) struct PreparedSnapshot {
 
 impl PreparedSnapshot {
     fn get_delayed_to_epoch(&self) -> u32 {
-        self.store_meta.epoch + self.store_meta.get_manifest().get_delayed_epoches()
+        get_delayed_to_epoch_id(self.store_meta.get_manifest())
     }
 }
 
