@@ -97,6 +97,7 @@ fn test_serde_custom_tikv_config() {
         concurrent_send_snap_limit: 4,
         concurrent_recv_snap_limit: 4,
         grpc_compression_type: GrpcCompressionType::Gzip,
+        raft_client_grpc_compression_type: GrpcCompressionType::None,
         grpc_concurrency: 123,
         grpc_concurrent_stream: 1_234,
         grpc_memory_pool_quota: ReadableSize(123_456),
