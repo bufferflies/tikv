@@ -20,7 +20,6 @@ use tikv_util::{
 };
 
 use super::{snap::Task as SnapTask, Result};
-use crate::server::metrics::{GRPC_COMPRESSION_TYPE_FOR_MSG, GRPC_COMPRESSION_TYPE_FOR_RAFT};
 pub use crate::storage::config::Config as StorageConfig;
 
 pub const DEFAULT_CLUSTER_ID: u64 = 0;
@@ -83,8 +82,7 @@ const DEFAULT_SNAP_MAX_BYTES_PER_SEC: u64 = 100 * 1024 * 1024;
 const DEFAULT_MAX_GRPC_SEND_MSG_LEN: i32 = 10 * 1024 * 1024;
 
 /// A clone of `grpc::CompressionAlgorithms` with serde supports.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GrpcCompressionType {
     None,
@@ -145,9 +143,6 @@ pub struct Config {
     // TODO: use CompressionAlgorithms instead once it supports traits like Clone etc.
     #[online_config(skip)]
     pub grpc_compression_type: GrpcCompressionType,
-    /// CompressionAlgorithms for Raft messages (send/receive).
-    #[online_config(skip)]
-    pub raft_client_grpc_compression_type: GrpcCompressionType,
     #[online_config(skip)]
     pub grpc_gzip_compression_level: usize,
     #[online_config(skip)]
@@ -273,7 +268,6 @@ impl Default for Config {
             raft_client_initial_reconnect_backoff: ReadableDuration::secs(1),
             raft_msg_max_batch_size: 128,
             grpc_compression_type: GrpcCompressionType::None,
-            raft_client_grpc_compression_type: GrpcCompressionType::None,
             grpc_gzip_compression_level: DEFAULT_GRPC_GZIP_COMPRESSION_LEVEL,
             grpc_min_message_size_to_compress: DEFAULT_GRPC_MIN_MESSAGE_SIZE_TO_COMPRESS,
             grpc_concurrency: *DEFAULT_GRPC_CONCURRENCY,
@@ -446,20 +440,12 @@ impl Config {
             self.heavy_load_threshold = 75;
         }
 
-        GRPC_COMPRESSION_TYPE_FOR_MSG.set(self.grpc_compression_type as i64);
-        GRPC_COMPRESSION_TYPE_FOR_RAFT.set(self.raft_client_grpc_compression_type as i64);
-
         Ok(())
     }
 
     /// Gets configured grpc compression algorithm.
-    pub fn grpc_compression_algorithm(&self, for_raft_msg: bool) -> CompressionAlgorithms {
-        let compression_type = if for_raft_msg {
-            self.raft_client_grpc_compression_type
-        } else {
-            self.grpc_compression_type
-        };
-        match compression_type {
+    pub fn grpc_compression_algorithm(&self) -> CompressionAlgorithms {
+        match self.grpc_compression_type {
             GrpcCompressionType::None => CompressionAlgorithms::GRPC_COMPRESS_NONE,
             GrpcCompressionType::Deflate => CompressionAlgorithms::GRPC_COMPRESS_DEFLATE,
             GrpcCompressionType::Gzip => CompressionAlgorithms::GRPC_COMPRESS_GZIP,
@@ -612,16 +598,6 @@ mod tests {
         cfg.validate().unwrap();
         cfg.labels.insert("k2".to_owned(), "v2?".to_owned());
         cfg.validate().unwrap_err();
-
-        assert_eq!(
-            cfg.grpc_compression_algorithm(true),
-            CompressionAlgorithms::GRPC_COMPRESS_NONE
-        );
-        cfg.raft_client_grpc_compression_type = GrpcCompressionType::Gzip;
-        assert_eq!(
-            cfg.grpc_compression_algorithm(true),
-            CompressionAlgorithms::GRPC_COMPRESS_GZIP
-        );
     }
 
     #[test]

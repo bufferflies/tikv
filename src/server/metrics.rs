@@ -279,14 +279,6 @@ lazy_static! {
             &["source"]
         )
         .unwrap();
-    pub static ref GRPC_COMPRESSION_TYPE_FOR_MSG: IntGauge = register_int_gauge!(
-        "tikv_grpc_compression_type_for_msg",
-        "Grpc compression type for sendind/recving msgs",
-    ).unwrap();
-    pub static ref GRPC_COMPRESSION_TYPE_FOR_RAFT: IntGauge = register_int_gauge!(
-        "tikv_grpc_compression_type_for_raft",
-        "Grpc compression type for raft logs replication",
-    ).unwrap();
 }
 
 lazy_static! {
