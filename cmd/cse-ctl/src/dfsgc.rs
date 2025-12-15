@@ -107,6 +107,11 @@ pub struct DfsGcArgs {
     /// Path of file that contains X509 key in PEM format
     #[clap(long, default_value = "")]
     pub key: PathBuf,
+
+    /// Move removed files to STANDARD_IA storage class.
+    /// If false, removed files will keep their current storage class.
+    #[clap(long, default_value = "false")]
+    pub removed_files_to_ia: bool,
 }
 
 fn convert_file_types(file_types: &[String]) -> StdResult<Vec<FileType>, String> {
@@ -127,6 +132,7 @@ pub(crate) fn execute_dfsgc(arg: DfsGcArgs) {
         config.dfs.s3_region,
         config.dfs.s3_bucket,
     );
+    s3fs.set_removed_files_to_ia(arg.removed_files_to_ia);
     let start_time_safe_interval =
         chrono::Duration::from_std(Duration::from(arg.start_time_safe_interval)).unwrap();
     let progress_file_path = PathBuf::from(format!("{}/{}", &config.data_dir, "dfsgc.progress"));

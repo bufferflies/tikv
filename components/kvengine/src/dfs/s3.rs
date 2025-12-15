@@ -4,7 +4,10 @@ use std::{
     convert::TryFrom,
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -117,6 +120,14 @@ impl S3Fs {
             )),
         }
     }
+
+    /// Set whether to move removed files to STANDARD_IA storage class.
+    /// If false, removed files will keep their current storage class.
+    pub fn set_removed_files_to_ia(&self, removed_files_to_ia: bool) {
+        self.core
+            .removed_files_to_ia
+            .store(removed_files_to_ia, Ordering::Relaxed);
+    }
 }
 
 impl Deref for S3Fs {
@@ -138,6 +149,9 @@ pub struct S3FsCore {
     // `rusoto` uses https by default, but cse uses http as default protocol.
     // this marker indicates the original endpoint has no protocol hence http should be used.
     use_http: bool,
+    // Whether to move removed files to STANDARD_IA storage class.
+    // If false, removed files will keep their current storage class.
+    removed_files_to_ia: AtomicBool,
 }
 
 impl S3FsCore {
@@ -231,6 +245,7 @@ impl S3FsCore {
             runtime,
             virtual_host,
             use_http,
+            removed_files_to_ia: AtomicBool::new(false),
         }
     }
 
@@ -1180,6 +1195,11 @@ impl S3FsCore {
 
     /// Choose proper storage class for removed files.
     pub fn choose_storage_class_for_removed_files(&self, file_len: Option<u64>) -> &'static str {
+        // If removed_files_to_ia is disabled, keep the current storage class (use
+        // default).
+        if !self.removed_files_to_ia.load(Ordering::Relaxed) {
+            return STORAGE_CLASS_DEFAULT;
+        }
         // STORAGE_CLASS_STANDARD_IA is more cost efficient than STORAGE_CLASS_STANDARD
         // for NOT small files.
         if file_len.is_some() && file_len.unwrap() > SMALL_FILE_THRESHOLD_BYTES {
