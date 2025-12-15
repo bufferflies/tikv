@@ -364,13 +364,19 @@ impl TxnChunkManagerCore {
         Ok(())
     }
 
-    pub fn read_local_chunk(&self, chunk_id: u64) -> Result<Bytes> {
+    pub fn read_local_chunk(&self, chunk_id: u64, check_exists_only: bool) -> Result<Bytes> {
         if self.local_paths.is_empty() {
             return Err(Error::Other(box_err!("local_dirs is empty")));
         }
         let local_file_path = self.local_file_path(chunk_id).unwrap();
-        let data = fs::read(local_file_path).table_ctx(chunk_id, "read_local_chunk")?;
-        Ok(data.into())
+        if check_exists_only {
+            let _ =
+                fs::metadata(local_file_path).table_ctx(chunk_id, "read_local_chunk.metadata")?;
+            Ok(Bytes::new())
+        } else {
+            let data = fs::read(local_file_path).table_ctx(chunk_id, "read_local_chunk.read")?;
+            Ok(data.into())
+        }
     }
 
     pub fn all_chunks_exists(&self, chunk_ids: &[u64]) -> bool {

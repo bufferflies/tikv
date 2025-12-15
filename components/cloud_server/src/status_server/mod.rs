@@ -1723,10 +1723,12 @@ impl StatusServer {
         FileType,
         u64,         // start_off
         Option<u64>, // end_off
+        bool,        // check_exists_only
     ) {
         let mut file_type: Option<FileType> = None;
         let mut start_off: Option<u64> = None;
         let mut end_off: Option<u64> = None;
+        let mut check_exists_only: Option<bool> = None;
         if let Some(query) = req.uri().query() {
             let query_pairs: HashMap<_, _> =
                 url::form_urlencoded::parse(query.as_bytes()).collect();
@@ -1739,11 +1741,15 @@ impl StatusServer {
             end_off = query_pairs
                 .get("end_off")
                 .and_then(|s| s.parse::<u64>().ok());
+            check_exists_only = query_pairs
+                .get("check_exists_only")
+                .and_then(|s| s.parse::<bool>().ok());
         }
         (
             file_type.unwrap_or(FileType::Sst),
             start_off.unwrap_or_default(),
             end_off,
+            check_exists_only.unwrap_or_default(),
         )
     }
 
@@ -1758,7 +1764,7 @@ impl StatusServer {
             return Ok(make_response(StatusCode::BAD_REQUEST, "invalid file id"));
         }
         let id = id_opt.unwrap();
-        let (file_type, start_off, end_off) = Self::get_dfs_read_args(&req);
+        let (file_type, start_off, end_off, check_exists_only) = Self::get_dfs_read_args(&req);
         let handle_res = tokio::runtime::Handle::try_current();
         if let Err(handle_err) = handle_res {
             error!("Failed to get tokio runtime handle: {:?}", handle_err);
@@ -1784,9 +1790,11 @@ impl StatusServer {
             .spawn_blocking(move || match file_type {
                 FileType::TxnChunk => {
                     debug_assert_eq!(start_off, 0);
-                    engine.get_txn_chunk_manager().read_local_chunk(id)
+                    engine
+                        .get_txn_chunk_manager()
+                        .read_local_chunk(id, check_exists_only)
                 }
-                _ => engine.read_local_file(id, file_type, start_off, end_off),
+                _ => engine.read_local_file(id, file_type, start_off, end_off, check_exists_only),
             })
             .await;
         if let Err(handle_err) = spawn_res {

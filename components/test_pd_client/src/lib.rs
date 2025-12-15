@@ -30,6 +30,11 @@ pub trait PdClientExt: pd_client::PdClient {
 
     fn region_leader_must_be(&self, region_id: u64, peer: metapb::Peer);
 
+    fn must_transfer_leader(&self, region_id: u64, peer: metapb::Peer) {
+        self.transfer_leader(region_id, peer.clone(), vec![peer.clone()]);
+        self.region_leader_must_be(region_id, peer);
+    }
+
     fn must_remove_peer(&self, region_id: u64, peer: metapb::Peer);
 
     fn must_add_peer(&self, region_id: u64, peer: metapb::Peer);

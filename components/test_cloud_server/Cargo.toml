@@ -71,6 +71,7 @@ tipb = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 toml = "0.5"
+txn_types = { workspace = true }
 url = "2"
 zipf = "7.0"
 

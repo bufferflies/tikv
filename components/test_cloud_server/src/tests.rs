@@ -9,16 +9,18 @@ use bstr::ByteSlice;
 use bytes::BytesMut;
 use futures::executor::block_on;
 use kvengine::dfs;
+use kvproto::{metapb, pdpb};
 use pd_client::{
     pd_control::{CreateKeyspaceParams, CreateSchedulerParam, SchedulerStatus},
     PdClient,
 };
 use rand::prelude::*;
 use security::{RestfulClient, SecurityConfig, SecurityManager};
-use test_pd_client::PdWrapper;
+use test_pd_client::{PdClientExt, PdWrapper, TestPdClient};
 use tikv_client::TimestampExt;
-use tikv_util::{codec::bytes::encode_bytes, config::ReadableDuration, info};
+use tikv_util::{codec::bytes::encode_bytes, config::ReadableDuration, info, store::new_peer};
 use tokio::runtime::Runtime;
+use txn_types::Key;
 
 use crate::{
     alloc_node_id_vec,
@@ -697,14 +699,13 @@ fn test_tikv_worker() {
 #[test]
 fn test_builtin_dfs() {
     test_util::init_log_for_test();
-    let node_ids = alloc_node_id_vec(3);
+    let node_ids = alloc_node_id_vec(6);
     let cluster = ServerCluster::new(node_ids.clone(), |_, conf| {
         conf.dfs.s3_endpoint = "local".to_string();
     });
+    let pd_client = cluster.get_pd_client();
     cluster.wait_region_replicated(&[], 3);
-    let mut client = cluster.new_client();
-    let region = client.get_region_by_key(b"");
-
+    pd_client.disable_default_operator();
     let fs = cluster.get_dfs().unwrap();
 
     let mut rng = thread_rng();
@@ -712,16 +713,28 @@ fn test_builtin_dfs() {
     write_data.resize(64, 0);
     rng.fill_bytes(write_data.as_bytes_mut());
     let write_data = write_data.freeze();
-
     let start_off = rng.gen_range(0..write_data.len());
+
+    // move region to store [1, 2, 3]
+    let mut region = pd_client.get_region(b"").unwrap();
+    let stores: Vec<u64> = pd_client
+        .get_stores()
+        .unwrap()
+        .into_iter()
+        .map(|s| s.get_id())
+        .collect();
+    region_must_peer_stores(&pd_client, &region, stores[..3].to_vec());
+    region = pd_client.get_region(b"").unwrap();
 
     let rt = fs.get_runtime().handle().clone();
     rt.block_on(async move {
-        let opts = dfs::Options::default()
-            .with_shard(region.id, region.epoch.version)
+        // Create file
+        let mut opts = dfs::Options::default()
+            .with_shard(region.id, region.get_region_epoch().version)
             .with_type(dfs::FileType::Sst);
         fs.create(42, write_data.clone(), opts).await.unwrap();
 
+        // The file can be read correctly
         let read_data = fs.read_file(42, opts).await.unwrap();
         assert_eq!(read_data, write_data);
 
@@ -730,7 +743,49 @@ fn test_builtin_dfs() {
             .await
             .unwrap();
         assert_eq!(partial_read_data, write_data.slice(start_off..));
+
+        // The file can still be read correctly even if the Region has been completely
+        // moved.
+        region_must_peer_stores(&pd_client, &region, stores[3..].to_vec());
+        pd_client.must_split_region(
+            pd_client.get_region(b"").unwrap(),
+            pdpb::CheckPolicy::Usekey,
+            vec![Key::from_raw(b"test").into_encoded()],
+        ); // Increase the epoch version to invalidate region_cache in builtin_dfs.
+        region = pd_client.get_region(b"").unwrap();
+        opts = dfs::Options::default()
+            .with_shard(region.id, region.get_region_epoch().version)
+            .with_type(dfs::FileType::Sst);
+        let read_data = fs.read_file(42, opts).await.unwrap();
+        assert_eq!(read_data, write_data);
+        // The file can still be read correctly even if the Region does not exist.
+        opts = dfs::Options::default()
+            .with_shard(region.id + 1234, region.get_region_epoch().version + 5678)
+            .with_type(dfs::FileType::Sst);
+        let read_data = fs.read_file(42, opts).await.unwrap();
+        assert_eq!(read_data, write_data);
     })
+}
+
+fn region_must_peer_stores(pd_client: &TestPdClient, region: &metapb::Region, store_ids: Vec<u64>) {
+    for (i, &store_id) in store_ids.iter().enumerate() {
+        let Some(peer) = region.peers.iter().find(|p| p.store_id == store_id) else {
+            let peer = new_peer(store_id, 10000 + store_id);
+            pd_client.must_add_peer(region.id, peer.clone());
+            if i == 0 {
+                pd_client.must_transfer_leader(region.id, peer);
+            }
+            continue;
+        };
+        if i == 0 {
+            pd_client.must_transfer_leader(region.id, peer.clone());
+        }
+    }
+    for peer in region.peers.iter() {
+        if !store_ids.contains(&peer.store_id) {
+            pd_client.must_remove_peer(region.id, peer.clone());
+        }
+    }
 }
 
 fn i_to_key(i: usize) -> Vec<u8> {

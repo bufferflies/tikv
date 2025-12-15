@@ -640,9 +640,14 @@ impl EngineCore {
         file_type: FileType,
         start_off: u64,
         end_off: Option<u64>,
+        check_exists_only: bool,
     ) -> Result<Bytes> {
         let _guard = self.lock_file(id);
         let path = self.local_file_path(id, file_type);
+        if check_exists_only {
+            let _ = fs::metadata(path).table_ctx(id, "read_local_file.metadata")?;
+            return Ok(Bytes::new());
+        }
         let mut f = fs::File::open(path).table_ctx(id, "read_local_file.open")?;
         if let Some(end_off) = end_off {
             let mut buf = vec![0; (end_off - start_off) as usize];

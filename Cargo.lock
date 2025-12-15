@@ -9067,6 +9067,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "txn_types",
  "url",
  "zipf 7.0.0",
 ]

@@ -14,15 +14,13 @@ use kvengine::{
     dfs,
     dfs::{Dfs, FileType, Options},
 };
-use kvproto::{
-    metapb,
-    metapb::{Region, Store},
-};
+use kvproto::metapb::{Region, Store};
 use pd_client::PdClient;
 use rand::seq::SliceRandom;
-use tikv_util::{error, time::Instant, HandyRwLock};
+use tikv_util::{debug, error, time::Instant, warn, HandyRwLock};
 use tokio::runtime::Runtime;
 
+const PD_CLIENT_INTERVAL: Duration = Duration::from_secs(2);
 const PD_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct BuiltinDfs {
@@ -31,6 +29,8 @@ pub struct BuiltinDfs {
     http_client: Arc<hyper::Client<HttpConnector>>,
     store_cache: RwLock<HashMap<u64, Store>>,
     region_cache: RwLock<HashMap<u64, Region>>,
+    // update_all_stores_single_flight ensure update_all_stores is not executed concurrently.
+    update_all_stores_single_flight: tokio::sync::Mutex<dfs::Result<()>>,
 }
 
 impl BuiltinDfs {
@@ -47,6 +47,7 @@ impl BuiltinDfs {
             http_client: Arc::new(hyper::Client::new()),
             store_cache: RwLock::new(HashMap::new()),
             region_cache: RwLock::new(HashMap::new()),
+            update_all_stores_single_flight: tokio::sync::Mutex::new(Ok(())),
         }
     }
 
@@ -58,30 +59,96 @@ impl BuiltinDfs {
                 return Ok(store.get_status_address().to_string());
             }
         }
+
         let start_time = Instant::now_coarse();
-        let mut retry = 0;
-        while start_time.saturating_elapsed() < PD_CLIENT_TIMEOUT {
+        let mut retry_count = 0;
+        loop {
             match self.pd.get_store_async(store_id).await {
                 Err(err) => {
-                    error!(
-                        "builtin_dfs get store {} failed {} retry {}",
-                        store_id, err, retry
+                    debug!(
+                        "pd client get store {} failed {} retry {}",
+                        store_id, err, retry_count
                     );
-                    retry += 1;
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
                 }
                 Ok(store) => {
-                    let mut guard = self.store_cache.wl();
-                    guard.insert(store_id, store.clone());
-                    return Ok(store.status_address);
+                    let status_address = store.get_status_address().to_string();
+                    {
+                        let mut guard = self.store_cache.wl();
+                        guard.insert(store_id, store);
+                    }
+                    return Ok(status_address);
                 }
             }
+
+            if start_time.saturating_elapsed() > PD_CLIENT_TIMEOUT {
+                break;
+            }
+
+            retry_count += 1;
+            tokio::time::sleep(PD_CLIENT_INTERVAL).await;
         }
-        Err(dfs::Error::Other("get store addr timed out".to_string()))
+
+        error!(
+            "pd client get store {} timed out, retry {}",
+            store_id, retry_count
+        );
+        Err(dfs::Error::Other("get store timed out".to_string()))
     }
 
-    async fn get_stores(&self, opts: &Options) -> dfs::Result<Vec<u64>> {
+    async fn update_all_stores(&self) -> dfs::Result<()> {
+        let Ok(mut guard) = self.update_all_stores_single_flight.try_lock() else {
+            // If try_lock fails, another thread is already running update_all_stores.
+            // Reuse its result directly.
+            return self.update_all_stores_single_flight.lock().await.clone();
+        };
+
+        let start_time = Instant::now_coarse();
+        let mut retry_count = 0;
+        loop {
+            // retrieves information of all kv stores from PD,
+            // excluding Tombstone stores and TiFlash.
+            match pd_client::util::get_all_stores_except_tiflash_async(self.pd.as_ref(), true).await
+            {
+                Err(err) => {
+                    debug!(
+                        "pd client get all stores failed {} retry {}",
+                        err, retry_count
+                    );
+                }
+                Ok(stores) => {
+                    {
+                        let mut store_cache = self.store_cache.wl();
+                        for store in stores {
+                            store_cache.insert(store.id, store);
+                        }
+                    }
+                    *guard = Ok(());
+                    return Ok(());
+                }
+            }
+
+            if start_time.saturating_elapsed() > PD_CLIENT_TIMEOUT {
+                break;
+            }
+
+            retry_count += 1;
+            tokio::time::sleep(PD_CLIENT_INTERVAL).await;
+        }
+
+        error!("pd client get all stores timed out, retry {}", retry_count);
+        *guard = Err(dfs::Error::Other("get all stores timed out".to_string()));
+        guard.clone()
+    }
+
+    async fn get_all_stores(&self, force_update: bool) -> dfs::Result<Vec<u64>> {
+        if force_update || self.store_cache.rl().is_empty() {
+            self.update_all_stores().await?;
+        }
+        let store_ids: Vec<u64> = self.store_cache.rl().keys().cloned().collect();
+        Ok(store_ids)
+    }
+
+    async fn get_region_stores(&self, opts: &Options, retry: bool) -> dfs::Result<Vec<u64>> {
         if opts.shard_id == 0 {
             // opts.end_off.is_some(): IA segments.
             debug_assert!(
@@ -91,29 +158,7 @@ impl BuiltinDfs {
                 "shard_id is missing: {:?}",
                 opts
             );
-            let store_cache_rl = self.store_cache.rl();
-            let empty = store_cache_rl.is_empty();
-            drop(store_cache_rl);
-            if empty {
-                let mut store_cache = self.store_cache.wl();
-                let mut stores = self
-                    .pd
-                    .get_all_stores(true)
-                    .map_err(|e| dfs::Error::Other(e.to_string()))?;
-                stores.retain(|store| {
-                    !store
-                        .get_labels()
-                        .iter()
-                        .any(|l| l.key == "engine" && l.value == "tiflash")
-                        && store.state == metapb::StoreState::Up
-                });
-                for store in stores {
-                    store_cache.insert(store.id, store);
-                }
-            }
-            let store_cache = self.store_cache.rl();
-            let mut store_ids: Vec<u64> = store_cache.keys().cloned().collect();
-            drop(store_cache);
+            let mut store_ids = self.get_all_stores(false).await?;
             store_ids.sort();
             store_ids.truncate(3);
             return Ok(store_ids);
@@ -128,22 +173,20 @@ impl BuiltinDfs {
                 }
             }
         }
-        self.update_region(opts.shard_id).await
+
+        self.update_region(opts.shard_id, retry).await
     }
 
-    async fn update_region(&self, region_id: u64) -> dfs::Result<Vec<u64>> {
+    async fn update_region(&self, region_id: u64, retry: bool) -> dfs::Result<Vec<u64>> {
         let start_time = Instant::now_coarse();
-        let mut retry = 0;
-        while start_time.saturating_elapsed() < PD_CLIENT_TIMEOUT {
+        let mut retry_count = 0;
+        loop {
             match self.pd.get_region_by_id(region_id).await {
                 Err(err) => {
-                    error!(
-                        "builtin_dfs get region {} failed {}, retry {}",
-                        region_id, err, retry
+                    debug!(
+                        "pd client get region {} failed {}, retry {}",
+                        region_id, err, retry_count
                     );
-                    retry += 1;
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
                 }
                 Ok(region_opt) => {
                     if region_opt.is_none() {
@@ -155,7 +198,19 @@ impl BuiltinDfs {
                     return Ok(region.get_peers().iter().map(|p| p.store_id).collect());
                 }
             }
+
+            if !retry || start_time.saturating_elapsed() > PD_CLIENT_TIMEOUT {
+                break;
+            }
+
+            retry_count += 1;
+            tokio::time::sleep(PD_CLIENT_INTERVAL).await;
         }
+
+        error!(
+            "pd client update region {} timed out, retry {}",
+            region_id, retry_count
+        );
         Err(dfs::Error::Other("get region timed out".to_string()))
     }
 
@@ -187,12 +242,64 @@ impl BuiltinDfs {
     }
 
     async fn read_file_inner(&self, file_id: u64, opts: Options) -> dfs::Result<Bytes> {
-        let mut stores = self.get_stores(&opts).await?;
-        stores.shuffle(&mut rand::thread_rng());
         let mut errs = vec![];
-        for store_id in stores {
-            match self.read_file_from_store(file_id, opts, store_id).await {
-                Ok(data) => return Ok(data),
+        // First try to read the file from the store where the peer is located
+        match self.get_region_stores(&opts, false).await {
+            Ok(mut stores) => {
+                stores.shuffle(&mut rand::thread_rng());
+                for &store_id in &stores {
+                    match self.read_file_from_store(file_id, opts, store_id).await {
+                        Ok(data) => return Ok(data),
+                        Err(err) => errs.push(format!("read file failed: {}", err)),
+                    }
+                }
+                warn!(
+                    "builtin_dfs get file from region {} stores failed, read from all stores",
+                    opts.shard_id
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "builtin_dfs get region {} failed, read from all stores",
+                    opts.shard_id
+                );
+            }
+        }
+
+        // Concurrently query all stores for the existence of the file,
+        // and then read the file from the stores where the file exists in sequence.
+        // Since it is possible that the store has not been recorded yet,
+        // it is necessary to force update the stores' information.
+        let stores = self.get_all_stores(true).await?;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(stores.len());
+        for &store_id in &stores {
+            let store_addr = self.get_store_addr(store_id).await?;
+            let uri = Uri::try_from(format!(
+                "http://{}/dfs/{}?file_type={}&check_exists_only=true",
+                store_addr, file_id, opts.file_type
+            ))
+            .unwrap();
+            let http_client = self.http_client.clone();
+            let tx = tx.clone();
+            let resp_store_id = store_id;
+            self.get_runtime().spawn(async move {
+                let res = http_client.get(uri).await;
+                let _ = tx.send((resp_store_id, res)).await;
+            });
+        }
+        for _ in 0..stores.len() {
+            let (store_id, res) = rx.recv().await.unwrap();
+            match res {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        errs.push(format!("read file failed: {}", resp.status()));
+                    } else {
+                        match self.read_file_from_store(file_id, opts, store_id).await {
+                            Ok(data) => return Ok(data),
+                            Err(err) => errs.push(format!("read file failed: {}", err)),
+                        }
+                    }
+                }
                 Err(err) => errs.push(format!("read file failed: {}", err)),
             }
         }
@@ -200,7 +307,19 @@ impl BuiltinDfs {
     }
 
     async fn create_file_inner(&self, file_id: u64, data: Bytes, opts: Options) -> dfs::Result<()> {
-        let stores = self.get_stores(&opts).await?;
+        let stores = match self.get_region_stores(&opts, true).await {
+            Ok(stores) => stores,
+            Err(_) => {
+                warn!(
+                    "builtin_dfs get region {} failed, write to the first 3 stores",
+                    opts.shard_id
+                );
+                let mut store_ids = self.get_all_stores(false).await?;
+                store_ids.sort();
+                store_ids.truncate(3);
+                store_ids
+            }
+        };
         let (tx, mut rx) = tokio::sync::mpsc::channel(stores.len());
         for &store_id in &stores {
             let store_addr = self.get_store_addr(store_id).await?;
