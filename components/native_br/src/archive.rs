@@ -18,8 +18,8 @@ use tikv_util::{error, info, mpsc::Receiver, time::Instant, warn};
 use crate::{
     backup::{backup_file_full_path, packed_backup_prefixed, IncrementalBackupFile},
     common::{
-        collect_store_wal_rlog_files, create_pd_client, StoreRlog, StoreWalRlog, TableFile,
-        INCREMENTAL_BACKUP_FOLDER_FORMAT,
+        collect_store_wal_rlog_files, create_pd_client, get_all_incremental_backups, StoreRlog,
+        StoreWalRlog, TableFile, INCREMENTAL_BACKUP_FOLDER_FORMAT,
     },
     error::{Error, Result},
     restore::RestoreConfig,
@@ -350,7 +350,22 @@ pub fn archive_cluster_backup(
                 begin_archive_date,
                 e.to_string()
             );
-            begin_archive_date
+            let runtime = s3fs.get_runtime();
+            let (backups, _) = runtime.block_on(get_all_incremental_backups(
+                &s3fs,
+                &begin_archive_date,
+                None,
+                1,
+            ))?;
+            if backups.is_empty() {
+                return Err(Error::ArchiveError(format!(
+                    "failed to get first backup meta from {}",
+                    begin_archive_date,
+                )));
+            }
+            let backup_file = backups.first().unwrap();
+            let first_backup_date = backup_file.created_at().date_naive();
+            begin_archive_date.max(first_backup_date)
         }
     };
 
