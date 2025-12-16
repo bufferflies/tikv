@@ -78,15 +78,6 @@ pub struct Runner<EK: KvEngine, ER: RaftEngine> {
 }
 
 impl<EK: KvEngine, ER: RaftEngine> Runner<EK, ER> {
-    pub fn new(engines: Engines<EK, ER>, compact_log_interval: Duration) -> Runner<EK, ER> {
-        Runner {
-            engines,
-            tasks: vec![],
-            gc_entries: None,
-            compact_sync_interval: compact_log_interval,
-        }
-    }
-
     /// Does the GC job and returns the count of logs collected.
     fn gc_raft_log(&mut self, regions: Vec<RaftLogGcTask>) -> Result<usize, Error> {
         fail::fail_point!("worker_gc_raft_log", |s| {

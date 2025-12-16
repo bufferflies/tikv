@@ -11,10 +11,9 @@ use regex::Regex;
 use tikv_util::{
     config::{self, ReadableDuration, ReadableSize, VersionTrack},
     sys::SysQuota,
-    worker::Scheduler,
 };
 
-use super::{snap::Task as SnapTask, Result};
+use super::Result;
 pub use crate::storage::config::Config as StorageConfig;
 
 pub const DEFAULT_CLUSTER_ID: u64 = 0;
@@ -426,7 +425,6 @@ impl Config {
 }
 
 pub struct ServerConfigManager {
-    tx: Scheduler<SnapTask>,
     config: Arc<VersionTrack<Config>>,
     grpc_mem_quota: ResourceQuota,
 }
@@ -436,12 +434,10 @@ unsafe impl Sync for ServerConfigManager {}
 
 impl ServerConfigManager {
     pub fn new(
-        tx: Scheduler<SnapTask>,
         config: Arc<VersionTrack<Config>>,
         grpc_mem_quota: ResourceQuota,
     ) -> ServerConfigManager {
         ServerConfigManager {
-            tx,
             config,
             grpc_mem_quota,
         }
@@ -460,9 +456,6 @@ impl ConfigManager for ServerConfigManager {
                 self.grpc_mem_quota
                     .clone()
                     .resize_memory(mem_quota.0 as usize);
-            }
-            if let Err(e) = self.tx.schedule(SnapTask::RefreshConfigEvent) {
-                error!("server configuration manager schedule refresh snapshot work task failed"; "err"=> ?e);
             }
         }
         info!("server configuration changed"; "change" => ?c);

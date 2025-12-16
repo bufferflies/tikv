@@ -20,7 +20,7 @@ use std::{
 
 use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::{CfName, KvEngine, MvccProperties, CF_DEFAULT, CF_LOCK, CF_WRITE};
+use engine_traits::{KvEngine, CF_DEFAULT, CF_LOCK, CF_WRITE};
 use futures::{task::AtomicWaker, Future, Stream, StreamExt};
 use kvproto::{
     errorpb,
@@ -61,7 +61,7 @@ use tikv_util::{
     callback::must_call, codec::number::NumberEncoder, future::paired_must_called_future_callback,
     time::Instant,
 };
-use txn_types::{Key, Lock, LockType, ReqType, TimeStamp, WriteBatchFlags, WriteRef, WriteType};
+use txn_types::{Key, Lock, LockType, ReqType, WriteBatchFlags, WriteRef, WriteType};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -568,17 +568,6 @@ impl Engine for RaftKv {
                 }
             }
         }
-    }
-
-    fn get_mvcc_properties_cf(
-        &self,
-        _cf: CfName,
-        _safe_point: TimeStamp,
-        _start: &[u8],
-        _end: &[u8],
-    ) -> Option<MvccProperties> {
-        // TODO(x)
-        None
     }
 
     fn get_kvengine(&self) -> Option<kvengine::Engine> {

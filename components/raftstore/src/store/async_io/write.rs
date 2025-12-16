@@ -935,38 +935,3 @@ where
         }
     }
 }
-
-/// Used for test to write task to kv db and raft db.
-#[cfg(test)]
-pub fn write_to_db_for_test<EK, ER>(
-    engines: &engine_traits::Engines<EK, ER>,
-    task: WriteTask<EK, ER>,
-) where
-    EK: KvEngine,
-    ER: RaftEngine,
-{
-    let mut batch = WriteTaskBatch::new(engines.raft.log_batch(RAFT_WB_DEFAULT_SIZE));
-    batch.add_write_task(task);
-    batch.before_write_to_db(&engines.raft, &StoreWriteMetrics::new(false));
-    if let ExtraBatchWrite::V1(kv_wb) = &mut batch.extra_batch_write {
-        if !kv_wb.is_empty() {
-            let mut write_opts = WriteOptions::new();
-            write_opts.set_sync(true);
-            kv_wb.write_opt(&write_opts).unwrap_or_else(|e| {
-                panic!("test failed to write to kv engine: {:?}", e);
-            });
-        }
-    }
-    if !batch.raft_wb.is_empty() {
-        engines
-            .raft
-            .consume(&mut batch.raft_wb, true)
-            .unwrap_or_else(|e| {
-                panic!("test failed to write to raft engine: {:?}", e);
-            });
-    }
-}
-
-#[cfg(test)]
-#[path = "write_tests.rs"]
-mod tests;

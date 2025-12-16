@@ -48,13 +48,13 @@ use rfstore::{
 use security::{SecurityConfig, SecurityManager};
 use tempfile::TempDir;
 use test_pd_client::{PdClientExt, PdWrapper, TestPdClient};
-use test_raftstore::find_peer;
 use tikv::{config::TikvConfig, import::SstImporter};
 use tikv_util::{
     box_err,
     codec::bytes::encode_bytes,
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     error, info,
+    store::find_peer,
     sys::SysQuota,
     thd_name,
     thread_group::GroupProperties,

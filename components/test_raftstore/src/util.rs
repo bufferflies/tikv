@@ -4,20 +4,17 @@ use std::{
     fmt::Write,
     path::Path,
     str::FromStr,
-    sync::{mpsc, Arc, Mutex},
+    sync::{mpsc, Arc},
     thread,
     time::Duration,
 };
 
 use collections::HashMap;
-use encryption_export::{
-    data_key_manager_from_config, DataKeyManager, FileConfig, MasterKeyConfig,
-};
+use encryption_export::{DataKeyManager, FileConfig, MasterKeyConfig};
 use engine_rocks::{config::BlobRunMode, RocksEngine, RocksSnapshot};
 use engine_test::raft::RaftTestEngine;
 use engine_traits::{
-    Engines, Iterable, Peekable, RaftEngineDebug, RaftEngineReadOnly, TabletFactory, ALL_CFS,
-    CF_DEFAULT, CF_RAFT,
+    Engines, Iterable, Peekable, RaftEngineDebug, RaftEngineReadOnly, ALL_CFS, CF_DEFAULT, CF_RAFT,
 };
 use file_system::IoRateLimiter;
 use futures::executor::block_on;
@@ -40,13 +37,12 @@ use protobuf::RepeatedField;
 use raft::eraftpb::ConfChangeType;
 use raftstore::{
     store::{fsm::RaftRouter, *},
-    RaftRouterCompactedEventSender, Result,
+    Result,
 };
 use rand::RngCore;
-use server::server::ConfiguredRaftEngine;
 use tempfile::TempDir;
 use test_pd_client::TestPdClient;
-use tikv::{config::*, server::KvEngineFactoryBuilder, storage::point_key_range};
+use tikv::{config::*, storage::point_key_range};
 pub use tikv_util::store::{find_peer, new_learner_peer, new_peer};
 use tikv_util::{config::*, escape, time::ThreadReadId, worker::LazyWorker, HandyRwLock};
 use txn_types::Key;
@@ -568,48 +564,16 @@ pub fn must_contains_error(resp: &RaftCmdResponse, msg: &str) {
 
 pub fn create_test_engine(
     // TODO: pass it in for all cases.
-    router: Option<RaftRouter<RocksEngine, RaftTestEngine>>,
-    limiter: Option<Arc<IoRateLimiter>>,
-    cfg: &Config,
+    _router: Option<RaftRouter<RocksEngine, RaftTestEngine>>,
+    _limiter: Option<Arc<IoRateLimiter>>,
+    _cfg: &Config,
 ) -> (
     Engines<RocksEngine, RaftTestEngine>,
     Option<Arc<DataKeyManager>>,
     TempDir,
     LazyWorker<String>,
 ) {
-    let dir = test_util::temp_dir("test_cluster", cfg.prefer_mem);
-    let mut cfg = cfg.clone();
-    cfg.storage.data_dir = dir.path().to_str().unwrap().to_string();
-    cfg.raft_store.raftdb_path = cfg.infer_raft_db_path(None).unwrap();
-    cfg.raft_engine.mut_config().dir = cfg.infer_raft_engine_path(None).unwrap();
-    let key_manager =
-        data_key_manager_from_config(&cfg.security.encryption, dir.path().to_str().unwrap())
-            .unwrap()
-            .map(Arc::new);
-    let cache = cfg.storage.block_cache.build_shared_cache();
-    let env = cfg
-        .build_shared_rocks_env(key_manager.clone(), limiter)
-        .unwrap();
-
-    let sst_worker = LazyWorker::new("sst-recovery");
-    let scheduler = sst_worker.scheduler();
-
-    let raft_engine = RaftTestEngine::build(&cfg, &env, &key_manager, &cache);
-
-    let mut builder =
-        KvEngineFactoryBuilder::new(env, &cfg, dir.path()).sst_recovery_sender(Some(scheduler));
-    if let Some(cache) = cache {
-        builder = builder.block_cache(cache);
-    }
-    if let Some(router) = router {
-        builder = builder.compaction_event_sender(Arc::new(RaftRouterCompactedEventSender {
-            router: Mutex::new(router),
-        }));
-    }
-    let factory = builder.build();
-    let engine = factory.create_shared_db().unwrap();
-    let engines = Engines::new(engine, raft_engine);
-    (engines, key_manager, dir, sst_worker)
+    unimplemented!()
 }
 
 pub fn configure_for_request_snapshot<T: Simulator>(cluster: &mut Cluster<T>) {

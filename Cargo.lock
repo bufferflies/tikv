@@ -1488,7 +1488,6 @@ dependencies = [
  "slog-global",
  "slog-term",
  "tempfile",
- "test_raftstore",
  "test_util",
  "thiserror 1.0.44",
  "tidb_query_datatype",
@@ -8002,60 +8001,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "server"
-version = "0.0.1"
-dependencies = [
- "api_version",
- "backup",
- "causal_ts",
- "cdc",
- "chrono",
- "clap 2.34.0",
- "collections",
- "concurrency_manager",
- "crossbeam",
- "encryption",
- "encryption_export",
- "engine_rocks",
- "engine_rocks_helper",
- "engine_traits",
- "error_code",
- "file_system",
- "fs2",
- "futures 0.3.28",
- "grpcio",
- "grpcio-health",
- "hex 0.4.3",
- "keys",
- "kvproto",
- "libc 0.2.174",
- "log",
- "log_wrappers",
- "pd_client",
- "prometheus",
- "protobuf",
- "raft",
- "raft_log_engine",
- "raftstore",
- "rand 0.8.5",
- "resolved_ts",
- "resource_metering",
- "security",
- "serde_json",
- "signal-hook",
- "slog",
- "slog-global",
- "tempfile",
- "tikv",
- "tikv_alloc",
- "tikv_util",
- "tokio",
- "toml",
- "txn_types",
- "yatp",
-]
-
-[[package]]
 name = "sha-1"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8974,33 +8919,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "test_backup"
-version = "0.0.1"
-dependencies = [
- "api_version",
- "backup",
- "collections",
- "concurrency_manager",
- "crc64fast",
- "engine_traits",
- "external_storage_export",
- "file_system",
- "futures 0.3.28",
- "futures-executor",
- "futures-util",
- "grpcio",
- "kvproto",
- "protobuf",
- "rand 0.8.5",
- "tempfile",
- "test_raftstore",
- "tidb_query_common",
- "tikv",
- "tikv_util",
- "txn_types",
-]
-
-[[package]]
 name = "test_cloud_server"
 version = "0.1.0"
 dependencies = [
@@ -9054,7 +8972,6 @@ dependencies = [
  "tempfile",
  "test_pd",
  "test_pd_client",
- "test_raftstore",
  "test_util",
  "thiserror 1.0.44",
  "tidb_query_common",
@@ -9168,7 +9085,6 @@ dependencies = [
  "resolved_ts",
  "resource_metering",
  "security",
- "server",
  "slog",
  "slog-global",
  "tempfile",
@@ -9317,7 +9233,6 @@ dependencies = [
  "sqlx",
  "sst_importer",
  "tempfile",
- "test_backup",
  "test_cloud_server",
  "test_coprocessor",
  "test_pd",
@@ -9779,7 +9694,6 @@ dependencies = [
  "clap 2.34.0",
  "cloud_server",
  "serde_json",
- "server",
  "tikv",
  "time 0.1.43",
  "toml",

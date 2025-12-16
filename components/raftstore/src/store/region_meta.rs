@@ -2,14 +2,9 @@
 
 use std::collections::HashMap;
 
-use kvproto::{
-    metapb::{self, PeerRole},
-    raft_serverpb,
-};
-use raft::{Progress, ProgressState, StateRole, Status};
+use kvproto::metapb::{self, PeerRole};
+use raft::{Progress, ProgressState, StateRole};
 use serde::{Deserialize, Serialize};
-
-use super::GroupState;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub enum RaftProgressState {
@@ -238,67 +233,7 @@ pub struct RegionLocalState {
 /// peer. TODO: make protobuf generated code derive serde directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionMeta {
-    pub group_state: GroupState,
     pub raft_status: RaftStatus,
     pub raft_apply: RaftApplyState,
     pub region_state: RegionLocalState,
-}
-
-impl RegionMeta {
-    pub fn new(
-        local_state: &raft_serverpb::RegionLocalState,
-        apply_state: &raft_serverpb::RaftApplyState,
-        group_state: GroupState,
-        raft_status: Status<'_>,
-    ) -> Self {
-        let region = local_state.get_region();
-        let epoch = region.get_region_epoch();
-        let start_key = region.get_start_key();
-        let end_key = region.get_end_key();
-        let raw_peers = region.get_peers();
-        let mut peers = Vec::with_capacity(raw_peers.len());
-        for peer in raw_peers {
-            peers.push(RegionPeer {
-                id: peer.get_id(),
-                store_id: peer.get_store_id(),
-                role: peer.get_role().into(),
-                is_witness: peer.is_witness,
-            });
-        }
-        let merge_state = if local_state.has_merge_state() {
-            Some(local_state.get_merge_state())
-        } else {
-            None
-        };
-
-        Self {
-            group_state,
-            raft_status: raft_status.into(),
-            raft_apply: RaftApplyState {
-                applied_index: apply_state.get_applied_index(),
-                commit_index: apply_state.get_commit_index(),
-                commit_term: apply_state.get_commit_term(),
-                truncated_state: RaftTruncatedState {
-                    index: apply_state.get_truncated_state().get_index(),
-                    term: apply_state.get_truncated_state().get_term(),
-                },
-            },
-            region_state: RegionLocalState {
-                id: region.get_id(),
-                start_key: start_key.to_owned(),
-                end_key: end_key.to_owned(),
-                epoch: Epoch {
-                    conf_ver: epoch.get_conf_ver(),
-                    version: epoch.get_version(),
-                },
-                peers,
-                merge_state: merge_state.map(|state| RegionMergeState {
-                    min_index: state.get_min_index(),
-                    commit: state.get_commit(),
-                    region_id: state.get_target().get_id(),
-                }),
-                tablet_index: local_state.get_tablet_index(),
-            },
-        }
-    }
 }

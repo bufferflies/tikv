@@ -916,7 +916,6 @@ pub(in crate::storage::txn) fn fallback_1pc_locks(txn: &mut MvccTxn) {
 #[cfg(test)]
 mod tests {
     use concurrency_manager::ConcurrencyManager;
-    use engine_rocks::ReadPerfInstant;
     use engine_traits::CF_WRITE;
     use kvproto::kvrpcpb::{Assertion, Context, ExtraOp};
     use txn_types::{Key, Mutation, TimeStamp};
@@ -936,7 +935,7 @@ mod tests {
                 check_txn_status::tests::must_success as must_check_txn_status,
                 test_util::{
                     commit, pessimistic_prewrite_with_cm, prewrite, prewrite_command,
-                    prewrite_with_cm, rollback,
+                    prewrite_with_cm,
                 },
             },
             tests::{
@@ -1065,57 +1064,6 @@ mod tests {
             FORWARD_MIN_MUTATIONS_NUM as u8,
             FORWARD_MIN_MUTATIONS_NUM + 1,
         );
-    }
-
-    #[test]
-    fn test_prewrite_skip_too_many_tombstone() {
-        use engine_rocks::{set_perf_level, PerfLevel};
-
-        use crate::server::gc_worker::gc_by_compact;
-        let mut mutations = Vec::default();
-        let pri_key_number = 0;
-        let pri_key = &[pri_key_number];
-        for i in 0..40 {
-            mutations.push(Mutation::make_insert(
-                Key::from_raw(&[b'z', i as u8]),
-                b"100".to_vec(),
-            ));
-        }
-        let mut engine = TestEngineBuilder::new().build().unwrap();
-        let keys: Vec<Key> = mutations.iter().map(|m| m.key().clone()).collect();
-        let mut statistic = Statistics::default();
-        prewrite(
-            &mut engine,
-            &mut statistic,
-            mutations.clone(),
-            pri_key.to_vec(),
-            100,
-            None,
-        )
-        .unwrap();
-        // Rollback to make tombstones in lock-cf.
-        rollback(&mut engine, &mut statistic, keys, 100).unwrap();
-        // Gc rollback flags store in write-cf to make sure the next prewrite operation
-        // will skip seek write cf.
-        gc_by_compact(&mut engine, pri_key, 101);
-        set_perf_level(PerfLevel::EnableTimeExceptForMutex);
-        let perf = ReadPerfInstant::new();
-        let mut statistic = Statistics::default();
-        while mutations.len() > FORWARD_MIN_MUTATIONS_NUM + 1 {
-            mutations.pop();
-        }
-        prewrite(
-            &mut engine,
-            &mut statistic,
-            mutations,
-            pri_key.to_vec(),
-            110,
-            None,
-        )
-        .unwrap();
-        let d = perf.delta();
-        assert_eq!(1, statistic.write.seek);
-        assert_eq!(d.internal_delete_skipped_count, 0);
     }
 
     #[test]

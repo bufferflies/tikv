@@ -68,5 +68,4 @@ url = "2"
 kvengine = { path = "../../components/kvengine", features = ["testexport"] }
 rand = "0.8.3"
 tempfile = "3.0"
-test_raftstore = { path = "../../components/test_raftstore" }
 test_util = { path = "../../components/test_util" }

@@ -1,7 +1,6 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::hash_map::Entry as MapEntry,
     error::Error as StdError,
     result,
     sync::{mpsc, Arc, Mutex, RwLock},
@@ -37,9 +36,8 @@ use raftstore::{
     router::RaftStoreRouter,
     store::{
         fsm::{
-            create_raft_batch_system,
             store::{StoreMeta, PENDING_MSG_CAP},
-            RaftBatchSystem, RaftRouter,
+            RaftRouter,
         },
         transport::CasualRouter,
         *,
@@ -66,21 +64,6 @@ use crate::Config;
 // E,g, for node 1, the node id and store id are both 1.
 
 pub trait Simulator {
-    // Pass 0 to let pd allocate a node id if db is empty.
-    // If node id > 0, the node must be created in db already,
-    // and the node id must be the same as given argument.
-    // Return the node id.
-    // TODO: we will rename node name here because now we use store only.
-    fn run_node(
-        &mut self,
-        node_id: u64,
-        cfg: Config,
-        engines: Engines<RocksEngine, RaftTestEngine>,
-        store_meta: Arc<Mutex<StoreMeta>>,
-        key_manager: Option<Arc<DataKeyManager>>,
-        router: RaftRouter<RocksEngine, RaftTestEngine>,
-        system: RaftBatchSystem<RocksEngine, RaftTestEngine>,
-    ) -> ServerResult<u64>;
     fn stop_node(&mut self, node_id: u64);
     fn get_node_ids(&self) -> HashSet<u64>;
     fn async_command_on_node(
@@ -239,13 +222,8 @@ impl<T: Simulator> Cluster<T> {
         assert!(self.sst_workers_map.insert(node_id, offset).is_none());
     }
 
-    fn create_engine(&mut self, router: Option<RaftRouter<RocksEngine, RaftTestEngine>>) {
-        let (engines, key_manager, dir, sst_worker) =
-            create_test_engine(router, self.io_rate_limiter.clone(), &self.cfg);
-        self.dbs.push(engines);
-        self.key_managers.push(key_manager);
-        self.paths.push(dir);
-        self.sst_workers.push(sst_worker);
+    fn create_engine(&mut self, _router: Option<RaftRouter<RocksEngine, RaftTestEngine>>) {
+        unimplemented!()
     }
 
     pub fn create_engines(&mut self) {
@@ -261,42 +239,7 @@ impl<T: Simulator> Cluster<T> {
     }
 
     pub fn start(&mut self) -> ServerResult<()> {
-        // Try recover from last shutdown.
-        let node_ids: Vec<u64> = self.engines.iter().map(|(&id, _)| id).collect();
-        for node_id in node_ids {
-            self.run_node(node_id)?;
-        }
-
-        // Try start new nodes.
-        for _ in 0..self.count - self.engines.len() {
-            let (router, system) = create_raft_batch_system(&self.cfg.raft_store);
-            self.create_engine(Some(router.clone()));
-
-            let engines = self.dbs.last().unwrap().clone();
-            let key_mgr = self.key_managers.last().unwrap().clone();
-            let store_meta = Arc::new(Mutex::new(StoreMeta::new(PENDING_MSG_CAP)));
-
-            let props = GroupProperties::default();
-            tikv_util::thread_group::set_properties(Some(props.clone()));
-
-            let mut sim = self.sim.wl();
-            let node_id = sim.run_node(
-                0,
-                self.cfg.clone(),
-                engines.clone(),
-                store_meta.clone(),
-                key_mgr.clone(),
-                router,
-                system,
-            )?;
-            self.group_props.insert(node_id, props);
-            self.engines.insert(node_id, engines);
-            self.store_metas.insert(node_id, store_meta);
-            self.key_managers_map.insert(node_id, key_mgr);
-            self.sst_workers_map
-                .insert(node_id, self.sst_workers.len() - 1);
-        }
-        Ok(())
+        unimplemented!()
     }
 
     pub fn compact_data(&self) {
@@ -334,35 +277,8 @@ impl<T: Simulator> Cluster<T> {
         self.sim.rl().get_node_ids()
     }
 
-    pub fn run_node(&mut self, node_id: u64) -> ServerResult<()> {
-        debug!("starting node {}", node_id);
-        let engines = self.engines[&node_id].clone();
-        let key_mgr = self.key_managers_map[&node_id].clone();
-        let (router, system) = create_raft_batch_system(&self.cfg.raft_store);
-        let mut cfg = self.cfg.clone();
-        if let Some(labels) = self.labels.get(&node_id) {
-            cfg.server.labels = labels.to_owned();
-        }
-        let store_meta = match self.store_metas.entry(node_id) {
-            MapEntry::Occupied(o) => {
-                let mut meta = o.get().lock().unwrap();
-                *meta = StoreMeta::new(PENDING_MSG_CAP);
-                o.get().clone()
-            }
-            MapEntry::Vacant(v) => v
-                .insert(Arc::new(Mutex::new(StoreMeta::new(PENDING_MSG_CAP))))
-                .clone(),
-        };
-        let props = GroupProperties::default();
-        self.group_props.insert(node_id, props.clone());
-        tikv_util::thread_group::set_properties(Some(props));
-        debug!("calling run node"; "node_id" => node_id);
-        // FIXME: rocksdb event listeners may not work, because we change the router.
-        self.sim
-            .wl()
-            .run_node(node_id, cfg, engines, store_meta, key_mgr, router, system)?;
-        debug!("node {} started", node_id);
-        Ok(())
+    pub fn run_node(&mut self, _node_id: u64) -> ServerResult<()> {
+        unimplemented!()
     }
 
     pub fn stop_node(&mut self, node_id: u64) {

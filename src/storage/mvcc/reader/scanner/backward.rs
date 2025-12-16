@@ -498,8 +498,8 @@ mod tests {
         kv::{Engine, Modify, TestEngineBuilder},
         mvcc::tests::write,
         txn::tests::{
-            must_acquire_pessimistic_lock, must_commit, must_gc, must_prewrite_delete,
-            must_prewrite_lock, must_prewrite_put, must_rollback,
+            must_acquire_pessimistic_lock, must_commit, must_prewrite_delete, must_prewrite_lock,
+            must_prewrite_put,
         },
         Scanner,
     };
@@ -1372,50 +1372,6 @@ mod tests {
                 .map(|i| Key::from_raw(&[i]).len() + vec![i].len())
                 .sum::<usize>()
         );
-    }
-
-    #[test]
-    fn test_many_tombstones() {
-        let mut engine = TestEngineBuilder::new().build().unwrap();
-
-        // Generate RocksDB tombstones in write cf.
-        let start_ts = 1;
-        let safe_point = 2;
-        for i in 0..16 {
-            for y in 0..16 {
-                let pk = &[i as u8, y as u8];
-                must_prewrite_put(&mut engine, pk, b"", pk, start_ts);
-                must_rollback(&mut engine, pk, start_ts, false);
-                // Generate 254 RocksDB tombstones between [0,0] and [15,15].
-                if !((i == 0 && y == 0) || (i == 15 && y == 15)) {
-                    must_gc(&mut engine, pk, safe_point);
-                }
-            }
-        }
-
-        // Generate 16 locks in lock cf.
-        let start_ts = 3;
-        for i in 0..16 {
-            let pk = &[i as u8];
-            must_prewrite_put(&mut engine, pk, b"", pk, start_ts);
-        }
-
-        let snapshot = engine.snapshot(Default::default()).unwrap();
-        let row = &[15_u8];
-        let k = Key::from_raw(row);
-
-        // Call reverse scan
-        let ts = 2.into();
-        let mut scanner = ScannerBuilder::new(snapshot, ts)
-            .desc(true)
-            .range(None, Some(k))
-            .build()
-            .unwrap();
-        assert_eq!(scanner.next().unwrap(), None);
-        let statistics = scanner.take_statistics();
-        assert_eq!(statistics.lock.prev, 15);
-        assert_eq!(statistics.write.prev, 1);
-        assert_eq!(scanner.take_statistics().processed_size, 0);
     }
 
     #[test]

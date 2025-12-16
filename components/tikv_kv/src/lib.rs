@@ -38,11 +38,11 @@ use std::{
 use collections::HashMap;
 use concurrency_manager::TrackedBackupTs;
 use engine_traits::{
-    CfName, IterOptions, KvEngine as LocalEngine, Mutable, MvccProperties, ReadOptions, WriteBatch,
-    CF_DEFAULT, CF_LOCK,
+    CfName, IterOptions, KvEngine as LocalEngine, Mutable, ReadOptions, WriteBatch, CF_DEFAULT,
+    CF_LOCK,
 };
 use error_code::{self, ErrorCode, ErrorCodeExt};
-use futures::{compat::Future01CompatExt, future::BoxFuture, prelude::*};
+use futures::{compat::Future01CompatExt, prelude::*};
 use into_other::IntoOther;
 use kvenginepb::TxnFileRef;
 use kvproto::{
@@ -416,8 +416,6 @@ pub trait Engine: Send + Clone + 'static {
         })
     }
 
-    fn release_snapshot(&mut self) {}
-
     fn snapshot(&mut self, ctx: SnapContext<'_>) -> Result<Self::Snap> {
         let deadline = Instant::now() + DEFAULT_TIMEOUT;
         let timeout = GLOBAL_TIMER_HANDLE.delay(deadline).compat();
@@ -448,36 +446,9 @@ pub trait Engine: Send + Clone + 'static {
         self.write(ctx, WriteData::from_modifies(vec![Modify::Delete(cf, key)]))
     }
 
-    fn get_mvcc_properties_cf(
-        &self,
-        _: CfName,
-        _safe_point: TimeStamp,
-        _start: &[u8],
-        _end: &[u8],
-    ) -> Option<MvccProperties> {
-        None
-    }
-
     // Some engines have a `TxnExtraScheduler`. This method is to send the extra
     // to the scheduler.
     fn schedule_txn_extra(&self, _txn_extra: TxnExtra) {}
-
-    /// Mark the start of flashback.
-    // It's an infrequent API, use trait object for simplicity.
-    fn start_flashback(&self, _ctx: &Context) -> BoxFuture<'static, Result<()>> {
-        Box::pin(futures::future::ready(Ok(())))
-    }
-
-    /// Mark the end of flashback.
-    // It's an infrequent API, use trait object for simplicity.
-    fn end_flashback(&self, _ctx: &Context) -> BoxFuture<'static, Result<()>> {
-        Box::pin(futures::future::ready(Ok(())))
-    }
-
-    /// Application may operate on local engine directly, the method is to hint
-    /// the engine there is probably a notable difference in range, so
-    /// engine may update its statistics.
-    fn hint_change_in_range(&self, _start_key: Vec<u8>, _end_key: Vec<u8>) {}
 
     fn get_kvengine(&self) -> Option<kvengine::Engine> {
         None

@@ -77,7 +77,7 @@ use tikv::{
     read_pool::{build_tokio_pool, build_yatp_read_pool},
     server::{
         config::Config as ServerConfig, lock_manager::LockManager, raftkv::ReplicaReadLockChecker,
-        CPU_CORES_QUOTA_GAUGE, DEFAULT_CLUSTER_ID, GRPC_THREAD_PREFIX,
+        CPU_CORES_QUOTA_GAUGE, DEFAULT_CLUSTER_ID,
     },
     storage::{
         mvcc::MvccConsistencyCheckObserver,
@@ -104,7 +104,7 @@ use crate::{
     node::*,
     raftkv::*,
     resolve,
-    server::Server,
+    server::{Server, GRPC_THREAD_PREFIX},
     service::{DiagnosticsService, ImportSstService},
     setup::{initial_logger, initial_metric, validate_and_persist_config},
     status_server::StatusServer,

@@ -9,14 +9,11 @@ use tidb_query_datatype::{
     codec::{datum, table, Datum},
     expr::EvalContext,
 };
-use tikv::{
-    server::gc_worker::GcConfig,
-    storage::{
-        kv::{Engine, RocksEngine},
-        lock_manager::MockLockManager,
-        txn::FixtureStore,
-        SnapshotStore, StorageApiV1, TestStorageBuilderApiV1,
-    },
+use tikv::storage::{
+    kv::{Engine, RocksEngine},
+    lock_manager::MockLockManager,
+    txn::FixtureStore,
+    SnapshotStore, StorageApiV1, TestStorageBuilderApiV1,
 };
 use txn_types::{Key, Mutation, TimeStamp};
 
@@ -130,13 +127,8 @@ impl Default for Store<RocksEngine> {
 }
 
 impl<E: Engine> Store<E> {
-    pub fn from_storage(storage: StorageApiV1<E, MockLockManager>) -> Self {
-        Self {
-            store: SyncTestStorageApiV1::from_storage(0, storage, GcConfig::default()).unwrap(),
-            current_ts: 1.into(),
-            last_committed_ts: TimeStamp::zero(),
-            handles: vec![],
-        }
+    pub fn from_storage(_storage: StorageApiV1<E, MockLockManager>) -> Self {
+        unimplemented!()
     }
 
     pub fn current_ts(&self) -> TimeStamp {

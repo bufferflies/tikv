@@ -413,7 +413,6 @@ impl<S: Snapshot> PointGetter<S> {
 
 #[cfg(test)]
 mod tests {
-    use engine_rocks::ReadPerfInstant;
     use kvproto::kvrpcpb::{Assertion, AssertionLevel, PrewriteRequestPessimisticAction::*};
     use txn_types::SHORT_VALUE_MAX_LEN;
 
@@ -421,7 +420,7 @@ mod tests {
     use crate::storage::{
         kv::{CfStatistics, Engine, RocksEngine, TestEngineBuilder},
         txn::tests::{
-            must_acquire_pessimistic_lock, must_cleanup_with_gc_fence, must_commit, must_gc,
+            must_acquire_pessimistic_lock, must_cleanup_with_gc_fence, must_commit,
             must_pessimistic_prewrite_delete, must_prewrite_delete, must_prewrite_lock,
             must_prewrite_put, must_prewrite_put_impl, must_rollback,
         },
@@ -697,46 +696,6 @@ mod tests {
         let mut getter = new_point_getter(&mut engine, 30.into());
         must_get_none(&mut getter, b"foo");
         must_get_none(&mut getter, b"foo0");
-    }
-
-    #[test]
-    fn test_tombstone() {
-        let mut engine = TestEngineBuilder::new().build().unwrap();
-
-        must_prewrite_put(&mut engine, b"foo", b"bar", b"foo", 10);
-        must_prewrite_put(&mut engine, b"foo1", b"bar1", b"foo", 10);
-        must_prewrite_put(&mut engine, b"foo2", b"bar2", b"foo", 10);
-        must_prewrite_put(&mut engine, b"foo3", b"bar3", b"foo", 10);
-        must_commit(&mut engine, b"foo", 10, 20);
-        must_commit(&mut engine, b"foo1", 10, 20);
-        must_commit(&mut engine, b"foo2", 10, 20);
-        must_commit(&mut engine, b"foo3", 10, 20);
-        must_prewrite_delete(&mut engine, b"foo1", b"foo1", 30);
-        must_prewrite_delete(&mut engine, b"foo2", b"foo1", 30);
-        must_commit(&mut engine, b"foo1", 30, 40);
-        must_commit(&mut engine, b"foo2", 30, 40);
-
-        must_gc(&mut engine, b"foo", 50);
-        must_gc(&mut engine, b"foo1", 50);
-        must_gc(&mut engine, b"foo2", 50);
-        must_gc(&mut engine, b"foo3", 50);
-
-        let mut getter = new_point_getter(&mut engine, TimeStamp::max());
-        let perf_statistics = ReadPerfInstant::new();
-        must_get_value(&mut getter, b"foo", b"bar");
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 0);
-
-        let perf_statistics = ReadPerfInstant::new();
-        must_get_none(&mut getter, b"foo1");
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 2);
-
-        let perf_statistics = ReadPerfInstant::new();
-        must_get_none(&mut getter, b"foo2");
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 2);
-
-        let perf_statistics = ReadPerfInstant::new();
-        must_get_value(&mut getter, b"foo3", b"bar3");
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 0);
     }
 
     #[test]

@@ -11,9 +11,8 @@ use pd_client::Error as PdError;
 use protobuf::ProtobufError;
 use raftstore::Error as RaftServerError;
 use thiserror::Error;
-use tikv_util::{codec::Error as CodecError, worker::ScheduleError};
+use tikv_util::codec::Error as CodecError;
 
-use super::snap::Task as SnapTask;
 use crate::storage::{kv::Error as EngineError, Error as StorageError};
 
 #[derive(Debug, Error)]
@@ -51,9 +50,6 @@ pub enum Error {
 
     #[error("{0:?}")]
     Pd(#[from] PdError),
-
-    #[error("{0:?}")]
-    SnapWorkerStopped(#[from] ScheduleError<SnapTask>),
 
     #[error("failed to poll from mpsc receiver")]
     Sink,

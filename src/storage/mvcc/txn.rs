@@ -182,12 +182,6 @@ impl MvccTxn {
         self.modifies.push(write);
     }
 
-    pub(crate) fn delete_write(&mut self, key: Key, ts: TimeStamp) {
-        let write = Modify::Delete(CF_WRITE, key.append_ts(ts));
-        self.write_size += write.size();
-        self.modifies.push(write);
-    }
-
     /// Add the timestamp of the current rollback operation to another
     /// transaction's lock if necessary.
     ///

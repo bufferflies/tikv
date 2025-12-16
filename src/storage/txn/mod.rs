@@ -32,7 +32,6 @@ pub use self::{
             flashback_to_version_read_lock, flashback_to_version_read_write,
             flashback_to_version_write, rollback_locks, FLASHBACK_BATCH_SIZE,
         },
-        gc::gc,
         prewrite::{prewrite, prewrite_async, CommitKind, TransactionKind, TransactionProperties},
     },
     cloud_store::{check_locks, CloudStore, CloudStoreScanner},
@@ -254,7 +253,6 @@ pub mod tests {
             must_err as must_commit_err, must_succeed as must_commit,
             must_succeed_on_region as must_commit_on_region,
         },
-        gc::tests::must_succeed as must_gc,
         prewrite::tests::{
             try_pessimistic_prewrite_check_not_exists, try_prewrite_check_not_exists,
             try_prewrite_insert,

@@ -5,9 +5,11 @@
 use std::{path::Path, process};
 
 use clap::{crate_authors, App, Arg};
-use cloud_server::{signal_handler, TikvServer};
+use cloud_server::{
+    setup::{ensure_no_unrecognized_config, validate_and_persist_config},
+    signal_handler, TikvServer,
+};
 use serde_json::{Map, Value};
-use server::setup::{ensure_no_unrecognized_config, validate_and_persist_config};
 use tikv::config::{to_flatten_config_info, TikvConfig};
 
 fn main() {
@@ -208,7 +210,7 @@ fn main() {
             })
         });
 
-    server::setup::overwrite_config_with_cmd_args(&mut config, &matches);
+    cloud_server::setup::overwrite_config_with_cmd_args(&mut config, &matches);
     config.logger_compatible_adjust();
 
     if is_config_check {

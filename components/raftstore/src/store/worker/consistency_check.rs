@@ -50,13 +50,6 @@ pub struct Runner<EK: KvEngine, C: CasualRouter<EK>> {
 }
 
 impl<EK: KvEngine, C: CasualRouter<EK>> Runner<EK, C> {
-    pub fn new(router: C, cop_host: CoprocessorHost<EK>) -> Runner<EK, C> {
-        Runner {
-            router,
-            coprocessor_host: cop_host,
-        }
-    }
-
     /// Computes the hash of the Region.
     fn compute_hash(&mut self, region: Region, index: u64, context: Vec<u8>, snap: EK::Snapshot) {
         if context.is_empty() {
@@ -118,80 +111,6 @@ where
                 region,
                 snap,
             } => self.compute_hash(region, index, context, snap),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{sync::mpsc, time::Duration};
-
-    use byteorder::{BigEndian, WriteBytesExt};
-    use engine_test::kv::{new_engine, KvTestEngine};
-    use engine_traits::{KvEngine, SyncMutable, ALL_CFS};
-    use kvproto::metapb::*;
-    use tempfile::Builder;
-    use tikv_util::worker::Runnable;
-
-    use super::*;
-    use crate::coprocessor::{
-        BoxConsistencyCheckObserver, ConsistencyCheckMethod, RawConsistencyCheckObserver,
-    };
-
-    #[test]
-    fn test_consistency_check() {
-        let path = Builder::new().prefix("tikv-store-test").tempdir().unwrap();
-        let db = new_engine(path.path().to_str().unwrap(), ALL_CFS).unwrap();
-
-        let mut region = Region::default();
-        region.mut_peers().push(Peer::default());
-
-        let (tx, rx) = mpsc::sync_channel(100);
-        let mut host =
-            CoprocessorHost::<KvTestEngine>::new(tx.clone(), crate::coprocessor::Config::default());
-        host.registry.register_consistency_check_observer(
-            100,
-            BoxConsistencyCheckObserver::new(RawConsistencyCheckObserver::default()),
-        );
-        let mut runner = Runner::new(tx, host);
-        let mut digest = crc32fast::Hasher::new();
-        let kvs = vec![(b"k1", b"v1"), (b"k2", b"v2")];
-        for (k, v) in kvs {
-            let key = keys::data_key(k);
-            db.put(&key, v).unwrap();
-            // hash should contain all kvs
-            digest.update(&key);
-            digest.update(v);
-        }
-
-        // hash should also contains region state key.
-        digest.update(&keys::region_state_key(region.get_id()));
-        let sum = digest.finalize();
-        runner.run(Task::<<KvTestEngine as KvEngine>::Snapshot>::ComputeHash {
-            index: 10,
-            context: vec![ConsistencyCheckMethod::Raw as u8],
-            region: region.clone(),
-            snap: db.snapshot(),
-        });
-        let mut checksum_bytes = vec![];
-        checksum_bytes.write_u32::<BigEndian>(sum).unwrap();
-
-        let res = rx.recv_timeout(Duration::from_secs(3)).unwrap();
-        match res {
-            (
-                region_id,
-                CasualMessage::ComputeHashResult {
-                    index,
-                    hash,
-                    context,
-                },
-            ) => {
-                assert_eq!(region_id, region.get_id());
-                assert_eq!(index, 10);
-                assert_eq!(context, vec![0]);
-                assert_eq!(hash, checksum_bytes);
-            }
-            e => panic!("unexpected {:?}", e),
         }
     }
 }

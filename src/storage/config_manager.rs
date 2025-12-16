@@ -9,20 +9,16 @@ use file_system::{get_io_rate_limiter, IoPriority, IoType};
 use online_config::{ConfigChange, ConfigManager, ConfigValue, Result as CfgResult};
 use strum::IntoEnumIterator;
 use tikv_kv::Engine;
-use tikv_util::{
-    config::{ReadableDuration, ReadableSize},
-    worker::Scheduler,
-};
+use tikv_util::config::ReadableSize;
 
 use crate::{
-    server::{ttl::TtlCheckerTask, CONFIG_ROCKSDB_GAUGE},
+    server::CONFIG_ROCKSDB_GAUGE,
     storage::{lock_manager::LockManager, txn::flow_controller::FlowController, TxnScheduler},
 };
 
 pub struct StorageConfigManger<E: Engine, K: KvEngine, L: LockManager> {
     tablet_factory: Arc<dyn TabletFactory<K> + Send + Sync>,
     shared_block_cache: bool,
-    ttl_checker_scheduler: Scheduler<TtlCheckerTask>,
     flow_controller: Arc<FlowController>,
     _scheduler: TxnScheduler<E, L>,
 }
@@ -34,14 +30,12 @@ impl<E: Engine, K: KvEngine, L: LockManager> StorageConfigManger<E, K, L> {
     pub fn new(
         tablet_factory: Arc<dyn TabletFactory<K> + Send + Sync>,
         shared_block_cache: bool,
-        ttl_checker_scheduler: Scheduler<TtlCheckerTask>,
         flow_controller: Arc<FlowController>,
         scheduler: TxnScheduler<E, L>,
     ) -> Self {
         StorageConfigManger {
             tablet_factory,
             shared_block_cache,
-            ttl_checker_scheduler,
             flow_controller,
             _scheduler: scheduler,
         }
@@ -64,11 +58,6 @@ impl<EK: Engine, K: KvEngine, L: LockManager> ConfigManager for StorageConfigMan
                         .set(s.0 as f64);
                 }
             }
-        } else if let Some(v) = change.remove("ttl_check_poll_interval") {
-            let interval: ReadableDuration = v.into();
-            self.ttl_checker_scheduler
-                .schedule(TtlCheckerTask::UpdatePollInterval(interval.into()))
-                .unwrap();
         } else if let Some(ConfigValue::Module(mut flow_control)) = change.remove("flow_control") {
             if let Some(v) = flow_control.remove("enable") {
                 let enable: bool = v.into();

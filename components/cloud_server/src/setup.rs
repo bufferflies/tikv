@@ -3,6 +3,7 @@
 use std::{
     borrow::ToOwned,
     io,
+    num::ParseIntError,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -14,7 +15,7 @@ use chrono::Local;
 use clap::ArgMatches;
 use collections::HashMap;
 use tikv::config::{check_critical_config, persist_config, MetricConfig, TikvConfig};
-use tikv_util::{self, config, logger};
+use tikv_util::{self, config, config::ReadableDuration, logger};
 
 // A workaround for checking if log is initialized.
 pub static LOG_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -256,7 +257,6 @@ fn write_empty_metrics_for_metrics_checker() {
         .set(0);
 }
 
-#[allow(dead_code)]
 pub fn overwrite_config_with_cmd_args(config: &mut TikvConfig, matches: &ArgMatches<'_>) {
     if let Some(level) = matches.value_of("log-level") {
         config.log.level = logger::get_level_by_string(level).unwrap().into();
@@ -319,9 +319,20 @@ pub fn overwrite_config_with_cmd_args(config: &mut TikvConfig, matches: &ArgMatc
     if matches.value_of("metrics-addr").is_some() {
         warn!("metrics push is not supported any more.");
     }
+
+    if let Some(addr) = matches.value_of("push-metrics-addr") {
+        config.server.push_metrics_addr = addr.to_owned();
+    }
+
+    if let Some(interval) = matches.value_of("push-metrics-interval") {
+        let push_metrics_interval =
+            ReadableDuration::secs(interval.parse().unwrap_or_else(|e: ParseIntError| {
+                fatal!("invalid push-metrics-interval: {}", e);
+            }));
+        config.server.push_metrics_interval = push_metrics_interval;
+    }
 }
 
-#[allow(dead_code)]
 pub fn validate_and_persist_config(config: &mut TikvConfig, persist: bool) {
     config.compatible_adjust();
     if let Err(e) = config.validate() {

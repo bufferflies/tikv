@@ -17,8 +17,6 @@ pub mod util;
 
 mod async_io;
 mod bootstrap;
-mod compaction_guard;
-mod hibernate_state;
 mod peer_storage;
 mod region_snapshot;
 mod replication_mode;
@@ -41,11 +39,9 @@ pub use self::{
         bootstrap_store, clear_prepare_bootstrap_cluster, clear_prepare_bootstrap_key,
         initial_region, prepare_bootstrap_cluster,
     },
-    compaction_guard::CompactionGuardGeneratorFactory,
     config::Config,
     entry_storage::{EntryStorage, RaftlogFetchResult, MAX_INIT_ENTRY_COUNT},
-    fsm::{check_sst_for_ingestion, DestroyPeerJob, RaftRouter, StoreInfo},
-    hibernate_state::{GroupState, HibernateState},
+    fsm::{DestroyPeerJob, RaftRouter, StoreInfo},
     memory::*,
     metrics::RAFT_ENTRY_FETCHES_VEC,
     msg::{
@@ -78,9 +74,9 @@ pub use self::{
     worker::{
         metrics as worker_metrics, metrics::TLS_LOCAL_READ_METRICS, AutoSplitController, Bucket,
         BucketRange, CachedReadDelegate, CheckLeaderRunner, CheckLeaderTask, FlowStatistics,
-        FlowStatsReporter, KeyEntry, LocalReadContext, LocalReader, LocalReaderCore, PdTask,
-        ReadDelegate, ReadExecutor, ReadExecutorProvider, ReadProgress, ReadStats,
-        RefreshConfigTask, RegionTask, SplitCheckRunner, SplitCheckTask, SplitConfig,
-        SplitConfigManager, StoreMetaDelegate, TrackVer, WriteStats,
+        FlowStatsReporter, KeyEntry, LocalReadContext, LocalReader, LocalReaderCore, ReadDelegate,
+        ReadExecutor, ReadExecutorProvider, ReadProgress, ReadStats, RefreshConfigTask, RegionTask,
+        SplitCheckRunner, SplitCheckTask, SplitConfig, SplitConfigManager, StoreMetaDelegate,
+        TrackVer, WriteStats,
     },
 };

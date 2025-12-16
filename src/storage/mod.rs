@@ -341,10 +341,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         self.engine.snapshot(Default::default()).unwrap()
     }
 
-    pub fn release_snapshot(&mut self) {
-        self.engine.release_snapshot();
-    }
-
     pub fn get_readpool_queue_per_worker(&self) -> usize {
         self.read_pool.get_queue_size_per_worker()
     }
@@ -850,7 +846,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         tracker,
                     ));
                 }
-                Self::with_tls_engine(|engine| engine.release_snapshot());
                 for req_snap in req_snaps {
                     let (
                         snap,
@@ -1776,7 +1771,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                     let snap = Self::with_tls_engine(|engine| Self::snapshot(engine, snap_ctx));
                     snaps.push((id, key, ctx, req, snap));
                 }
-                Self::with_tls_engine(|engine| engine.release_snapshot());
                 let begin_instant = Instant::now();
                 for (id, key, mut ctx, mut req, snap) in snaps {
                     let cf = req.take_cf();

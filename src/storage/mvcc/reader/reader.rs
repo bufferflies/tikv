@@ -915,7 +915,7 @@ pub mod tests {
         kv::Modify,
         mvcc::{tests::write, MvccReader, MvccTxn},
         txn::{
-            acquire_pessimistic_lock, cleanup, commit, gc, prewrite, CommitKind, TransactionKind,
+            acquire_pessimistic_lock, cleanup, commit, prewrite, CommitKind, TransactionKind,
             TransactionProperties,
         },
         Engine, TestEngineBuilder,
@@ -1108,21 +1108,6 @@ pub mod tests {
             self.write(txn.into_modifies());
         }
 
-        pub fn gc(&mut self, pk: &[u8], safe_point: impl Into<TimeStamp> + Copy) {
-            let cm = ConcurrencyManager::new(safe_point.into());
-            loop {
-                let snap = self.snapshot();
-                let mut txn = MvccTxn::new(safe_point.into(), cm.clone());
-                let mut reader = MvccReader::new(snap, None, true);
-                gc(&mut txn, &mut reader, Key::from_raw(pk), safe_point.into()).unwrap();
-                let modifies = txn.into_modifies();
-                if modifies.is_empty() {
-                    return;
-                }
-                self.write(modifies);
-            }
-        }
-
         pub fn write(&mut self, modifies: Vec<Modify>) {
             let db = &self.db;
             let mut wb = db.write_batch();
@@ -1261,51 +1246,6 @@ pub mod tests {
 
             assert_eq!(iter.next().unwrap(), false);
         }
-    }
-
-    #[test]
-    fn test_ts_filter_lost_delete() {
-        let dir = tempfile::Builder::new()
-            .prefix("test_ts_filter_lost_deletion")
-            .tempdir()
-            .unwrap();
-        let path = dir.path().to_str().unwrap();
-        let region = make_region(1, vec![0], vec![]);
-
-        let db = open_db(path, true);
-        let mut engine = RegionEngine::new(&db, &region);
-
-        let key1 = &[1];
-        engine.put(key1, 2, 3);
-        engine.flush();
-        engine.compact();
-
-        // Delete key 1 commit ts@5 and GC@6
-        // Put key 2 commit ts@7
-        let key2 = &[2];
-        engine.put(key2, 6, 7);
-        engine.delete(key1, 4, 5);
-        engine.gc(key1, 6);
-        engine.flush();
-
-        // Scan kv with ts filter [1, 6].
-        let mut iopt = IterOptions::default();
-        iopt.set_hint_min_ts(Bound::Included(1));
-        iopt.set_hint_max_ts(Bound::Included(6));
-
-        let snap = RegionSnapshot::<RocksSnapshot>::from_raw(db, region);
-        let mut iter = snap.iter(CF_WRITE, iopt).unwrap();
-
-        // Must not omit the latest deletion of key1 to prevent seeing outdated record.
-        assert_eq!(iter.seek_to_first().unwrap(), true);
-        assert_eq!(
-            Key::from_encoded_slice(iter.key())
-                .to_raw()
-                .unwrap()
-                .as_slice(),
-            key2
-        );
-        assert_eq!(iter.next().unwrap(), false);
     }
 
     #[test]

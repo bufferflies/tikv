@@ -52,7 +52,7 @@ use raft_log_engine::{
 };
 use raftstore::{
     coprocessor::{Config as CopConfig, RegionInfoAccessor},
-    store::{CompactionGuardGeneratorFactory, Config as RaftstoreConfig, SplitConfig},
+    store::{Config as RaftstoreConfig, SplitConfig},
 };
 use resource_control::Config as ResourceControlConfig;
 use resource_metering::Config as ResourceMeteringConfig;
@@ -74,10 +74,8 @@ use tikv_util::{
 use crate::{
     import::Config as ImportConfig,
     server::{
-        gc_worker::{GcConfig, RawCompactionFilterFactory, WriteCompactionFilterFactory},
-        lock_manager::Config as PessimisticTxnConfig,
-        ttl::TtlCompactionFilterFactory,
-        Config as ServerConfig, CONFIG_ROCKSDB_GAUGE,
+        gc_worker::GcConfig, lock_manager::Config as PessimisticTxnConfig, Config as ServerConfig,
+        CONFIG_ROCKSDB_GAUGE,
     },
     storage::config::{Config as StorageConfig, DEFAULT_DATA_DIR},
 };
@@ -581,20 +579,6 @@ macro_rules! build_cf_opt {
         if $opt.enable_doubly_skiplist {
             cf_opts.set_doubly_skiplist();
         }
-        if $opt.enable_compaction_guard {
-            if let Some(provider) = $region_info_provider {
-                let factory = CompactionGuardGeneratorFactory::new(
-                    $cf_name,
-                    provider.clone(),
-                    $opt.compaction_guard_min_output_file_size.0,
-                )
-                .unwrap();
-                cf_opts.set_sst_partitioner_factory(factory);
-                cf_opts.set_target_file_size_base($opt.compaction_guard_max_output_file_size.0);
-            } else {
-                warn!("compaction guard is disabled due to region info provider not available")
-            }
-        }
         cf_opts
     }};
 }
@@ -666,10 +650,10 @@ impl DefaultCfConfig {
     pub fn build_opt(
         &self,
         cache: &Option<Cache>,
-        region_info_accessor: Option<&RegionInfoAccessor>,
+        _region_info_accessor: Option<&RegionInfoAccessor>,
         api_version: ApiVersion,
     ) -> RocksCfOptions {
-        let mut cf_opts = build_cf_opt!(self, CF_DEFAULT, cache, region_info_accessor);
+        let mut cf_opts = build_cf_opt!(self, CF_DEFAULT, cache, _region_info_accessor);
         let f = RangePropertiesCollectorFactory {
             prop_size_index_distance: self.prop_size_index_distance,
             prop_keys_index_distance: self.prop_keys_index_distance,
@@ -688,21 +672,8 @@ impl DefaultCfConfig {
                     "tikv.ttl-properties-collector",
                     TtlPropertiesCollectorFactory::<ApiV1Ttl>::default(),
                 );
-                cf_opts
-                    .set_compaction_filter_factory(
-                        "ttl_compaction_filter_factory",
-                        TtlCompactionFilterFactory::<ApiV1Ttl>::default(),
-                    )
-                    .unwrap();
             }
-            ApiVersion::V2 => {
-                cf_opts
-                    .set_compaction_filter_factory(
-                        "apiv2_gc_compaction_filter_factory",
-                        RawCompactionFilterFactory,
-                    )
-                    .unwrap();
-            }
+            ApiVersion::V2 => {}
         }
         cf_opts.set_titan_cf_options(&self.titan.build_opts());
         cf_opts
@@ -782,9 +753,9 @@ impl WriteCfConfig {
     pub fn build_opt(
         &self,
         cache: &Option<Cache>,
-        region_info_accessor: Option<&RegionInfoAccessor>,
+        _region_info_accessor: Option<&RegionInfoAccessor>,
     ) -> RocksCfOptions {
-        let mut cf_opts = build_cf_opt!(self, CF_WRITE, cache, region_info_accessor);
+        let mut cf_opts = build_cf_opt!(self, CF_WRITE, cache, _region_info_accessor);
         // Prefix extractor(trim the timestamp at tail) for write cf.
         cf_opts
             .set_prefix_extractor(
@@ -804,12 +775,6 @@ impl WriteCfConfig {
             prop_keys_index_distance: self.prop_keys_index_distance,
         };
         cf_opts.add_table_properties_collector_factory("tikv.range-properties-collector", f);
-        cf_opts
-            .set_compaction_filter_factory(
-                "write_compaction_filter_factory",
-                WriteCompactionFilterFactory,
-            )
-            .unwrap();
         cf_opts.set_titan_cf_options(&self.titan.build_opts());
         cf_opts
     }
@@ -878,8 +843,8 @@ impl Default for LockCfConfig {
 
 impl LockCfConfig {
     pub fn build_opt(&self, cache: &Option<Cache>) -> RocksCfOptions {
-        let no_region_info_accessor: Option<&RegionInfoAccessor> = None;
-        let mut cf_opts = build_cf_opt!(self, CF_LOCK, cache, no_region_info_accessor);
+        let _no_region_info_accessor: Option<&RegionInfoAccessor> = None;
+        let mut cf_opts = build_cf_opt!(self, CF_LOCK, cache, _no_region_info_accessor);
         cf_opts
             .set_prefix_extractor("NoopSliceTransform", NoopSliceTransform)
             .unwrap();
@@ -954,8 +919,8 @@ impl Default for RaftCfConfig {
 
 impl RaftCfConfig {
     pub fn build_opt(&self, cache: &Option<Cache>) -> RocksCfOptions {
-        let no_region_info_accessor: Option<&RegionInfoAccessor> = None;
-        let mut cf_opts = build_cf_opt!(self, CF_RAFT, cache, no_region_info_accessor);
+        let _no_region_info_accessor: Option<&RegionInfoAccessor> = None;
+        let mut cf_opts = build_cf_opt!(self, CF_RAFT, cache, _no_region_info_accessor);
         cf_opts
             .set_prefix_extractor("NoopSliceTransform", NoopSliceTransform)
             .unwrap();
@@ -1330,8 +1295,8 @@ impl Default for RaftDefaultCfConfig {
 
 impl RaftDefaultCfConfig {
     pub fn build_opt(&self, cache: &Option<Cache>) -> RocksCfOptions {
-        let no_region_info_accessor: Option<&RegionInfoAccessor> = None;
-        let mut cf_opts = build_cf_opt!(self, CF_DEFAULT, cache, no_region_info_accessor);
+        let _no_region_info_accessor: Option<&RegionInfoAccessor> = None;
+        let mut cf_opts = build_cf_opt!(self, CF_DEFAULT, cache, _no_region_info_accessor);
         let f = FixedPrefixSliceTransform::new(region_raft_prefix_len());
         cf_opts
             .set_memtable_insert_hint_prefix_extractor("RaftPrefixSliceTransform", f)
@@ -4199,7 +4164,6 @@ mod tests {
     use futures::executor::block_on;
     use grpcio::ResourceQuota;
     use itertools::Itertools;
-    use raftstore::coprocessor::region_info_accessor::MockRegionInfoProvider;
     use slog::Level;
     use tempfile::Builder;
     use tikv_kv::RocksEngine as RocksDBEngine;
@@ -4208,12 +4172,11 @@ mod tests {
         logger::get_log_level,
         quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
         sys::SysQuota,
-        worker::{dummy_scheduler, ReceiverWrapper},
     };
 
     use super::*;
     use crate::{
-        server::{config::ServerConfigManager, ttl::TtlCheckerTask},
+        server::config::ServerConfigManager,
         storage::{
             config_manager::StorageConfigManger,
             lock_manager::MockLockManager,
@@ -4608,7 +4571,6 @@ mod tests {
     ) -> (
         Storage<RocksDBEngine, MockLockManager, F>,
         ConfigController,
-        ReceiverWrapper<TtlCheckerTask>,
         Arc<FlowController>,
     ) {
         assert_eq!(F::TAG, cfg.storage.api_version());
@@ -4646,18 +4608,16 @@ mod tests {
                 shared,
             )),
         );
-        let (scheduler, receiver) = dummy_scheduler();
         cfg_controller.register(
             Module::Storage,
             Box::new(StorageConfigManger::new(
                 Arc::new(DummyFactory::new(Some(engine), "".to_string())),
                 shared,
-                scheduler,
                 flow_controller.clone(),
                 storage.get_scheduler(),
             )),
         );
-        (storage, cfg_controller, receiver, flow_controller)
+        (storage, cfg_controller, flow_controller)
     }
 
     #[test]
@@ -4665,7 +4625,7 @@ mod tests {
         let (mut cfg, _dir) = TikvConfig::with_tmp().unwrap();
         cfg.storage.flow_control.l0_files_threshold = 50;
         cfg.validate().unwrap();
-        let (storage, cfg_controller, _, flow_controller) = new_engines::<ApiV1>(cfg);
+        let (storage, cfg_controller, flow_controller) = new_engines::<ApiV1>(cfg);
         let db = storage.get_engine().get_rocksdb();
         assert_eq!(
             db.get_options_cf(CF_DEFAULT)
@@ -4944,23 +4904,6 @@ mod tests {
     }
 
     #[test]
-    fn test_change_ttl_check_poll_interval() {
-        let (mut cfg, _dir) = TikvConfig::with_tmp().unwrap();
-        cfg.storage.block_cache.shared = true;
-        cfg.validate().unwrap();
-        let (_, cfg_controller, mut rx, _) = new_engines::<ApiV1>(cfg);
-
-        // Can not update shared block cache through rocksdb module
-        cfg_controller
-            .update_config("storage.ttl_check_poll_interval", "10s")
-            .unwrap();
-        match rx.recv() {
-            None => unreachable!(),
-            Some(TtlCheckerTask::UpdatePollInterval(d)) => assert_eq!(d, Duration::from_secs(10)),
-        }
-    }
-
-    #[test]
     fn test_change_quota_config() {
         let (mut cfg, _dir) = TikvConfig::with_tmp().unwrap();
         cfg.quota.foreground_cpu_time = 1000;
@@ -5078,12 +5021,10 @@ mod tests {
         let (mut cfg, _dir) = TikvConfig::with_tmp().unwrap();
         cfg.validate().unwrap();
         let cfg_controller = ConfigController::new(cfg.clone());
-        let (scheduler, _receiver) = dummy_scheduler();
         let version_tracker = Arc::new(VersionTrack::new(cfg.server.clone()));
         cfg_controller.register(
             Module::Server,
             Box::new(ServerConfigManager::new(
-                scheduler,
                 version_tracker.clone(),
                 ResourceQuota::new(None),
             )),
@@ -5197,54 +5138,6 @@ mod tests {
             cfg.raft_engine.config.dir,
             config::canonicalize_sub_path(&cfg.storage.data_dir, "raft-engine").unwrap()
         );
-    }
-
-    #[test]
-    fn test_compaction_guard() {
-        // Test comopaction guard disabled.
-        {
-            let config = DefaultCfConfig {
-                target_file_size_base: ReadableSize::mb(16),
-                enable_compaction_guard: false,
-                ..Default::default()
-            };
-            let provider = Some(MockRegionInfoProvider::new(vec![]));
-            let cf_opts = build_cf_opt!(config, CF_DEFAULT, None /* cache */, provider);
-            assert_eq!(
-                config.target_file_size_base.0,
-                cf_opts.get_target_file_size_base()
-            );
-        }
-        // Test compaction guard enabled but region info provider is missing.
-        {
-            let config = DefaultCfConfig {
-                target_file_size_base: ReadableSize::mb(16),
-                enable_compaction_guard: true,
-                ..Default::default()
-            };
-            let provider: Option<MockRegionInfoProvider> = None;
-            let cf_opts = build_cf_opt!(config, CF_DEFAULT, None /* cache */, provider);
-            assert_eq!(
-                config.target_file_size_base.0,
-                cf_opts.get_target_file_size_base()
-            );
-        }
-        // Test compaction guard enabled.
-        {
-            let config = DefaultCfConfig {
-                target_file_size_base: ReadableSize::mb(16),
-                enable_compaction_guard: true,
-                compaction_guard_min_output_file_size: ReadableSize::mb(4),
-                compaction_guard_max_output_file_size: ReadableSize::mb(64),
-                ..Default::default()
-            };
-            let provider = Some(MockRegionInfoProvider::new(vec![]));
-            let cf_opts = build_cf_opt!(config, CF_DEFAULT, None /* cache */, provider);
-            assert_eq!(
-                config.compaction_guard_max_output_file_size.0,
-                cf_opts.get_target_file_size_base()
-            );
-        }
     }
 
     #[test]

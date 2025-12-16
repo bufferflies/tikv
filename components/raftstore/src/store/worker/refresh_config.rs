@@ -24,17 +24,6 @@ pub struct PoolController<N: Fsm, C: Fsm, H: HandlerBuilder<N, C>> {
 
 impl<N, C, H> PoolController<N, C, H>
 where
-    N: Fsm,
-    C: Fsm,
-    H: HandlerBuilder<N, C>,
-{
-    pub fn new(router: BatchRouter<N, C>, state: PoolState<N, C, H>) -> Self {
-        PoolController { router, state }
-    }
-}
-
-impl<N, C, H> PoolController<N, C, H>
-where
     N: Fsm + std::marker::Send + 'static,
     C: Fsm + std::marker::Send + 'static,
     H: HandlerBuilder<N, C>,
@@ -166,21 +155,6 @@ where
     AH: HandlerBuilder<ApplyFsm<EK>, ControlFsm>,
     RH: HandlerBuilder<PeerFsm<EK, ER>, StoreFsm<EK>>,
 {
-    pub fn new(
-        apply_router: BatchRouter<ApplyFsm<EK>, ControlFsm>,
-        raft_router: BatchRouter<PeerFsm<EK, ER>, StoreFsm<EK>>,
-        apply_pool_state: PoolState<ApplyFsm<EK>, ControlFsm, AH>,
-        raft_pool_state: PoolState<PeerFsm<EK, ER>, StoreFsm<EK>, RH>,
-    ) -> Self {
-        let apply_pool = PoolController::new(apply_router, apply_pool_state);
-        let raft_pool = PoolController::new(raft_router, raft_pool_state);
-
-        Runner {
-            apply_pool,
-            raft_pool,
-        }
-    }
-
     fn resize_raft_pool(&mut self, size: usize) {
         let current_pool_size = self.raft_pool.state.expected_pool_size;
         self.raft_pool.state.expected_pool_size = size;

@@ -32,9 +32,9 @@ use txn_types::{Key, Value};
 
 use super::{
     write_modifies, Callback, DummySnapshotExt, Engine, Error, ErrorInner,
-    Iterator as EngineIterator, Modify, Result, SnapContext, Snapshot, WriteData,
+    Iterator as EngineIterator, Modify, Result, SnapContext, Snapshot, WriteData, WriteEvent,
 };
-use crate::{FakeExtension, OnAppliedCb, RaftExtension, WriteEvent};
+use crate::{FakeExtension, OnAppliedCb, RaftExtension};
 
 // Duplicated in test_engine_builder
 const TEMP_DIR: &str = "";
