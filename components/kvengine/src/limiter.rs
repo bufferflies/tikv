@@ -161,7 +161,6 @@ impl<Ty: LimiterTypeTrait> WriteRateLimiter<Ty> {
     }
 
     fn update_speed_limit(&self, throttle: f64) {
-        self.limiter.speed_limit();
         self.limiter.set_speed_limit(throttle);
         self.update_statistics();
     }

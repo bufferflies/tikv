@@ -180,6 +180,7 @@ fn test_random_all_impl(use_builtin_dfs: bool) {
     };
     if !use_builtin_dfs {
         let object_cache = cluster.create_object_cache_randomly();
+        let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
         for _ in 0..RESTORE_CONCURRENCY {
             handles.push(spawn_restore_keyspace(
                 cluster.get_pd_client(),
@@ -189,6 +190,7 @@ fn test_random_all_impl(use_builtin_dfs: bool) {
                 &s3fs,
                 switches.enable_oss_chaos,
                 object_cache.clone(),
+                limiter.clone(),
                 TIMEOUT,
             ));
         }

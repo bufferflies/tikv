@@ -15,7 +15,7 @@ use std::{
 
 use api_version::{api_v2::TXN_KEY_PREFIX, ApiV2};
 use bytes::{Buf, BufMut, BytesMut};
-use collections::HashMap;
+use collections::{HashMap, HashMapExt, HashSet};
 use concurrency_manager::ConcurrencyManager;
 use flate2::{write::GzEncoder, Compression};
 use futures::{compat::Compat01As03, future::ok, prelude::*};
@@ -897,7 +897,11 @@ impl StatusServer {
             // get all active shard stats lite.
             let all_active_lite = engine.get_all_active_shard_stats_lite();
             res = serde_json::to_string(&all_active_lite);
+        } else if path.starts_with("/kvengine/files_with_type") {
+            let files_with_type = Self::dump_kvengine_files_with_type(req, engine);
+            res = serde_json::to_string(&files_with_type);
         } else if path.starts_with("/kvengine/files") {
+            // NOTE: Must be the last for /kvengine/files... paths.
             let mut all_shard_files: Vec<(u64, Vec<u64>)> = engine
                 .get_all_shard_id_vers()
                 .iter()
@@ -931,6 +935,36 @@ impl StatusServer {
                 .unwrap(),
             Err(_) => make_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
         })
+    }
+
+    /// Request: /kvengine/files_with_type?filter=sst,sst_ia,txn,col
+    /// Response: { "sst": [file_id1, file_id2], "blob": [file_id3], ... }
+    /// Note: currently support "sst" only.
+    fn dump_kvengine_files_with_type(
+        req: Request<Body>,
+        engine: &kvengine::Engine,
+    ) -> HashMap<String /* file_suffix */, HashSet<u64 /* file_id */>> {
+        let query = req.uri().query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        let Some(filter_str) = query_pairs.get("filter").map(|s| s.as_ref()) else {
+            return HashMap::default();
+        };
+        let filter_types: HashSet<&str> = filter_str.split(',').collect();
+        let mut files_with_type: HashMap<String, HashSet<u64>> =
+            HashMap::with_capacity(filter_types.len());
+        engine.get_all_shard_id_vers().iter().for_each(|id_ver| {
+            let Some(shard) = engine.get_shard(id_ver.id) else {
+                return;
+            };
+            if filter_types.contains("sst") {
+                let (local_files, _) = shard.get_local_sst_files();
+                files_with_type
+                    .entry("sst".to_string())
+                    .or_default()
+                    .extend(local_files);
+            }
+        });
+        files_with_type
     }
 
     async fn add_remote_compactor(

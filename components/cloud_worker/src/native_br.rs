@@ -701,6 +701,7 @@ impl RestoreProgressReporter {
             RestoreStep::SplitRegions => (55, "split regions"),
             RestoreStep::AlignRegions => (60, "align regions"),
             RestoreStep::RestoreSnapshotsToServers => (65, "restore snapshots to servers"),
+            RestoreStep::RestoreSnapshotsFinished => (85, "restore snapshots finished"),
             RestoreStep::RetainSstFiles => (85, "retain files"),
             RestoreStep::Finalize => (90, "finalize"), // Wait for ClusterCR become normal.
         }
@@ -740,6 +741,7 @@ pub(crate) struct BrContext {
     pub backup_worker: BackupWorker,
     restore_concurrency: usize,
     object_cache: Option<ObjectCache>,
+    limiter: Option<Arc<native_br::limiter::ThroughputLimiter>>,
 }
 
 impl BrContext {
@@ -891,6 +893,7 @@ impl BrContext {
             truncate_ts,
             progress_reporter,
             self.object_cache.clone(),
+            self.limiter.clone(),
         )?)
     }
 
@@ -1097,6 +1100,8 @@ pub struct NativeBrConfig {
 
     /// See `RestoreConfig::lower_memory`.
     pub lower_memory: bool,
+
+    pub restore_rate_limit: native_br::limiter::RateLimitConfig,
 }
 
 impl Default for NativeBrConfig {
@@ -1125,6 +1130,7 @@ impl Default for NativeBrConfig {
             restore_cache_for_decompressed_wal_chunks: false,
             wal_chunk_target_file_size: ReadableSize::mb(64),
             lower_memory: false,
+            restore_rate_limit: native_br::limiter::RateLimitConfig::default(),
         }
     }
 }
@@ -1178,6 +1184,18 @@ impl NativeBrManager {
                 config.native_br.object_cache_average_item_size(),
             )
         });
+        let limiter = if config.native_br.restore_rate_limit.enable {
+            Some(Arc::new(
+                native_br::limiter::ThroughputLimiter::new(
+                    &config.native_br.restore_rate_limit,
+                    pd_client.clone(),
+                    runtime.handle().clone(),
+                )
+                .expect("create restore rate limiter failed"),
+            ))
+        } else {
+            None
+        };
         let mut context = BrContext {
             pd_client,
             s3fs,
@@ -1188,6 +1206,7 @@ impl NativeBrManager {
             backup_worker,
             restore_concurrency,
             object_cache,
+            limiter,
         };
         if let Err(err) = context.init() {
             warn!("BR context init failed: {:?}", err);

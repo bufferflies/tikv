@@ -241,6 +241,7 @@ fn update_merged_engine_for_store(
     let store_progress = merged_engine.get_store_progress(store_id).unwrap();
     let mut epoch = store_progress.epoch;
     let mut start_off = store_progress.offset;
+    let http_client = security_mgr.http_client(hyper::Client::builder()).unwrap();
     loop {
         let uri = security_mgr
             .build_uri(format!(
@@ -255,7 +256,7 @@ fn update_merged_engine_for_store(
             .block_on(send_request_to_store(
                 req,
                 store,
-                security_mgr,
+                &http_client,
                 Duration::from_secs(10),
             ))
             .unwrap();

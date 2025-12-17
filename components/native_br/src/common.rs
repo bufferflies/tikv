@@ -1,5 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 use std::{
+    borrow::Cow,
     cell::Cell,
     fmt::{self, Formatter},
     fs,
@@ -35,7 +36,7 @@ use rfengine::{
 };
 use rfenginepb::{ClusterBackupMeta, StoreBackupMeta};
 use rfstore::store::state::RaftState;
-use security::{SecurityConfig, SecurityManager};
+use security::{HttpClient, SecurityConfig, SecurityManager};
 use slog_global::{error, warn};
 use tikv_util::{
     box_err, box_try, box_try_join, codec::bytes::decode_bytes, debug, http::HeaderExt, info,
@@ -70,11 +71,10 @@ pub fn create_pd_client(security_conf: &SecurityConfig, pd_conf: &pd_client::Con
 pub async fn send_request_to_store(
     req: Request<Body>,
     store: &Store,
-    security_mgr: &SecurityManager,
+    client: &HttpClient,
     timeout: Duration,
 ) -> Result<(StatusCode, Bytes)> {
     debug_assert!(!timeout.is_zero());
-    let client = security_mgr.http_client(hyper::Client::builder())?;
     let uri_str = format!("{}", req.uri());
     let resp = tokio::time::timeout(timeout, client.request(req))
         .await
@@ -129,12 +129,34 @@ pub async fn send_request_to_store_with_retry<F>(
 where
     F: Fn() -> Request<Body>,
 {
+    send_request_to_store_with_retry_opt(build_req, store, Either::Left(security_mgr), timeout)
+        .await
+}
+
+/// Send request with timeout of `timeout / 2` for each retry.
+///
+/// Perfer to `HttpClient`. Callers should reuse the client.
+pub async fn send_request_to_store_with_retry_opt<F>(
+    build_req: F,
+    store: &Store,
+    security_mgr_or_client: Either<&SecurityManager, &HttpClient>,
+    timeout: Duration,
+) -> Result<Bytes>
+where
+    F: Fn() -> Request<Body>,
+{
     let is_error_retryable = |err: &Error| matches!(err, Error::HttpRequestError(_));
+    let client = match security_mgr_or_client {
+        Either::Left(security_mgr) => {
+            Cow::Owned(security_mgr.http_client(hyper::Client::builder())?)
+        }
+        Either::Right(client) => Cow::Borrowed(client),
+    };
     let mut last_err: Option<Error> = None;
     let start_time = Instant::now_coarse();
     while start_time.saturating_elapsed() < timeout {
         let req = build_req();
-        match send_request_to_store(req, store, security_mgr, timeout / 2).await {
+        match send_request_to_store(req, store, client.as_ref(), timeout / 2).await {
             Ok((_, resp)) => return Ok(resp),
             Err(err) if is_error_retryable(&err) => {
                 last_err = Some(err);

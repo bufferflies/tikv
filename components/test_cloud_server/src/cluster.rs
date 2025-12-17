@@ -38,6 +38,7 @@ use kvproto::{
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, RaftRequestHeader},
 };
 use log_wrappers::Value;
+use native_br::limiter::{RateLimitConfig, ThroughputLimiter};
 use pd_client::{check_regions_boundary, pd_control, PdClient};
 use raftstore::RegionInfoAccessor;
 use rand::prelude::*;
@@ -1238,6 +1239,28 @@ impl ServerCluster {
                 compressed_wal_chunk_size * factor,
                 compressed_wal_chunk_size,
             )
+        })
+    }
+
+    pub fn create_restore_limiter_randomly(
+        &self,
+        runtime: tokio::runtime::Handle,
+    ) -> Option<Arc<ThroughputLimiter>> {
+        use rand::prelude::*;
+        let max_throughput_mb = *[0u64, 4, 32].choose(&mut thread_rng()).unwrap();
+        (max_throughput_mb > 0).then(|| {
+            let max_throughput = ReadableSize::mb(max_throughput_mb);
+            let config = RateLimitConfig {
+                enable: true,
+                max_throughput,
+                calibrate_restore_size_threshold: ReadableSize(max_throughput.0 / 16),
+                store_req_timeout: ReadableDuration::secs(3), /* Small timeout to cover error
+                                                               * tolerance. */
+                store_cache_ttl: ReadableDuration::secs(5),
+            };
+            let limiter = ThroughputLimiter::new(&config, self.get_pure_pd_client(), runtime)
+                .expect("create ThroughputLimiter failed");
+            Arc::new(limiter)
         })
     }
 }

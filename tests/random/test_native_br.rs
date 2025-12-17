@@ -12,6 +12,7 @@ use native_br::{
     backup::BackupConfig,
     backup_worker,
     error::Error,
+    limiter::ThroughputLimiter,
     restore::{get_cluster_backup_meta, get_cluster_backup_meta_async, RestoreConfig},
     restore_keyspace::{self, ReportRestoreStepTrait, RestoreStep},
 };
@@ -46,6 +47,7 @@ pub(crate) fn do_restore_keyspace(
     truncate_ts: Option<u64>,
     reporter: Arc<dyn ReportRestoreStepTrait>,
     object_cache: Option<ObjectCache>,
+    limiter: Option<Arc<ThroughputLimiter>>,
 ) -> native_br::Result<restore_keyspace::RestoredKeyspace> {
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(S3Fs::new_from_config(dfs_config));
@@ -61,6 +63,7 @@ pub(crate) fn do_restore_keyspace(
         truncate_ts,
         reporter,
         object_cache,
+        limiter,
     )
 }
 
@@ -182,6 +185,7 @@ pub(crate) fn spawn_restore_keyspace(
     s3fs: &S3Fs,
     _enable_oss_chaos: bool,
     object_cache: Option<ObjectCache>,
+    limiter: Option<Arc<ThroughputLimiter>>,
     timeout: Duration,
 ) -> JoinHandle<()> {
     let s3fs = s3fs.clone();
@@ -271,6 +275,7 @@ pub(crate) fn spawn_restore_keyspace(
                     Some(backup.backup_ts),
                     reporter.clone(),
                     object_cache.clone(),
+                    limiter.clone(),
                 ) {
                     Ok(res) => Some(res),
                     Err(Error::BackupEmptyForKeyspace(_)) => {

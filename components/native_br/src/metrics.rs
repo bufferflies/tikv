@@ -31,4 +31,13 @@ lazy_static! {
         exponential_buckets(1.0, 2.0, 16).unwrap()
     )
     .unwrap();
+    pub static ref NATIVE_BR_RESTORE_PENDING_DATA_SIZE: IntGauge = register_int_gauge!(
+        "native_br_restore_pending_data_size",
+        "Restore pending data size",
+    )
+    .unwrap();
+    pub static ref NATIVE_BR_RESTORED_DATA_SIZE: IntCounter =
+        register_int_counter!("native_br_restored_data_size", "Restored data size",).unwrap();
+    pub static ref NATIVE_BR_RESTORED_KV_SIZE: IntCounter =
+        register_int_counter!("native_br_restored_kv_size", "Restored kv size",).unwrap();
 }

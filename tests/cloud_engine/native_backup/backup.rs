@@ -255,6 +255,7 @@ fn test_periodic_backup() {
 
     let pd_client = cluster.get_pd_client();
     let object_cache = cluster.create_object_cache_randomly();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -267,6 +268,7 @@ fn test_periodic_backup() {
         None,
         reporter,
         object_cache,
+        limiter,
     )
     .unwrap();
 
@@ -359,6 +361,7 @@ fn test_batch_backup() {
 
     let pd_client = cluster.get_pd_client();
     let object_cache = cluster.create_object_cache_randomly();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -371,6 +374,7 @@ fn test_batch_backup() {
         None,
         reporter,
         object_cache,
+        limiter,
     )
     .unwrap();
 

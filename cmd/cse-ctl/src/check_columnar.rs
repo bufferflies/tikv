@@ -383,8 +383,11 @@ async fn request_snapshot_from_shard(
         ))
         .unwrap();
     let req = Request::get(uri.clone()).body(Body::empty()).unwrap();
+    let client = security_mgr
+        .http_client(hyper::Client::builder())
+        .map_err(|e| format!("create http client failed: {:?}", e))?;
     let Ok((resp_code, resp)) =
-        send_request_to_store(req, store, security_mgr.as_ref(), Duration::from_secs(10)).await
+        send_request_to_store(req, store, &client, Duration::from_secs(10)).await
     else {
         return Err(format!(
             "get snapshot failed for shard {}:{}",

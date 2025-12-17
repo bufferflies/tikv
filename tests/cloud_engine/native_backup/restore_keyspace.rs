@@ -382,6 +382,7 @@ fn test_restore_keyspace_impl(
     };
 
     let object_cache = cluster.create_object_cache_randomly();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     // Restore keyspace.
     restore_keyspace::restore_keyspace(
         keyspace_id,
@@ -395,6 +396,7 @@ fn test_restore_keyspace_impl(
         truncate_ts,
         reporter.clone(),
         object_cache.clone(),
+        limiter.clone(),
     )
     .unwrap();
     step!("restore done");
@@ -438,6 +440,7 @@ fn test_restore_keyspace_impl(
             Some(truncate_ts_pitr),
             reporter,
             object_cache,
+            limiter,
         )
         .unwrap();
         step!("restore (pitr on restored data) done");
@@ -792,6 +795,7 @@ fn test_restore_archived_keyspace_impl(
     }
 
     let object_cache = cluster.create_object_cache_randomly();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     for idx in 0..BACKUP_DAYS - 1 {
         // Restore keyspace.
         {
@@ -814,6 +818,7 @@ fn test_restore_archived_keyspace_impl(
                 None,
                 reporter.clone(),
                 object_cache.clone(),
+                limiter.clone(),
             )
             .unwrap();
             step!("restore done. case: {}:{}:{}", case_idx, loop_idx, idx);
@@ -1004,6 +1009,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
 
     let restore_config = RestoreConfig::default_for_test();
     let object_cache = cluster.create_object_cache_randomly();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     // Restore keyspace.
     {
         restore_keyspace::restore_keyspace(
@@ -1018,6 +1024,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
             None,
             reporter.clone(),
             object_cache.clone(),
+            limiter.clone(),
         )
         .unwrap();
 
@@ -1062,6 +1069,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
             Some(truncate_ts_a),
             reporter,
             object_cache,
+            limiter,
         )
         .unwrap();
         // Verify restored data.
@@ -1131,6 +1139,7 @@ fn test_restore_keyspace_with_no_chunk() {
     // Restore keyspace.
     let restore_config = RestoreConfig::default_for_test();
     let object_cache = cluster.create_object_cache_randomly();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -1143,6 +1152,7 @@ fn test_restore_keyspace_with_no_chunk() {
         None,
         reporter,
         object_cache,
+        limiter,
     )
     .unwrap();
 
@@ -1230,6 +1240,7 @@ fn test_restore_keyspace_with_slow_dfs() {
 
     let restore_config = RestoreConfig::default_for_test();
     let object_cache = cluster.create_object_cache_randomly();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR.reset();
     let mut ok = false;
     for _ in 0..30 {
@@ -1246,6 +1257,7 @@ fn test_restore_keyspace_with_slow_dfs() {
             None,
             reporter.clone(),
             object_cache.clone(),
+            limiter.clone(),
         )
         .unwrap();
 
@@ -1375,6 +1387,7 @@ fn test_restore_keyspace_with_schema() {
     // Restore keyspace.
     let restore_config = RestoreConfig::default_for_test();
     let object_cache = cluster.create_object_cache_randomly();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -1387,6 +1400,7 @@ fn test_restore_keyspace_with_schema() {
         None,
         reporter,
         object_cache,
+        limiter,
     )
     .unwrap();
 
@@ -1559,6 +1573,7 @@ fn test_restore_keyspace_with_failed_store(
         ..Default::default()
     };
     let object_cache = cluster.create_object_cache_randomly();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
 
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
@@ -1572,6 +1587,7 @@ fn test_restore_keyspace_with_failed_store(
         None,
         reporter.clone(),
         object_cache.clone(),
+        limiter.clone(),
     );
     assert_eq!(
         res.is_ok(),
@@ -1597,6 +1613,7 @@ fn test_restore_keyspace_with_failed_store(
         None,
         reporter,
         object_cache,
+        limiter,
     );
     assert_eq!(
         res_tolerated.is_err(),

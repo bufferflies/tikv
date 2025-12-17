@@ -4,6 +4,7 @@ use native_br::restore_keyspace::{ReportRestoreStepTrait, RestoreStep};
 use rand::Rng;
 
 mod backup;
+mod limiter;
 mod restore_keyspace;
 
 fn random_value<const N: usize>(_: usize) -> Vec<u8>
