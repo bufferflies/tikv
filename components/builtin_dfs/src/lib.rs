@@ -340,17 +340,15 @@ impl BuiltinDfs {
             });
         }
         let mut errors = vec![];
-        let mut success_cnt = 0;
+        let mut remaining_success_cnt = stores.len() / 2 + 1;
         for _ in 0..stores.len() {
-            let res = rx.recv().await.unwrap();
-            if res.is_err() {
-                errors.push(dfs::Error::Other(format!(
-                    "create file failed: {}",
-                    res.err().unwrap()
-                )));
-                continue;
-            }
-            let resp = res.unwrap();
+            let resp = match rx.recv().await.unwrap() {
+                Ok(resp) => resp,
+                Err(err) => {
+                    errors.push(dfs::Error::Other(format!("create file failed: {}", err)));
+                    continue;
+                }
+            };
             let status = resp.status();
             if !status.is_success() {
                 let err_msg = hyper::body::to_bytes(resp.into_body())
@@ -361,13 +359,14 @@ impl BuiltinDfs {
                     status, err_msg,
                 )));
             } else {
-                success_cnt += 1;
-                if success_cnt == 2 {
+                remaining_success_cnt -= 1;
+                if remaining_success_cnt == 0 {
                     break;
                 }
             }
         }
-        if errors.len() >= 2 {
+        // No need for errors when there is only 1 replica
+        if remaining_success_cnt > 0 && stores.len() > 1 {
             return Err(errors.pop().unwrap());
         }
         Ok(())
@@ -375,7 +374,7 @@ impl BuiltinDfs {
 }
 
 #[async_trait]
-impl dfs::Dfs for BuiltinDfs {
+impl Dfs for BuiltinDfs {
     async fn read_file(&self, file_id: u64, opts: Options) -> dfs::Result<Bytes> {
         self.read_file_inner(file_id, opts).await
     }
