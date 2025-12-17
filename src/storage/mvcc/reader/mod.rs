@@ -1,7 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod cloud_reader;
-mod point_getter;
 mod reader;
 mod scanner;
 
@@ -11,12 +10,8 @@ use txn_types::{TimeStamp, Write, WriteType};
 pub use self::reader::tests as reader_tests;
 pub use self::{
     cloud_reader::{parse_write, CloudReader},
-    point_getter::{PointGetter, PointGetterBuilder},
     reader::{MvccReader, SnapshotReader},
-    scanner::{
-        has_data_in_range, has_data_in_range_async, near_load_data_by_write, seek_for_valid_write,
-        test_util, DeltaScanner, EntryScanner, Scanner, ScannerBuilder,
-    },
+    scanner::{has_data_in_range, has_data_in_range_async},
 };
 
 #[derive(Debug, PartialEq, Clone, Copy)]

@@ -12,7 +12,6 @@ use std::{
 use engine_traits::{CfName, SstMetaInfo};
 use kvproto::{
     metapb::Region,
-    pdpb::CheckPolicy,
     raft_cmdpb::{AdminRequest, AdminResponse, RaftCmdRequest, RaftCmdResponse, Request},
     raft_serverpb::RaftApplyState,
 };
@@ -20,34 +19,25 @@ use pd_client::BucketMeta;
 use raft::{eraftpb, StateRole};
 
 pub mod config;
-mod consistency_check;
 pub mod dispatcher;
 mod error;
 pub mod metrics;
 pub mod region_info_accessor;
-mod split_check;
 pub mod split_observer;
 
 pub use self::{
     config::{Config, ConsistencyCheckMethod},
-    consistency_check::{ConsistencyCheckObserver, Raw as RawConsistencyCheckObserver},
     dispatcher::{
-        BoxAdminObserver, BoxApplySnapshotObserver, BoxCmdObserver, BoxConsistencyCheckObserver,
-        BoxPdTaskObserver, BoxQueryObserver, BoxRegionChangeObserver, BoxRoleObserver,
-        BoxSplitCheckObserver, BoxUpdateSafeTsObserver, CoprocessorHost, Registry,
+        BoxAdminObserver, BoxApplySnapshotObserver, BoxCmdObserver, BoxPdTaskObserver,
+        BoxQueryObserver, BoxRegionChangeObserver, BoxRoleObserver, BoxUpdateSafeTsObserver,
+        CoprocessorHost, Registry,
     },
     error::{Error, Result},
     region_info_accessor::{
         Callback as RegionInfoCallback, RangeKey, RegionCollector, RegionInfo, RegionInfoAccessor,
         RegionInfoProvider, SeekRegionCallback,
     },
-    split_check::{
-        get_region_approximate_keys, get_region_approximate_middle, get_region_approximate_size,
-        HalfCheckObserver, Host as SplitCheckerHost, KeysCheckObserver, SizeCheckObserver,
-        TableCheckObserver,
-    },
 };
-pub use crate::store::{Bucket, KeyEntry};
 
 /// Coprocessor is used to provide a convenient way to inject code to
 /// KV processing.
@@ -209,39 +199,6 @@ pub trait ApplySnapshotObserver: Coprocessor {
     fn should_pre_apply_snapshot(&self) -> bool {
         false
     }
-}
-
-/// SplitChecker is invoked during a split check scan, and decides to use
-/// which keys to split a region.
-pub trait SplitChecker<E> {
-    /// Hook to call for every kv scanned during split.
-    ///
-    /// Return true to abort scan early.
-    fn on_kv(&mut self, _: &mut ObserverContext<'_>, _: &KeyEntry) -> bool {
-        false
-    }
-
-    /// Get the desired split keys.
-    fn split_keys(&mut self) -> Vec<Vec<u8>>;
-
-    /// Get approximate split keys without scan.
-    fn approximate_split_keys(&mut self, _: &Region, _: &E) -> Result<Vec<Vec<u8>>> {
-        Ok(vec![])
-    }
-
-    /// Get split policy.
-    fn policy(&self) -> CheckPolicy;
-}
-
-pub trait SplitCheckObserver<E>: Coprocessor {
-    /// Add a checker for a split scan.
-    fn add_checker(
-        &self,
-        _: &mut ObserverContext<'_>,
-        _: &mut SplitCheckerHost<'_, E>,
-        _: &E,
-        policy: CheckPolicy,
-    );
 }
 
 /// Describes size information about all stores.

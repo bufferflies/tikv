@@ -9,14 +9,12 @@ use causal_ts::CausalTsProviderImpl;
 use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::{RocksEngine, RocksSnapshot};
-use engine_test::raft::RaftTestEngine;
 use grpcio::Service;
 use grpcio_health::HealthService;
-use kvproto::{kvrpcpb::ApiVersion, raft_cmdpb::*, raft_serverpb};
+use kvproto::raft_cmdpb::*;
 use raftstore::{
     coprocessor::{CoprocessorHost, RegionInfoAccessor},
-    router::ServerRaftStoreRouter,
-    store::{fsm::RaftRouter, msg::RaftCmdExtraOpts, Callback, RegionSnapshot, SnapManager},
+    store::{msg::RaftCmdExtraOpts, Callback},
     Result,
 };
 use security::SecurityManager;
@@ -29,9 +27,7 @@ use txn_types::TxnExtraScheduler;
 
 use super::*;
 
-type SimulateStoreTransport = SimulateTransport<ServerRaftStoreRouter<RocksEngine, RaftTestEngine>>;
-
-pub type SimulateEngine = RaftKv<RocksEngine, SimulateStoreTransport>;
+pub type SimulateEngine = RaftKv<RocksEngine, MockRaftStoreRouter>;
 
 #[derive(Default, Clone)]
 pub struct AddressMap {
@@ -87,7 +83,7 @@ impl ServerCluster {
         unimplemented!()
     }
 
-    pub fn get_server_router(&self, _node_id: u64) -> SimulateStoreTransport {
+    pub fn get_server_router(&self, _node_id: u64) -> MockRaftStoreRouter {
         unimplemented!()
     }
 
@@ -101,14 +97,6 @@ impl ServerCluster {
 }
 
 impl Simulator for ServerCluster {
-    fn get_snap_dir(&self, _node_id: u64) -> String {
-        unimplemented!()
-    }
-
-    fn get_snap_mgr(&self, _node_id: u64) -> &SnapManager {
-        unimplemented!()
-    }
-
     fn stop_node(&mut self, _node_id: u64) {
         unimplemented!()
     }
@@ -136,52 +124,8 @@ impl Simulator for ServerCluster {
     ) {
         unimplemented!()
     }
-
-    fn send_raft_msg(&mut self, _raft_msg: raft_serverpb::RaftMessage) -> Result<()> {
-        unimplemented!()
-    }
-
-    fn add_send_filter(&mut self, _node_id: u64, _filter: Box<dyn Filter>) {
-        unimplemented!()
-    }
-
-    fn clear_send_filters(&mut self, _node_id: u64) {
-        unimplemented!()
-    }
-
-    fn add_recv_filter(&mut self, _node_id: u64, _filter: Box<dyn Filter>) {
-        unimplemented!()
-    }
-
-    fn clear_recv_filters(&mut self, _node_id: u64) {
-        unimplemented!()
-    }
-
-    fn get_router(&self, _node_id: u64) -> Option<RaftRouter<RocksEngine, RaftTestEngine>> {
-        unimplemented!()
-    }
-}
-
-impl Cluster<ServerCluster> {
-    pub fn must_get_snapshot_of_region(
-        &mut self,
-        _region_id: u64,
-    ) -> RegionSnapshot<RocksSnapshot> {
-        unimplemented!()
-    }
-    pub fn must_get_raft_engine(&self, _store_id: u64) -> SimulateEngine {
-        unimplemented!()
-    }
 }
 
 pub fn new_server_cluster(_id: u64, _count: usize) -> Cluster<ServerCluster> {
-    unimplemented!()
-}
-
-pub fn new_server_cluster_with_api_ver(
-    _id: u64,
-    _count: usize,
-    _api_ver: ApiVersion,
-) -> Cluster<ServerCluster> {
     unimplemented!()
 }

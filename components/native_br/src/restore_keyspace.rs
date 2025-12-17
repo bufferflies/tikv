@@ -1147,7 +1147,6 @@ impl BackupCluster {
         config.rocksdb.max_sub_compactions = 1;
         config.security = self.security_conf.clone();
 
-        config.raft_engine.enable = false;
         config.rfengine.lightweight_backup = false;
         config.kvengine.ia = IaConfig::disabled(); // TODO: Use IA ?
 

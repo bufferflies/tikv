@@ -3,15 +3,14 @@
 use std::sync::{Arc, Mutex};
 
 use collections::HashMap;
-use crossbeam::channel::TrySendError;
 use engine_rocks::{RocksEngine, RocksSnapshot};
 use kvproto::raft_serverpb::RaftMessage;
 use raftstore::{
     errors::{Error as RaftStoreError, Result as RaftStoreResult},
-    router::{handle_send_error, RaftStoreRouter},
+    router::RaftStoreRouter,
     store::{
-        msg::{CasualMessage, PeerMsg, SignificantMsg},
-        CasualRouter, ProposalRouter, RaftCommand, SignificantRouter, StoreMsg, StoreRouter,
+        msg::{PeerMsg, SignificantMsg},
+        SignificantRouter,
     },
 };
 use tikv_util::mpsc::{loose_bounded, LooseBoundedSender, Receiver};
@@ -38,33 +37,6 @@ impl MockRaftStoreRouter {
 impl Default for MockRaftStoreRouter {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl StoreRouter<RocksEngine> for MockRaftStoreRouter {
-    fn send(&self, _: StoreMsg<RocksEngine>) -> RaftStoreResult<()> {
-        unimplemented!();
-    }
-}
-
-impl ProposalRouter<RocksSnapshot> for MockRaftStoreRouter {
-    fn send(
-        &self,
-        _: RaftCommand<RocksSnapshot>,
-    ) -> std::result::Result<(), TrySendError<RaftCommand<RocksSnapshot>>> {
-        unimplemented!();
-    }
-}
-
-impl CasualRouter<RocksEngine> for MockRaftStoreRouter {
-    fn send(&self, region_id: u64, msg: CasualMessage<RocksEngine>) -> RaftStoreResult<()> {
-        let mut senders = self.senders.lock().unwrap();
-        if let Some(tx) = senders.get_mut(&region_id) {
-            tx.try_send(PeerMsg::CasualMessage(msg))
-                .map_err(|e| handle_send_error(region_id, e))
-        } else {
-            Err(RaftStoreError::RegionNotFound(region_id))
-        }
     }
 }
 

@@ -71,18 +71,7 @@ engine_traits = { workspace = true }
 raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
 tempfile = "3.0"
 test_pd_client = { workspace = true }
-test_raftstore = { workspace = true }
 test_util = { workspace = true }
-
-[[test]]
-name = "integrations"
-path = "tests/integrations/mod.rs"
-
-# To avoid failpoints interfere with normal tests, we separate them.
-[[test]]
-name = "failpoints"
-path = "tests/failpoints/mod.rs"
-required-features = ["failpoints"]
 
 [[bench]]
 name = "cdc_event"

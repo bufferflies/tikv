@@ -1,11 +1,7 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
-// #[PerformanceCriticalPath]
-#[cfg(any(test, feature = "testexport"))]
-use std::sync::Arc;
 use std::{borrow::Cow, fmt};
 
-use collections::HashSet;
 use engine_traits::{CompactedEvent, KvEngine, Snapshot};
 use futures::channel::mpsc::UnboundedSender;
 use kvproto::{
@@ -19,24 +15,16 @@ use kvproto::{
     raft_serverpb::RaftMessage,
     replication_modepb::ReplicationStatus,
 };
-#[cfg(any(test, feature = "testexport"))]
-use pd_client::BucketMeta;
 use raft::SnapshotStatus;
 use smallvec::{smallvec, SmallVec};
 use tikv_util::{deadline::Deadline, escape, memory::HeapSize, time::Instant};
 use tracker::{get_tls_tracker_token, TrackerToken, GLOBAL_TRACKERS, INVALID_TRACKER_TOKEN};
 
-use super::{local_metrics::TimeTracker, region_meta::RegionMeta, FetchedLogs, RegionSnapshot};
+use super::{local_metrics::TimeTracker, RegionSnapshot};
 use crate::store::{
-    fsm::apply::{CatchUpLogs, ChangeObserver, TaskRes as ApplyTaskRes},
+    fsm::apply::ChangeObserver,
     metrics::RaftEventDurationType,
-    peer::{
-        SnapshotRecoveryWaitApplySyncer, UnsafeRecoveryExecutePlanSyncer,
-        UnsafeRecoveryFillOutReportSyncer, UnsafeRecoveryForceLeaderSyncer,
-        UnsafeRecoveryWaitApplySyncer,
-    },
     util::{KeysInfoFormatter, LatencyInspector},
-    worker::{Bucket, BucketRange},
     SnapKey,
 };
 
@@ -50,14 +38,6 @@ pub struct ReadResponse<S: Snapshot> {
 #[derive(Debug)]
 pub struct WriteResponse {
     pub response: RaftCmdResponse,
-}
-
-// Peer's internal stat, for test purpose only
-#[cfg(any(test, feature = "testexport"))]
-#[derive(Debug)]
-pub struct PeerInternalStat {
-    pub buckets: Arc<BucketMeta>,
-    pub bucket_ranges: Option<Vec<BucketRange>>,
 }
 
 // This is only necessary because of seeming limitations in derive(Clone) w/r/t
@@ -79,9 +59,6 @@ where
 pub type BoxReadCallback<S> = Box<dyn FnOnce(ReadResponse<S>) + Send>;
 pub type BoxWriteCallback = Box<dyn FnOnce(WriteResponse) + Send>;
 pub type ExtCallback = Box<dyn FnOnce() + Send>;
-
-#[cfg(any(test, feature = "testexport"))]
-pub type TestCallback = Box<dyn FnOnce(PeerInternalStat) + Send>;
 
 /// Variants of callbacks for `Msg`.
 ///  - `Read`: a callback for read only requests including `StatusRequest`,
@@ -112,9 +89,6 @@ pub enum Callback<S: Snapshot> {
 
         trackers: SmallVec<[TimeTracker; 4]>,
     },
-    #[cfg(any(test, feature = "testexport"))]
-    /// Test purpose callback
-    Test { cb: TestCallback },
 }
 
 impl<S: Snapshot> HeapSize for Callback<S> {}
@@ -171,8 +145,6 @@ where
                 let resp = WriteResponse { response: resp };
                 cb(resp);
             }
-            #[cfg(any(test, feature = "testexport"))]
-            Callback::Test { .. } => (),
         }
     }
 
@@ -370,8 +342,6 @@ where
             Callback::None => write!(fmt, "Callback::None"),
             Callback::Read { .. } => write!(fmt, "Callback::Read(..)"),
             Callback::Write { .. } => write!(fmt, "Callback::Write(..)"),
-            #[cfg(any(test, feature = "testexport"))]
-            Callback::Test { .. } => write!(fmt, "Callback::Test(..)"),
         }
     }
 }
@@ -495,8 +465,6 @@ where
         region_id: u64,
         to_peer_id: u64,
     },
-    /// Source region catch up logs for merging
-    CatchUpLogs(CatchUpLogs),
     /// Result of the fact that the region is merged.
     MergeResult {
         target_region_id: u64,
@@ -515,21 +483,7 @@ where
     },
     LeaderCallback(Callback<SK>),
     RaftLogGcFlushed,
-    // Reports the result of asynchronous Raft logs fetching.
-    RaftlogFetched(FetchedLogs),
-    EnterForceLeaderState {
-        syncer: UnsafeRecoveryForceLeaderSyncer,
-        failed_stores: HashSet<u64>,
-    },
     ExitForceLeaderState,
-    UnsafeRecoveryDemoteFailedVoters {
-        syncer: UnsafeRecoveryExecutePlanSyncer,
-        failed_voters: Vec<metapb::Peer>,
-    },
-    UnsafeRecoveryDestroy(UnsafeRecoveryExecutePlanSyncer),
-    UnsafeRecoveryWaitApply(UnsafeRecoveryWaitApplySyncer),
-    UnsafeRecoveryFillOutReport(UnsafeRecoveryFillOutReportSyncer),
-    SnapshotRecoveryWaitApply(SnapshotRecoveryWaitApplySyncer),
     CheckPendingAdmin(UnboundedSender<CheckAdminResponse>),
 }
 
@@ -593,9 +547,6 @@ pub enum CasualMessage<EK: KvEngine> {
     /// however `ForceCompactRaftLogs` only cares the leader itself.
     ForceCompactRaftLogs,
 
-    /// A message to access peer's internal state.
-    AccessPeer(Box<dyn FnOnce(RegionMeta) + Send + 'static>),
-
     /// Region info from PD
     QueryRegionLeaderResp {
         region: metapb::Region,
@@ -605,12 +556,6 @@ pub enum CasualMessage<EK: KvEngine> {
     /// For drop raft messages at an upper layer.
     RejectRaftAppend {
         peer_id: u64,
-    },
-    RefreshRegionBuckets {
-        region_epoch: RegionEpoch,
-        buckets: Vec<Bucket>,
-        bucket_ranges: Option<Vec<BucketRange>>,
-        cb: Callback<EK::Snapshot>,
     },
 
     // Try renew leader lease
@@ -671,12 +616,10 @@ impl<EK: KvEngine> fmt::Debug for CasualMessage<EK> {
             CasualMessage::RegionOverlapped => write!(fmt, "RegionOverlapped"),
             CasualMessage::SnapshotGenerated => write!(fmt, "SnapshotGenerated"),
             CasualMessage::ForceCompactRaftLogs => write!(fmt, "ForceCompactRaftLogs"),
-            CasualMessage::AccessPeer(_) => write!(fmt, "AccessPeer"),
             CasualMessage::QueryRegionLeaderResp { .. } => write!(fmt, "QueryRegionLeaderResp"),
             CasualMessage::RejectRaftAppend { peer_id } => {
                 write!(fmt, "RejectRaftAppend(peer_id={})", peer_id)
             }
-            CasualMessage::RefreshRegionBuckets { .. } => write!(fmt, "RefreshRegionBuckets"),
             CasualMessage::RenewLease => write!(fmt, "RenewLease"),
             CasualMessage::SnapshotApplied => write!(fmt, "SnapshotApplied"),
             CasualMessage::Campaign => write!(fmt, "Campaign"),
@@ -748,10 +691,6 @@ pub enum PeerMsg<EK: KvEngine> {
     /// Tick is periodical task. If target peer doesn't exist there is a
     /// potential that the raft node will not work anymore.
     Tick(PeerTick),
-    /// Result of applying committed entries. The message can't be lost.
-    ApplyRes {
-        res: ApplyTaskRes<EK::Snapshot>,
-    },
     /// Message that can't be lost but rarely created. If they are lost, real
     /// bad things happen like some peers will be considered dead in the
     /// group.
@@ -784,7 +723,6 @@ impl<EK: KvEngine> fmt::Debug for PeerMsg<EK> {
                 tick
             },
             PeerMsg::SignificantMsg(msg) => write!(fmt, "{:?}", msg),
-            PeerMsg::ApplyRes { res } => write!(fmt, "ApplyRes {:?}", res),
             PeerMsg::Start => write!(fmt, "Startup"),
             PeerMsg::Noop => write!(fmt, "Noop"),
             PeerMsg::Persisted {
@@ -856,10 +794,6 @@ where
     Validate(Box<dyn FnOnce(&crate::store::Config) + Send>),
 
     UnsafeRecoveryReport(pdpb::StoreReport),
-    UnsafeRecoveryCreatePeer {
-        syncer: UnsafeRecoveryExecutePlanSyncer,
-        create: metapb::Region,
-    },
 
     GcSnapshotFinish,
 
@@ -895,9 +829,6 @@ where
             StoreMsg::UpdateReplicationMode(_) => write!(fmt, "UpdateReplicationMode"),
             StoreMsg::LatencyInspect { .. } => write!(fmt, "LatencyInspect"),
             StoreMsg::UnsafeRecoveryReport(..) => write!(fmt, "UnsafeRecoveryReport"),
-            StoreMsg::UnsafeRecoveryCreatePeer { .. } => {
-                write!(fmt, "UnsafeRecoveryCreatePeer")
-            }
             StoreMsg::GcSnapshotFinish => write!(fmt, "GcSnapshotFinish"),
             StoreMsg::AwakenRegions { .. } => write!(fmt, "AwakenRegions"),
         }

@@ -9,7 +9,7 @@ use protobuf::ProtobufError;
 use thiserror::Error;
 use tikv_util::{codec, deadline::DeadlineError};
 
-use super::{coprocessor::Error as CopError, store::SnapError};
+use super::coprocessor::Error as CopError;
 
 pub const RAFTSTORE_IS_BUSY: &str = "raftstore is busy";
 
@@ -119,9 +119,6 @@ pub enum Error {
 
     #[error("Discard due to {0:?}")]
     Transport(DiscardReason),
-
-    #[error("Snapshot {0}")]
-    Snapshot(#[from] SnapError),
 
     #[error("SstImporter {0}")]
     SstImporter(#[from] sst_importer::Error),
@@ -313,7 +310,6 @@ impl ErrorCodeExt for Error {
             Error::EpochNotMatch(..) => error_code::raftstore::EPOCH_NOT_MATCH,
             Error::Coprocessor(e) => e.error_code(),
             Error::Transport(_) => error_code::raftstore::TRANSPORT,
-            Error::Snapshot(e) => e.error_code(),
             Error::SstImporter(e) => e.error_code(),
             Error::Encryption(e) => e.error_code(),
             Error::DataIsNotReady { .. } => error_code::raftstore::DATA_IS_NOT_READY,

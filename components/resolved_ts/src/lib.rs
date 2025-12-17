@@ -21,17 +21,7 @@ extern crate tikv_util;
 mod resolver;
 pub use resolver::*;
 
-mod cmd;
-pub use cmd::*;
-mod observer;
-pub use observer::*;
-mod advance;
-pub use advance::*;
-mod endpoint;
-pub use endpoint::*;
 mod errors;
 pub use errors::*;
-mod scanner;
-pub use scanner::*;
 mod metrics;
 pub use metrics::*;

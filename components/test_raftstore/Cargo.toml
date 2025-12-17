@@ -31,7 +31,6 @@ concurrency_manager = { workspace = true }
 crossbeam = "0.8"
 encryption_export = { workspace = true }
 engine_rocks = { workspace = true }
-engine_rocks_helper = { workspace = true }
 engine_test = { workspace = true }
 engine_traits = { workspace = true }
 fail = "0.5"

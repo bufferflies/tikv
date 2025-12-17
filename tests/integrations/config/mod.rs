@@ -2,7 +2,6 @@
 
 use std::{fs::File, io::Read, iter::FromIterator, path::PathBuf};
 
-use batch_system::Config as BatchSystemConfig;
 use causal_ts::Config as CausalTsConfig;
 use collections::{HashMap, HashSet};
 use encryption::{EncryptionConfig, FileConfig, MasterKeyConfig};
@@ -17,7 +16,6 @@ use engine_traits::PerfLevel;
 use file_system::{IoPriority, IoRateLimitMode};
 use kvproto::encryptionpb::EncryptionMethod;
 use pd_client::Config as PdConfig;
-use raft_log_engine::{ReadableSize as RaftEngineReadableSize, RecoveryMode};
 use raftstore::{
     coprocessor::{Config as CopConfig, ConsistencyCheckMethod},
     store::Config as RaftstoreConfig,
@@ -165,14 +163,6 @@ fn test_serde_custom_tikv_config() {
         address: "".to_string(),
         job: "tikv_1".to_owned(),
     };
-    let mut apply_batch_system = BatchSystemConfig::default();
-    apply_batch_system.max_batch_size = Some(22);
-    apply_batch_system.pool_size = 4;
-    apply_batch_system.reschedule_duration = ReadableDuration::secs(3);
-    let mut store_batch_system = BatchSystemConfig::default();
-    store_batch_system.max_batch_size = Some(21);
-    store_batch_system.pool_size = 3;
-    store_batch_system.reschedule_duration = ReadableDuration::secs(2);
     value.raft_store = RaftstoreConfig {
         prevote: false,
         raftdb_path: "/var".to_owned(),
@@ -233,8 +223,6 @@ fn test_serde_custom_tikv_config() {
         region_max_size: ReadableSize(0),
         region_split_size: ReadableSize(0),
         local_read_batch_size: 33,
-        apply_batch_system,
-        store_batch_system,
         store_io_pool_size: 5,
         store_io_notify_capacity: 123456,
         future_poll_size: 2,
@@ -672,16 +660,6 @@ fn test_serde_custom_tikv_config() {
         },
         titan: titan_db_config,
     };
-    value.raft_engine.enable = false;
-    let raft_engine_config = value.raft_engine.mut_config();
-    raft_engine_config.dir = "test-dir".to_owned();
-    raft_engine_config.batch_compression_threshold.0 = ReadableSize::kb(1).0;
-    raft_engine_config.target_file_size.0 = ReadableSize::mb(1).0;
-    raft_engine_config.purge_threshold.0 = ReadableSize::gb(1).0;
-    raft_engine_config.recovery_mode = RecoveryMode::TolerateTailCorruption;
-    raft_engine_config.recovery_read_block_size.0 = ReadableSize::kb(1).0;
-    raft_engine_config.recovery_threads = 2;
-    raft_engine_config.memory_limit = Some(RaftEngineReadableSize::gb(1));
     value.storage = StorageConfig {
         data_dir: "/var".to_owned(),
         gc_ratio_threshold: 1.2,

@@ -40,8 +40,8 @@ pub use self::{
     region_latch::GlobalLatches,
     scheduler::Scheduler,
     store::{
-        EntryBatch, FixtureStore, FixtureStoreScanner, Scanner, SnapshotStore, Store, TxnEntry,
-        TxnEntryScanner, TxnEntryStore,
+        EntryBatch, FixtureStore, FixtureStoreScanner, Scanner, Store, TxnEntry, TxnEntryScanner,
+        TxnEntryStore,
     },
 };
 use crate::storage::{

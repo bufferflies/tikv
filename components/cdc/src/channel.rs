@@ -24,9 +24,6 @@ use tikv_util::{impl_display_as_debug, time::Instant, warn};
 
 use crate::metrics::*;
 
-/// The maximum bytes of events can be batched into one `CdcEvent::Event`, 32KB.
-pub const CDC_EVENT_MAX_BYTES: usize = 32 * 1024;
-
 /// The maximum count of `CdcEvent::Event`s can be batched into
 /// one ChangeDataEvent, 64.
 const CDC_EVENT_MAX_COUNT: usize = 64;
@@ -37,6 +34,7 @@ const CDC_EVENT_MAX_COUNT: usize = 64;
 /// per-connection (EventFeed RPC).
 ///
 /// 6MB = (CDC_CHANNLE_CAPACITY + CDC_EVENT_MAX_COUNT) * CDC_EVENT_MAX_BYTES.
+#[allow(unused)]
 pub const CDC_CHANNLE_CAPACITY: usize = 128;
 
 /// The maximum bytes of ChangeDataEvent, 6MB.
@@ -203,10 +201,12 @@ impl MemoryQuota {
         self.in_use.load(Ordering::Relaxed)
     }
 
+    #[allow(unused)]
     pub(crate) fn capacity(&self) -> usize {
         self.capacity.load(Ordering::Acquire)
     }
 
+    #[allow(unused)]
     pub(crate) fn set_capacity(&self, capacity: usize) {
         self.capacity.store(capacity, Ordering::Release)
     }

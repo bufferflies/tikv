@@ -1,24 +1,13 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 pub mod bencher;
-pub mod executor_descriptor;
 pub mod fixture;
 pub mod scan_bencher;
 pub mod store;
 
-use std::{marker::PhantomData, sync::Arc};
+use std::marker::PhantomData;
 
-use api_version::ApiV1;
-use criterion::{black_box, measurement::Measurement};
-use kvproto::coprocessor::KeyRange;
-use test_coprocessor::*;
-use tidb_query_common::storage::StubAccessor;
-use tikv::{
-    coprocessor::RequestHandler,
-    storage::{RocksEngine, Store as TxnStore},
-};
-use tikv_util::quota_limiter::QuotaLimiter;
-use tipb::Executor as PbExecutor;
+use criterion::measurement::Measurement;
 
 pub use self::fixture::FixtureBuilder;
 
@@ -30,33 +19,6 @@ pub fn bench_level() -> usize {
     } else {
         0
     }
-}
-
-/// A simple helper function to build the DAG handler.
-pub fn build_dag_handler<TargetTxnStore: TxnStore + 'static>(
-    executors: &[PbExecutor],
-    ranges: &[KeyRange],
-    store: &Store<RocksEngine>,
-) -> Box<dyn RequestHandler> {
-    use tipb::DagRequest;
-
-    let mut dag = DagRequest::default();
-    dag.set_executors(executors.to_vec().into());
-
-    tikv::coprocessor::dag::DagHandlerBuilder::new(
-        black_box(dag),
-        black_box(ranges.to_vec()),
-        black_box(ToTxnStore::<TargetTxnStore>::to_store(store)),
-        StubAccessor::none(),
-        tikv_util::deadline::Deadline::from_now(std::time::Duration::from_secs(10)),
-        64,
-        false,
-        None,
-        u64::MAX,
-        Arc::new(QuotaLimiter::default()),
-    )
-    .build::<ApiV1>()
-    .unwrap()
 }
 
 pub struct InnerBenchCase<I, M, F>

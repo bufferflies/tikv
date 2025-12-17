@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use collections::HashMap;
-use kvproto::kvrpcpb::{Context, IsolationLevel};
+use kvproto::kvrpcpb::Context;
 use test_storage::SyncTestStorageApiV1;
 use tidb_query_datatype::{
     codec::{datum, table, Datum},
@@ -13,7 +13,7 @@ use tikv::storage::{
     kv::{Engine, RocksEngine},
     lock_manager::MockLockManager,
     txn::FixtureStore,
-    SnapshotStore, StorageApiV1, TestStorageBuilderApiV1,
+    StorageApiV1, TestStorageBuilderApiV1,
 };
 use txn_types::{Key, Mutation, TimeStamp};
 
@@ -214,20 +214,6 @@ impl<E: Engine> Store<E> {
             .collect()
     }
 
-    /// Directly creates a `SnapshotStore` over current committed data.
-    pub fn to_snapshot_store(&self) -> SnapshotStore<E::Snap> {
-        let snapshot = self.get_engine().snapshot(Default::default()).unwrap();
-        SnapshotStore::new(
-            snapshot,
-            self.last_committed_ts,
-            IsolationLevel::Si,
-            true,
-            Default::default(),
-            Default::default(),
-            false,
-        )
-    }
-
     /// Strip off committed MVCC information to create a `FixtureStore`.
     pub fn to_fixture_store(&self) -> FixtureStore {
         let data = self
@@ -248,12 +234,6 @@ pub trait ToTxnStore<S: tikv::storage::Store> {
 impl<E: Engine, S: tikv::storage::Store> ToTxnStore<S> for Store<E> {
     default fn to_store(&self) -> S {
         unimplemented!()
-    }
-}
-
-impl<E: Engine> ToTxnStore<SnapshotStore<E::Snap>> for Store<E> {
-    fn to_store(&self) -> SnapshotStore<<E as Engine>::Snap> {
-        self.to_snapshot_store()
     }
 }
 

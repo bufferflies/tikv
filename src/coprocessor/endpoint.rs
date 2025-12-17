@@ -1749,6 +1749,7 @@ mod tests {
 
     use futures::executor::{block_on, block_on_stream};
     use kvproto::kvrpcpb::{IsolationLevel, LockInfo};
+    use more_asserts::{assert_ge, assert_lt};
     use protobuf::Message;
     use raft::StateRole;
     use raftstore::RegionInfo;

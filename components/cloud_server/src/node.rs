@@ -8,14 +8,13 @@ use kvproto::{metapb, raft_serverpb::RegionLocalState, replication_modepb::Repli
 use pd_client::{Error as PdError, FeatureGate, PdClient, INVALID_ID};
 use protobuf::Message;
 use raftstore::{
-    coprocessor::dispatcher::CoprocessorHost,
-    store::{initial_region, FlowStatsReporter},
-    RegionInfoAccessor,
+    coprocessor::dispatcher::CoprocessorHost, store::FlowStatsReporter, RegionInfoAccessor,
 };
 use resource_control::ResourceController;
 use resource_metering::ResourceTagFactory;
 use rfstore::store::{
-    self, store_fsm::StoreMeta, Config as StoreConfig, Engines, PdTask, RaftBatchSystem, Transport,
+    self, initial_region, store_fsm::StoreMeta, Config as StoreConfig, Engines, PdTask,
+    RaftBatchSystem, Transport,
 };
 use tikv::{
     import::SstImporter,

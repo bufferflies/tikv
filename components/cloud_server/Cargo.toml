@@ -81,7 +81,6 @@ prometheus-static-metric = "0.5"
 promptly = "0.3.0"
 protobuf = "2.8"
 raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
-raft_log_engine = { path = "../raft_log_engine", default-features = false }
 raftstore = { path = "../raftstore", default-features = false }
 rand = "0.8"
 recovery = { workspace = true }

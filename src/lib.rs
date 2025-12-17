@@ -36,8 +36,6 @@ extern crate fail;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
-extern crate more_asserts;
-#[macro_use]
 extern crate serde_derive;
 #[cfg(test)]
 extern crate test;

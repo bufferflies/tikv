@@ -1,7 +1,6 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    fmt::Write,
     path::Path,
     str::FromStr,
     sync::{mpsc, Arc},
@@ -9,14 +8,11 @@ use std::{
     time::Duration,
 };
 
-use collections::HashMap;
-use encryption_export::{DataKeyManager, FileConfig, MasterKeyConfig};
+use encryption_export::{FileConfig, MasterKeyConfig};
 use engine_rocks::{config::BlobRunMode, RocksEngine, RocksSnapshot};
-use engine_test::raft::RaftTestEngine;
 use engine_traits::{
-    Engines, Iterable, Peekable, RaftEngineDebug, RaftEngineReadOnly, ALL_CFS, CF_DEFAULT, CF_RAFT,
+    Engines, Iterable, Peekable, RaftEngineDebug, RaftEngineReadOnly, ALL_CFS, CF_RAFT,
 };
-use file_system::IoRateLimiter;
 use futures::executor::block_on;
 use grpcio::{ChannelBuilder, Environment};
 use kvproto::{
@@ -27,24 +23,17 @@ use kvproto::{
         AdminCmdType, AdminRequest, ChangePeerRequest, ChangePeerV2Request, CmdType,
         RaftCmdRequest, RaftCmdResponse, Request, StatusCmdType, StatusRequest,
     },
-    raft_serverpb::{
-        PeerState, RaftApplyState, RaftLocalState, RaftTruncatedState, RegionLocalState,
-    },
+    raft_serverpb::{PeerState, RaftLocalState, RegionLocalState},
     tikvpb::TikvClient,
 };
 use pd_client::PdClient;
 use protobuf::RepeatedField;
 use raft::eraftpb::ConfChangeType;
-use raftstore::{
-    store::{fsm::RaftRouter, *},
-    Result,
-};
-use rand::RngCore;
-use tempfile::TempDir;
+use raftstore::{store::*, Result};
 use test_pd_client::TestPdClient;
 use tikv::{config::*, storage::point_key_range};
 pub use tikv_util::store::{find_peer, new_learner_peer, new_peer};
-use tikv_util::{config::*, escape, time::ThreadReadId, worker::LazyWorker, HandyRwLock};
+use tikv_util::{config::*, escape, time::ThreadReadId, HandyRwLock};
 use txn_types::Key;
 
 use crate::{Cluster, Config, ServerCluster, Simulator};
@@ -91,7 +80,7 @@ pub fn must_get_cf_none(engine: &RocksEngine, cf: &str, key: &[u8]) {
     must_get(engine, cf, key, None);
 }
 
-pub fn must_region_cleared(engine: &Engines<RocksEngine, RaftTestEngine>, region: &metapb::Region) {
+pub fn must_region_cleared(engine: &Engines<RocksEngine, RocksEngine>, region: &metapb::Region) {
     let id = region.get_id();
     let state_key = keys::region_state_key(id);
     let state: RegionLocalState = engine.kv.get_msg_cf(CF_RAFT, &state_key).unwrap().unwrap();
@@ -562,20 +551,6 @@ pub fn must_contains_error(resp: &RaftCmdResponse, msg: &str) {
     assert!(err_msg.contains(msg), "{:?}", resp);
 }
 
-pub fn create_test_engine(
-    // TODO: pass it in for all cases.
-    _router: Option<RaftRouter<RocksEngine, RaftTestEngine>>,
-    _limiter: Option<Arc<IoRateLimiter>>,
-    _cfg: &Config,
-) -> (
-    Engines<RocksEngine, RaftTestEngine>,
-    Option<Arc<DataKeyManager>>,
-    TempDir,
-    LazyWorker<String>,
-) {
-    unimplemented!()
-}
-
 pub fn configure_for_request_snapshot<T: Simulator>(cluster: &mut Cluster<T>) {
     // We don't want to generate snapshots due to compact log.
     cluster.cfg.raft_store.raft_log_gc_threshold = 1000;
@@ -681,47 +656,6 @@ pub fn configure_for_causal_ts<T: Simulator>(
     let cfg = &mut cluster.cfg.causal_ts;
     cfg.renew_interval = ReadableDuration::from_str(renew_interval).unwrap();
     cfg.renew_batch_min_size = renew_batch_min_size;
-}
-
-/// Keep putting random kvs until specified size limit is reached.
-pub fn put_till_size<T: Simulator>(
-    cluster: &mut Cluster<T>,
-    limit: u64,
-    range: &mut dyn Iterator<Item = u64>,
-) -> Vec<u8> {
-    put_cf_till_size(cluster, CF_DEFAULT, limit, range)
-}
-
-pub fn put_cf_till_size<T: Simulator>(
-    cluster: &mut Cluster<T>,
-    cf: &'static str,
-    limit: u64,
-    range: &mut dyn Iterator<Item = u64>,
-) -> Vec<u8> {
-    assert!(limit > 0);
-    let mut len = 0;
-    let mut rng = rand::thread_rng();
-    let mut key = String::new();
-    let mut value = vec![0; 64];
-    while len < limit {
-        let batch_size = std::cmp::min(1024, limit - len);
-        let mut reqs = vec![];
-        for _ in 0..batch_size / 74 + 1 {
-            key.clear();
-            let key_id = range.next().unwrap();
-            write!(key, "{:09}", key_id).unwrap();
-            rng.fill_bytes(&mut value);
-            // plus 1 for the extra encoding prefix
-            len += key.len() as u64 + 1;
-            len += value.len() as u64;
-            reqs.push(new_put_cf_cmd(cf, key.as_bytes(), &value));
-        }
-        cluster.batch_put(key.as_bytes(), reqs).unwrap();
-        // Approximate size of memtable is inaccurate for small data,
-        // we flush it to SST so we can use the size properties instead.
-        cluster.must_flush_cf(cf, true);
-    }
-    key.into_bytes()
 }
 
 pub fn new_mutation(op: Op, k: &[u8], v: &[u8]) -> Mutation {
@@ -1097,7 +1031,7 @@ pub fn get_tso(pd_client: &TestPdClient) -> u64 {
 }
 
 pub fn get_raft_msg_or_default<M: protobuf::Message + Default>(
-    engines: &Engines<RocksEngine, RaftTestEngine>,
+    engines: &Engines<RocksEngine, RocksEngine>,
     key: &[u8],
 ) -> M {
     engines
@@ -1105,63 +1039,6 @@ pub fn get_raft_msg_or_default<M: protobuf::Message + Default>(
         .get_msg_cf(CF_RAFT, key)
         .unwrap()
         .unwrap_or_default()
-}
-
-pub fn check_compacted(
-    all_engines: &HashMap<u64, Engines<RocksEngine, RaftTestEngine>>,
-    before_states: &HashMap<u64, RaftTruncatedState>,
-    compact_count: u64,
-    must_compacted: bool,
-) -> bool {
-    // Every peer must have compacted logs, so the truncate log state index/term
-    // must > than before.
-    let mut compacted_idx = HashMap::default();
-
-    for (&id, engines) in all_engines {
-        let mut state: RaftApplyState = get_raft_msg_or_default(engines, &keys::apply_state_key(1));
-        let after_state = state.take_truncated_state();
-
-        let before_state = &before_states[&id];
-        let idx = after_state.get_index();
-        let term = after_state.get_term();
-        if idx == before_state.get_index() || term == before_state.get_term() {
-            if must_compacted {
-                panic!(
-                    "Should be compacted, but Raft truncated state is not updated: {} state={:?}",
-                    id, before_state
-                );
-            }
-            return false;
-        }
-        if idx - before_state.get_index() < compact_count {
-            if must_compacted {
-                panic!(
-                    "Should be compacted, but compact count is too small: {} {}<{}",
-                    id,
-                    idx - before_state.get_index(),
-                    compact_count
-                );
-            }
-            return false;
-        }
-        assert!(term > before_state.get_term());
-        compacted_idx.insert(id, idx);
-    }
-
-    // wait for actual deletion.
-    sleep_ms(250);
-
-    for (id, engines) in all_engines {
-        for i in 0..compacted_idx[id] {
-            if engines.raft.get_entry(1, i).unwrap().is_some() {
-                if must_compacted {
-                    panic!("Should be compacted, but found entry: {} {}", id, i);
-                }
-                return false;
-            }
-        }
-    }
-    true
 }
 
 pub fn must_raw_put(client: &TikvClient, ctx: Context, key: Vec<u8>, value: Vec<u8>) {

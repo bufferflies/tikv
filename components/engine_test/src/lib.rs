@@ -57,23 +57,6 @@
 
 #![feature(let_chains)]
 
-/// Types and constructors for the "raft" engine
-pub mod raft {
-    #[cfg(feature = "test-engine-raft-panic")]
-    pub use engine_panic::PanicEngine as RaftTestEngine;
-    #[cfg(feature = "test-engine-raft-rocksdb")]
-    pub use engine_rocks::RocksEngine as RaftTestEngine;
-    use engine_traits::Result;
-    #[cfg(feature = "test-engine-raft-raft-engine")]
-    pub use raft_log_engine::RaftLogEngine as RaftTestEngine;
-
-    use crate::ctor::{RaftDbOptions, RaftEngineConstructorExt};
-
-    pub fn new_engine(path: &str, db_opt: Option<RaftDbOptions>) -> Result<RaftTestEngine> {
-        RaftTestEngine::new_raft_engine(path, db_opt)
-    }
-}
-
 /// Types and constructors for the "kv" engine
 pub mod kv {
     use std::{
@@ -730,36 +713,4 @@ pub mod ctor {
             Ok(rocks_db_opts)
         }
     }
-
-    mod raft_engine {
-        use engine_traits::Result;
-        use raft_log_engine::{RaftEngineConfig, RaftLogEngine};
-
-        use super::{RaftDbOptions, RaftEngineConstructorExt};
-
-        impl RaftEngineConstructorExt for raft_log_engine::RaftLogEngine {
-            fn new_raft_engine(path: &str, db_opts: Option<RaftDbOptions>) -> Result<Self> {
-                let mut config = RaftEngineConfig::default();
-                config.dir = path.to_owned();
-                RaftLogEngine::new(
-                    config,
-                    db_opts.as_ref().and_then(|opts| opts.key_manager.clone()),
-                    db_opts.and_then(|opts| opts.rate_limiter),
-                )
-            }
-        }
-    }
-}
-
-/// Create a new set of engines in a temporary directory
-///
-/// This is little-used and probably shouldn't exist.
-pub fn new_temp_engine(
-    path: &tempfile::TempDir,
-) -> engine_traits::Engines<crate::kv::KvTestEngine, crate::raft::RaftTestEngine> {
-    let raft_path = path.path().join(std::path::Path::new("raft"));
-    engine_traits::Engines::new(
-        crate::kv::new_engine(path.path().to_str().unwrap(), engine_traits::ALL_CFS).unwrap(),
-        crate::raft::new_engine(raft_path.to_str().unwrap(), None).unwrap(),
-    )
 }

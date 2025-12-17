@@ -3,25 +3,19 @@
 #![feature(min_specialization)]
 
 mod hash_aggr;
-mod index_scan;
-mod integrated;
 mod selection;
 mod simple_aggr;
 mod stream_aggr;
-mod table_scan;
 mod top_n;
 mod util;
 
 fn execute<M: criterion::measurement::Measurement + 'static>(c: &mut criterion::Criterion<M>) {
     util::fixture::bench(c);
-    table_scan::bench(c);
-    index_scan::bench(c);
     selection::bench(c);
     simple_aggr::bench(c);
     hash_aggr::bench(c);
     stream_aggr::bench(c);
     top_n::bench(c);
-    integrated::bench(c);
 
     c.final_summary();
 }

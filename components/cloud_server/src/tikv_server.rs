@@ -20,7 +20,7 @@ use std::{
     ops::AddAssign,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{atomic::AtomicU64, Arc, Once},
+    sync::{Arc, Once},
     thread, u64,
 };
 
@@ -50,13 +50,7 @@ use pd_client::{
 };
 use prometheus::labels;
 use protobuf::Message;
-use raftstore::{
-    coprocessor::{
-        BoxConsistencyCheckObserver, ConsistencyCheckMethod, CoprocessorHost,
-        RawConsistencyCheckObserver,
-    },
-    RegionInfoAccessor,
-};
+use raftstore::{coprocessor::CoprocessorHost, RegionInfoAccessor};
 use resource_control::{
     CpuType, ReadLimiter, ReadSubscriber, ResourceController, ResourceType, TransferLeaderLimiter,
     TransferLeaderSubscriber,
@@ -76,11 +70,10 @@ use tikv::{
     coprocessor,
     read_pool::{build_tokio_pool, build_yatp_read_pool},
     server::{
-        config::Config as ServerConfig, lock_manager::LockManager, raftkv::ReplicaReadLockChecker,
-        CPU_CORES_QUOTA_GAUGE, DEFAULT_CLUSTER_ID,
+        config::Config as ServerConfig, lock_manager::LockManager, CPU_CORES_QUOTA_GAUGE,
+        DEFAULT_CLUSTER_ID,
     },
     storage::{
-        mvcc::MvccConsistencyCheckObserver,
         txn::flow_controller::{FlowController, CLOUD_MIN_THROTTLE_SPEED},
         SCHED_WRITE_FLOW_GAUGE,
     },
@@ -438,13 +431,10 @@ impl TikvServer {
         if !config.rocksdb.wal_dir.is_empty() {
             ensure_dir_exist(&config.rocksdb.wal_dir).unwrap();
         }
-        if config.raft_engine.enable {
-            ensure_dir_exist(&config.raft_engine.config().dir).unwrap();
-        } else {
-            ensure_dir_exist(&config.raft_store.raftdb_path).unwrap();
-            if !config.raftdb.wal_dir.is_empty() {
-                ensure_dir_exist(&config.raftdb.wal_dir).unwrap();
-            }
+
+        ensure_dir_exist(&config.raft_store.raftdb_path).unwrap();
+        if !config.raftdb.wal_dir.is_empty() {
+            ensure_dir_exist(&config.raftdb.wal_dir).unwrap();
         }
 
         check_system_config(&config);
@@ -794,22 +784,6 @@ impl TikvServer {
             importer.set_compression_type(cf_name, from_rocks_compression_type(*compression_type));
         }
         let importer = Arc::new(importer);
-
-        // `ConsistencyCheckObserver` must be registered before `Node::start`.
-        let safe_point = Arc::new(AtomicU64::new(0));
-        let observer = match self.config.coprocessor.consistency_check_method {
-            ConsistencyCheckMethod::Mvcc => {
-                BoxConsistencyCheckObserver::new(MvccConsistencyCheckObserver::new(safe_point))
-            }
-            ConsistencyCheckMethod::Raw => {
-                BoxConsistencyCheckObserver::new(RawConsistencyCheckObserver::default())
-            }
-        };
-        self.coprocessor_host
-            .as_mut()
-            .unwrap()
-            .registry
-            .register_consistency_check_observer(100, observer);
 
         node.start(
             self.raw_engines.clone(),

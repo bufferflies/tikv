@@ -20,14 +20,12 @@ use std::{
 
 use api_version::ApiV1Ttl;
 use causal_ts::Config as CausalTsConfig;
-use encryption_export::DataKeyManager;
 use engine_rocks::{
     config::{self as rocks_config, BlobRunMode, CompressionType, LogLevel as RocksLogLevel},
-    get_env,
     properties::MvccPropertiesCollectorFactory,
     raw::{
         BlockBasedOptions, Cache, ChecksumType, CompactionPriority, DBCompactionStyle,
-        DBCompressionType, DBRateLimiterMode, DBRecoveryMode, Env, LRUCacheOptions,
+        DBCompressionType, DBRateLimiterMode, DBRecoveryMode, LRUCacheOptions,
         PrepopulateBlockCache,
     },
     util::{FixedPrefixSliceTransform, FixedSuffixSliceTransform, NoopSliceTransform},
@@ -40,16 +38,12 @@ use engine_traits::{
     CfOptions as _, CfOptionsExt, DbOptions as _, DbOptionsExt, TabletAccessor,
     TabletErrorCollector, TitanCfOptions as _, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE,
 };
-use file_system::IoRateLimiter;
 use keys::region_raft_prefix_len;
 use kvengine::{dfs::DFSConfig, KvEngineConfig};
 use kvproto::kvrpcpb::ApiVersion;
 use online_config::{ConfigChange, ConfigManager, ConfigValue, OnlineConfig, Result as CfgResult};
 use overload_protector::OverloadConfig;
 use pd_client::Config as PdConfig;
-use raft_log_engine::{
-    RaftEngineConfig as RawRaftEngineConfig, ReadableSize as RaftEngineReadableSize,
-};
 use raftstore::{
     coprocessor::{Config as CopConfig, RegionInfoAccessor},
     store::{Config as RaftstoreConfig, SplitConfig},
@@ -93,7 +87,6 @@ pub const MIN_BLOCK_CACHE_SHARD_SIZE: usize = 128 * MIB as usize;
 
 /// Maximum of 15% of system memory can be used by Raft Engine. Normally its
 /// memory usage is much smaller than that.
-const RAFT_ENGINE_MEMORY_LIMIT_RATE: f64 = 0.15;
 
 const LOCKCF_MIN_MEM: usize = 256 * MIB as usize;
 const LOCKCF_MAX_MEM: usize = GIB as usize;
@@ -1466,43 +1459,6 @@ impl RaftDbConfig {
             }
         }
         Ok(())
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
-#[serde(default, rename_all = "kebab-case")]
-pub struct RaftEngineConfig {
-    pub enable: bool,
-    #[serde(flatten)]
-    config: RawRaftEngineConfig,
-}
-
-impl Default for RaftEngineConfig {
-    fn default() -> Self {
-        Self {
-            enable: true,
-            config: RawRaftEngineConfig::default(),
-        }
-    }
-}
-
-impl RaftEngineConfig {
-    fn validate(&mut self) -> Result<(), Box<dyn Error>> {
-        self.config.sanitize().map_err(Box::new)?;
-        if self.config.memory_limit.is_none() {
-            let total_mem = SysQuota::memory_limit_in_bytes() as f64;
-            let memory_limit = total_mem * RAFT_ENGINE_MEMORY_LIMIT_RATE;
-            self.config.memory_limit = Some(RaftEngineReadableSize(memory_limit as u64));
-        }
-        Ok(())
-    }
-
-    pub fn config(&self) -> RawRaftEngineConfig {
-        self.config.clone()
-    }
-
-    pub fn mut_config(&mut self) -> &mut RawRaftEngineConfig {
-        &mut self.config
     }
 }
 
@@ -2971,9 +2927,6 @@ pub struct TikvConfig {
     pub raftdb: RaftDbConfig,
 
     #[online_config(skip)]
-    pub raft_engine: RaftEngineConfig,
-
-    #[online_config(skip)]
     pub rfengine: RfEngineConfig,
 
     #[online_config(skip)]
@@ -3054,7 +3007,6 @@ impl Default for TikvConfig {
             pd: PdConfig::default(),
             rocksdb: DbConfig::default(),
             raftdb: RaftDbConfig::default(),
-            raft_engine: RaftEngineConfig::default(),
             rfengine: RfEngineConfig::default(),
             kvengine: KvEngineConfig::default(),
             storage: StorageConfig::default(),
@@ -3086,15 +3038,6 @@ impl TikvConfig {
         }
     }
 
-    pub fn infer_raft_engine_path(&self, data_dir: Option<&str>) -> Result<String, Box<dyn Error>> {
-        if self.raft_engine.config.dir.is_empty() {
-            let data_dir = data_dir.unwrap_or(&self.storage.data_dir);
-            config::canonicalize_sub_path(data_dir, "raft-engine")
-        } else {
-            config::canonicalize_path(&self.raft_engine.config.dir)
-        }
-    }
-
     pub fn infer_kv_engine_path(&self, data_dir: Option<&str>) -> Result<String, Box<dyn Error>> {
         let data_dir = data_dir.unwrap_or(&self.storage.data_dir);
         config::canonicalize_sub_path(data_dir, DEFAULT_ROCKSDB_SUB_DIR)
@@ -3114,11 +3057,6 @@ impl TikvConfig {
         }
 
         self.raft_store.raftdb_path = self.infer_raft_db_path(None)?;
-        self.raft_engine.config.dir = self.infer_raft_engine_path(None)?;
-
-        if self.raft_engine.config.dir == self.raft_store.raftdb_path {
-            return Err("raft_engine.config.dir can't be same as raft_store.raftdb_path".into());
-        }
 
         self.rfengine.wal_sync_dir = self
             .rfengine
@@ -3204,7 +3142,6 @@ impl TikvConfig {
 
         self.rocksdb.validate()?;
         self.raftdb.validate()?;
-        self.raft_engine.validate()?;
         self.rfengine.validate(&self.raft_store.raftdb_path)?;
         self.server.validate()?;
         self.pd.validate()?;
@@ -3544,9 +3481,6 @@ impl TikvConfig {
         let last_raftdb_dir = last_cfg
             .infer_raft_db_path(None)
             .map_err(|e| e.to_string())?;
-        let last_raft_engine_dir = last_cfg
-            .infer_raft_engine_path(None)
-            .map_err(|e| e.to_string())?;
 
         // FIXME: We cannot reliably determine the actual value of
         // `last_cfg.raft_engine.enable`, because some old versions don't have
@@ -3565,13 +3499,6 @@ impl TikvConfig {
                 "raft db wal dir have been changed, former is '{}', \
                 current is '{}', please check if it is expected.",
                 last_cfg.raftdb.wal_dir, self.raftdb.wal_dir
-            ));
-        }
-        if last_raft_engine_dir != self.raft_engine.config.dir {
-            return Err(format!(
-                "raft engine dir have been changed, former is '{}', \
-                 current is '{}', please check if it is expected.",
-                last_raft_engine_dir, self.raft_engine.config.dir
             ));
         }
 
@@ -3648,24 +3575,6 @@ impl TikvConfig {
         let total = SysQuota::memory_limit_in_bytes();
         // Reserve some space for page cache. The
         ReadableSize((total as f64 * MEMORY_USAGE_LIMIT_RATE) as u64)
-    }
-
-    pub fn build_shared_rocks_env(
-        &self,
-        key_manager: Option<Arc<DataKeyManager>>,
-        limiter: Option<Arc<IoRateLimiter>>,
-    ) -> Result<Arc<Env>, String> {
-        let env = get_env(key_manager, limiter)?;
-        if !self.raft_engine.enable {
-            // RocksDB makes sure there are at least `max_background_flushes`
-            // high-priority workers in env. That is not enough when multiple
-            // RocksDB instances share the same env. We manually configure the
-            // worker count in this case.
-            env.set_high_priority_background_threads(
-                self.raftdb.max_background_flushes + self.rocksdb.max_background_flushes,
-            );
-        }
-        Ok(env)
     }
 }
 
@@ -4227,25 +4136,9 @@ mod tests {
         tikv_cfg.validate().unwrap();
         tikv_cfg.check_critical_cfg_with(&last_cfg).unwrap();
 
-        // Enable Raft Engine.
-        let mut tikv_cfg = TikvConfig::default();
-        let mut last_cfg = TikvConfig::default();
-        tikv_cfg.raft_engine.enable = true;
-        last_cfg.raft_engine.enable = true;
-
-        tikv_cfg.raft_engine.mut_config().dir = "/raft/wal_dir".to_owned();
-        tikv_cfg.validate().unwrap();
-        tikv_cfg.check_critical_cfg_with(&last_cfg).unwrap_err();
-
-        last_cfg.raft_engine.mut_config().dir = "/raft/wal_dir".to_owned();
-        tikv_cfg.validate().unwrap();
-        tikv_cfg.check_critical_cfg_with(&last_cfg).unwrap();
-
         // Disable Raft Engine and uses RocksDB.
         let mut tikv_cfg = TikvConfig::default();
         let mut last_cfg = TikvConfig::default();
-        tikv_cfg.raft_engine.enable = false;
-        last_cfg.raft_engine.enable = false;
 
         tikv_cfg.raftdb.wal_dir = "/raft/wal_dir".to_owned();
         tikv_cfg.validate().unwrap();
@@ -5127,20 +5020,6 @@ mod tests {
     }
 
     #[test]
-    fn test_raft_engine_dir() {
-        let content = r#"
-            [raft-engine]
-            enable = true
-        "#;
-        let mut cfg: TikvConfig = toml::from_str(content).unwrap();
-        cfg.validate().unwrap();
-        assert_eq!(
-            cfg.raft_engine.config.dir,
-            config::canonicalize_sub_path(&cfg.storage.data_dir, "raft-engine").unwrap()
-        );
-    }
-
-    #[test]
     fn test_validate_tikv_config() {
         let mut cfg = TikvConfig::default();
         cfg.validate().unwrap();
@@ -5434,7 +5313,6 @@ mod tests {
         cfg.pd.retry_max_count = default_cfg.pd.retry_max_count; // Both -1 and isize::MAX are the same.
         cfg.storage.block_cache.capacity = None; // Either `None` and a value is computed or `Some(_)` fixed value.
         cfg.memory_usage_limit = None;
-        cfg.raft_engine.mut_config().memory_limit = None;
         cfg.rocksdb.defaultcf.level0_slowdown_writes_trigger = None;
         cfg.rocksdb.defaultcf.level0_stop_writes_trigger = None;
         cfg.rocksdb.defaultcf.soft_pending_compaction_bytes_limit = None;

@@ -4,14 +4,9 @@
 use std::{marker::PhantomData, mem, ops::Deref};
 
 use engine_traits::{CfName, KvEngine};
-use kvproto::{
-    metapb::Region,
-    pdpb::CheckPolicy,
-    raft_cmdpb::{ComputeHashRequest, RaftCmdRequest},
-};
+use kvproto::{metapb::Region, raft_cmdpb::RaftCmdRequest};
 use protobuf::Message;
 use raft::eraftpb;
-use tikv_util::box_try;
 
 use super::*;
 use crate::store::CasualRouter;
@@ -143,11 +138,6 @@ impl_box_observer!(
     ApplySnapshotObserver,
     WrappedApplySnapshotObserver
 );
-impl_box_observer_g!(
-    BoxSplitCheckObserver,
-    SplitCheckObserver,
-    WrappedSplitCheckObserver
-);
 impl_box_observer!(BoxPdTaskObserver, PdTaskObserver, WrappedPdTaskObserver);
 impl_box_observer!(BoxRoleObserver, RoleObserver, WrappedRoleObserver);
 impl_box_observer!(
@@ -161,11 +151,6 @@ impl_box_observer!(
     WrappedReadIndexObserver
 );
 impl_box_observer_g!(BoxCmdObserver, CmdObserver, WrappedCmdObserver);
-impl_box_observer_g!(
-    BoxConsistencyCheckObserver,
-    ConsistencyCheckObserver,
-    WrappedConsistencyCheckObserver
-);
 
 /// Registry contains all registered coprocessors.
 #[derive(Clone)]
@@ -176,8 +161,6 @@ where
     admin_observers: Vec<Entry<BoxAdminObserver>>,
     query_observers: Vec<Entry<BoxQueryObserver>>,
     apply_snapshot_observers: Vec<Entry<BoxApplySnapshotObserver>>,
-    split_check_observers: Vec<Entry<BoxSplitCheckObserver<E>>>,
-    consistency_check_observers: Vec<Entry<BoxConsistencyCheckObserver<E>>>,
     role_observers: Vec<Entry<BoxRoleObserver>>,
     region_change_observers: Vec<Entry<BoxRegionChangeObserver>>,
     cmd_observers: Vec<Entry<BoxCmdObserver<E>>>,
@@ -193,8 +176,6 @@ impl<E: KvEngine> Default for Registry<E> {
             admin_observers: Default::default(),
             query_observers: Default::default(),
             apply_snapshot_observers: Default::default(),
-            split_check_observers: Default::default(),
-            consistency_check_observers: Default::default(),
             role_observers: Default::default(),
             region_change_observers: Default::default(),
             cmd_observers: Default::default(),
@@ -233,18 +214,6 @@ impl<E: KvEngine> Registry<E> {
         aso: BoxApplySnapshotObserver,
     ) {
         push!(priority, aso, self.apply_snapshot_observers);
-    }
-
-    pub fn register_split_check_observer(&mut self, priority: u32, sco: BoxSplitCheckObserver<E>) {
-        push!(priority, sco, self.split_check_observers);
-    }
-
-    pub fn register_consistency_check_observer(
-        &mut self,
-        priority: u32,
-        cco: BoxConsistencyCheckObserver<E>,
-    ) {
-        push!(priority, cco, self.consistency_check_observers);
     }
 
     pub fn register_pd_task_observer(&mut self, priority: u32, ro: BoxPdTaskObserver) {
@@ -340,20 +309,10 @@ where
 
 impl<E: KvEngine> CoprocessorHost<E> {
     pub fn new<C: CasualRouter<E> + Clone + Send + 'static>(
-        ch: C,
+        _ch: C,
         cfg: Config,
     ) -> CoprocessorHost<E> {
-        let mut registry = Registry::default();
-        registry.register_split_check_observer(
-            200,
-            BoxSplitCheckObserver::new(SizeCheckObserver::new(ch.clone())),
-        );
-        registry.register_split_check_observer(
-            200,
-            BoxSplitCheckObserver::new(KeysCheckObserver::new(ch)),
-        );
-        registry.register_split_check_observer(100, BoxSplitCheckObserver::new(HalfCheckObserver));
-        registry.register_split_check_observer(400, BoxSplitCheckObserver::new(TableCheckObserver));
+        let registry = Registry::default();
         CoprocessorHost { registry, cfg }
     }
 
@@ -554,56 +513,6 @@ impl<E: KvEngine> CoprocessorHost<E> {
         }
     }
 
-    pub fn new_split_checker_host<'a>(
-        &'a self,
-        region: &Region,
-        engine: &E,
-        auto_split: bool,
-        policy: CheckPolicy,
-    ) -> SplitCheckerHost<'a, E> {
-        let mut host = SplitCheckerHost::new(auto_split, &self.cfg);
-        loop_ob!(
-            region,
-            &self.registry.split_check_observers,
-            add_checker,
-            &mut host,
-            engine,
-            policy
-        );
-        host
-    }
-
-    pub fn on_prepropose_compute_hash(&self, req: &mut ComputeHashRequest) {
-        for observer in &self.registry.consistency_check_observers {
-            let observer = observer.observer.inner();
-            if observer.update_context(req.mut_context()) {
-                break;
-            }
-        }
-    }
-
-    pub fn on_compute_hash(
-        &self,
-        region: &Region,
-        context: &[u8],
-        snap: E::Snapshot,
-    ) -> Result<Vec<(Vec<u8>, u32)>> {
-        let mut hashes = Vec::new();
-        let (mut reader, context_len) = (context, context.len());
-        for observer in &self.registry.consistency_check_observers {
-            let observer = observer.observer.inner();
-            let old_len = reader.len();
-            let hash = match box_try!(observer.compute_hash(region, &mut reader, &snap)) {
-                Some(hash) => hash,
-                None => break,
-            };
-            let new_len = reader.len();
-            let ctx = context[context_len - old_len..context_len - new_len].to_vec();
-            hashes.push((ctx, hash));
-        }
-        Ok(hashes)
-    }
-
     pub fn on_compute_engine_size(&self) -> Option<StoreSizeInfo> {
         let mut store_size = None;
         for observer in &self.registry.pd_task_observers {
@@ -718,9 +627,6 @@ impl<E: KvEngine> CoprocessorHost<E> {
             entry.observer.inner().stop();
         }
         for entry in &self.registry.query_observers {
-            entry.observer.inner().stop();
-        }
-        for entry in &self.registry.split_check_observers {
             entry.observer.inner().stop();
         }
         for entry in &self.registry.cmd_observers {

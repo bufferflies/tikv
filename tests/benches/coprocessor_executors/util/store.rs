@@ -1,18 +1,9 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
-
-use tikv::storage::{
-    kv::RocksSnapshot,
-    txn::{FixtureStore, SnapshotStore, Store},
-};
+use tikv::storage::txn::{FixtureStore, Store};
 
 /// `MemStore` is a store provider that operates directly over a BTreeMap.
 pub type MemStore = FixtureStore;
-
-/// `RocksStore` is a store provider that operates over a disk-based RocksDB
-/// storage.
-pub type RocksStore = SnapshotStore<Arc<RocksSnapshot>>;
 
 pub trait StoreDescriber {
     /// Describes a store for Criterion to output.
@@ -28,11 +19,5 @@ impl<S: Store> StoreDescriber for S {
 impl StoreDescriber for MemStore {
     fn name() -> String {
         "Memory".to_owned()
-    }
-}
-
-impl StoreDescriber for RocksStore {
-    fn name() -> String {
-        "RocksDB".to_owned()
     }
 }

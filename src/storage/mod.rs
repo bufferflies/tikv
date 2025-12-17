@@ -112,7 +112,7 @@ pub use self::{
     },
     raw::RawStore,
     read_pool::{build_read_pool, build_read_pool_for_test},
-    txn::{CloudStore, Latches, Lock as LatchLock, ProcessResult, Scanner, SnapshotStore, Store},
+    txn::{CloudStore, Latches, Lock as LatchLock, ProcessResult, Scanner, Store},
     types::{
         PessimisticLockKeyResult, PessimisticLockResults, PrewriteResult, SecondaryLocksStatus,
         StorageCallback, TxnStatus,
@@ -127,7 +127,6 @@ use crate::{
         kv::{with_tls_engine, Modify, WriteData},
         lock_manager::{LockManager, MockLockManager},
         metrics::{CommandKind, *},
-        mvcc::PointGetterBuilder,
         txn::{
             commands::{RawAtomicStore, RawCompareAndSwap, TypedCommand},
             flow_controller::{EngineFlowController, FlowController},
@@ -851,11 +850,11 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         snap,
                         key,
                         start_ts,
-                        isolation_level,
+                        _isolation_level,
                         fill_cache,
                         bypass_locks,
-                        access_locks,
-                        region_id,
+                        _access_locks,
+                        _region_id,
                         id,
                         source,
                         tracker,
@@ -885,42 +884,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                                     source,
                                 );
                             } else {
-                                let buckets = snapshot.ext().get_buckets();
-                                match PointGetterBuilder::new(snapshot, start_ts)
-                                    .fill_cache(fill_cache)
-                                    .isolation_level(isolation_level)
-                                    .bypass_locks(bypass_locks)
-                                    .access_locks(access_locks)
-                                    .build()
-                                {
-                                    Ok(mut point_getter) => {
-                                        let v = point_getter.get(&key);
-                                        let stat = point_getter.take_statistics();
-                                        metrics::tls_collect_read_flow(
-                                            region_id,
-                                            Some(key.as_encoded()),
-                                            Some(key.as_encoded()),
-                                            &stat,
-                                            buckets.as_ref(),
-                                        );
-                                        statistics.add(&stat);
-                                        consumer.consume(
-                                            id,
-                                            v.map_err(|e| Error::from(txn::Error::from(e)))
-                                                .map(|v| (v, stat)),
-                                            begin_instant,
-                                            source,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        consumer.consume(
-                                            id,
-                                            Err(Error::from(txn::Error::from(e))),
-                                            begin_instant,
-                                            source,
-                                        );
-                                    }
-                                }
+                                unimplemented!()
                             }
                         }
                         Err(e) => {

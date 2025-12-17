@@ -119,7 +119,6 @@ debug-trace-txn-tasks = [
 [dependencies]
 api_version = { workspace = true }
 async-trait = "0.1"
-batch-system = { workspace = true }
 bincode = "1.3"
 bytes = "1.1"
 cdc = { workspace = true }
@@ -132,7 +131,6 @@ crc64fast = "0.1"
 crossbeam = "0.8"
 dashmap = "4.0"
 encryption = { workspace = true }
-engine_rocks_helper = { workspace = true }
 error_code = { workspace = true }
 fail = "0.5"
 file_system = { workspace = true }
@@ -157,7 +155,6 @@ pd_client = { workspace = true }
 protobuf = { version = "2.8", features = ["bytes"] }
 raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
 raft-proto = { version = "0.7.0", default-features = false }
-raft_log_engine = { workspace = true }
 raftstore = { workspace = true }
 rand = "0.8.3"
 replication_worker = { workspace = true }

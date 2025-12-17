@@ -10,17 +10,10 @@
 #![feature(impl_trait_in_assoc_type)]
 #![recursion_limit = "256"]
 
-#[cfg(test)]
-extern crate test;
-#[cfg(feature = "engine_rocks")]
-pub mod compacted_event_sender;
-
 pub mod coprocessor;
 pub mod errors;
 pub mod router;
 pub mod store;
-#[cfg(feature = "engine_rocks")]
-pub use self::compacted_event_sender::RaftRouterCompactedEventSender;
 pub use self::{
     coprocessor::{RegionInfo, RegionInfoAccessor, SeekRegionCallback},
     errors::{DiscardReason, Error, Result},

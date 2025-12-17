@@ -12,7 +12,7 @@ use raftstore::store::GlobalReplicationState;
 use tikv_kv::RaftExtension;
 use tikv_util::{
     time::Instant,
-    worker::{Runnable, Scheduler, Worker},
+    worker::{Runnable, Scheduler},
 };
 
 use super::{metrics::*, Result};
@@ -149,28 +149,6 @@ impl PdStoreAddrResolver {
     pub fn new(sched: Scheduler<Task>) -> PdStoreAddrResolver {
         PdStoreAddrResolver { sched }
     }
-}
-
-/// Creates a new `PdStoreAddrResolver`.
-pub fn new_resolver<T, R>(
-    pd_client: Arc<T>,
-    worker: &Worker,
-    router: R,
-) -> (PdStoreAddrResolver, Arc<Mutex<GlobalReplicationState>>)
-where
-    T: PdClient + 'static,
-    R: RaftExtension + 'static,
-{
-    let state = Arc::new(Mutex::new(GlobalReplicationState::default()));
-    let runner = Runner {
-        pd_client,
-        store_addrs: HashMap::default(),
-        state: state.clone(),
-        router,
-    };
-    let scheduler = worker.start("addr-resolver", runner);
-    let resolver = PdStoreAddrResolver::new(scheduler);
-    (resolver, state)
 }
 
 impl StoreAddrResolver for PdStoreAddrResolver {

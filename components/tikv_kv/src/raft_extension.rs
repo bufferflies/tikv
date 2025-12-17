@@ -5,15 +5,7 @@
 //! some cases it's unavoidable to access raft interface somehow. This module
 //! supports the access pattern via extension.
 
-use futures::future::BoxFuture;
-use kvproto::{
-    metapb::{Region, RegionEpoch},
-    raft_serverpb::RaftMessage,
-};
-use raft::SnapshotStatus;
-use raftstore::store::region_meta::RegionMeta;
-
-use crate::Result;
+use kvproto::raft_serverpb::RaftMessage;
 
 /// An interface to provide direct access to raftstore layer.
 pub trait RaftExtension: Clone + Send {
@@ -32,34 +24,8 @@ pub trait RaftExtension: Clone + Send {
     /// Report the target store is unreachable.
     fn report_store_unreachable(&self, _store_id: u64) {}
 
-    /// Report the status of snapshot.
-    fn report_snapshot_status(&self, _region_id: u64, _to_peer_id: u64, _status: SnapshotStatus) {}
-
     /// Report the address of a store is resolved.
     fn report_resolved(&self, _store_id: u64, _group_id: u64) {}
-
-    /// Split the region with the given keys.
-    ///
-    /// Use `BoxFuture` for simplicity as it's not performance critical path.
-    fn split(
-        &self,
-        _region_id: u64,
-        _region_epoch: RegionEpoch,
-        _split_keys: Vec<Vec<u8>>,
-        _source: String,
-    ) -> BoxFuture<'static, Result<Vec<Region>>> {
-        Box::pin(async move { Err(box_err!("raft split is not supported")) })
-    }
-
-    /// Get the region meta of the given region.
-    fn query_region(&self, _region_id: u64) -> BoxFuture<'static, Result<RegionMeta>> {
-        Box::pin(async move { Err(box_err!("query region is not supported")) })
-    }
-
-    /// Ask the raft group to do a consistency check.
-    fn check_consistency(&self, _region_id: u64) -> BoxFuture<'static, Result<()>> {
-        Box::pin(async move { Err(box_err!("consistency check is not supported")) })
-    }
 }
 
 /// An extension that does nothing or panic on all operations.

@@ -6,15 +6,5 @@
 
 pub mod apply;
 pub mod metrics;
-mod peer;
-pub mod store;
 
-pub use self::{
-    apply::{
-        Apply, ApplyBatchSystem, ApplyMetrics, ApplyRes, ApplyRouter, CatchUpLogs, ChangeObserver,
-        ChangePeer, ExecResult, GenSnapTask, Msg as ApplyTask, Notifier as ApplyNotifier, Proposal,
-        Registration, TaskRes as ApplyTaskRes,
-    },
-    peer::{DestroyPeerJob, PeerFsm, MAX_PROPOSAL_SIZE_RATIO},
-    store::{RaftRouter, StoreInfo, StoreMeta},
-};
+pub use self::apply::ChangeObserver;

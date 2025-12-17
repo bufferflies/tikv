@@ -4,7 +4,6 @@ mod raft_extension;
 
 // #[PerformanceCriticalPath]
 use std::{
-    borrow::Cow,
     fmt::{self, Debug, Display, Formatter},
     io::Error as IoError,
     result,
@@ -13,37 +12,22 @@ use std::{
 };
 
 use collections::HashMap;
-use concurrency_manager::ConcurrencyManager;
 use engine_traits::{KvEngine, Snapshot};
-use futures::{future::BoxFuture, Future, Stream};
+use futures::{Future, Stream};
 use futures_util::stream::empty;
-use kvproto::{
-    errorpb,
-    kvrpcpb::{Context, IsolationLevel},
-    raft_cmdpb::{RaftCmdRequest, RaftCmdResponse, Response},
-};
-use raft::{eraftpb, eraftpb::MessageType, StateRole};
+use kvproto::{errorpb, kvrpcpb::Context, raft_cmdpb::Response};
 pub use raft_extension::RaftRouterWrap;
 use raftstore::{
-    coprocessor::{
-        dispatcher::BoxReadIndexObserver, Coprocessor, CoprocessorHost, ReadIndexObserver,
-    },
-    errors::Error as RaftServerError,
-    router::{LocalReadRouter, RaftStoreRouter},
-    store::{RaftCmdExtraOpts, ReadIndexContext, RegionSnapshot},
+    errors::Error as RaftServerError, router::RaftStoreRouter, store::RegionSnapshot,
     RegionInfoAccessor,
 };
 use thiserror::Error;
 use tikv_kv::{Modify, OnAppliedCb, WriteEvent};
-use tikv_util::{future::paired_future_callback, time::Instant};
 use txn_types::{TxnExtra, TxnExtraScheduler};
 
-use crate::{
-    server::metrics::REPLICA_READ_LOCK_CHECK_HISTOGRAM_VEC_STATIC,
-    storage::{
-        kv,
-        kv::{Engine, Error as KvError, ErrorInner as KvErrorInner, SnapContext, WriteData},
-    },
+use crate::storage::{
+    kv,
+    kv::{Engine, Error as KvError, ErrorInner as KvErrorInner, SnapContext, WriteData},
 };
 
 #[derive(Debug, Error)]
@@ -87,38 +71,12 @@ where
     Snap(RegionSnapshot<S>),
 }
 
-fn check_raft_cmd_response(resp: &mut RaftCmdResponse) -> Result<()> {
-    if resp.get_header().has_error() {
-        return Err(Error::RequestFailed(resp.take_header().take_error()));
-    }
-
-    Ok(())
-}
-
-fn exec_admin<E: KvEngine, S: RaftStoreRouter<E>>(
-    router: &S,
-    req: RaftCmdRequest,
-) -> BoxFuture<'static, kv::Result<()>> {
-    let (cb, f) = paired_future_callback();
-    let res = router.send_command(
-        req,
-        raftstore::store::Callback::write(cb),
-        RaftCmdExtraOpts::default(),
-    );
-    Box::pin(async move {
-        res?;
-        let mut resp = box_try!(f.await);
-        check_raft_cmd_response(&mut resp.response)?;
-        Ok(())
-    })
-}
-
 /// `RaftKv` is a storage engine base on `RaftStore`.
 #[derive(Clone)]
 pub struct RaftKv<E, S>
 where
     E: KvEngine,
-    S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
+    S: RaftStoreRouter<E> + 'static,
 {
     router: RaftRouterWrap<S, E>,
     engine: E,
@@ -128,7 +86,7 @@ where
 impl<E, S> RaftKv<E, S>
 where
     E: KvEngine,
-    S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
+    S: RaftStoreRouter<E> + 'static,
 {
     /// Create a RaftKv using specified configuration.
     pub fn new(router: S, engine: E, _: RegionInfoAccessor) -> RaftKv<E, S> {
@@ -147,7 +105,7 @@ where
 impl<E, S> Display for RaftKv<E, S>
 where
     E: KvEngine,
-    S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
+    S: RaftStoreRouter<E> + 'static,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "RaftKv")
@@ -157,7 +115,7 @@ where
 impl<E, S> Debug for RaftKv<E, S>
 where
     E: KvEngine,
-    S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
+    S: RaftStoreRouter<E> + 'static,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "RaftKv")
@@ -167,7 +125,7 @@ where
 impl<E, S> Engine for RaftKv<E, S>
 where
     E: KvEngine,
-    S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
+    S: RaftStoreRouter<E> + 'static,
 {
     type Snap = RegionSnapshot<E::Snapshot>;
     type Local = E;
@@ -211,83 +169,6 @@ where
             if !txn_extra.is_empty() {
                 tx.schedule(txn_extra);
             }
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct ReplicaReadLockChecker {
-    concurrency_manager: ConcurrencyManager,
-}
-
-impl ReplicaReadLockChecker {
-    pub fn new(concurrency_manager: ConcurrencyManager) -> Self {
-        ReplicaReadLockChecker {
-            concurrency_manager,
-        }
-    }
-
-    pub fn register<E: KvEngine + 'static>(self, host: &mut CoprocessorHost<E>) {
-        host.registry
-            .register_read_index_observer(1, BoxReadIndexObserver::new(self));
-    }
-}
-
-impl Coprocessor for ReplicaReadLockChecker {}
-
-impl ReadIndexObserver for ReplicaReadLockChecker {
-    fn on_step(&self, msg: &mut eraftpb::Message, role: StateRole) {
-        // Only check and return result if the current peer is a leader.
-        // If it's not a leader, the read index request will be redirected to the leader
-        // later.
-        if msg.get_msg_type() != MessageType::MsgReadIndex || role != StateRole::Leader {
-            return;
-        }
-        assert_eq!(msg.get_entries().len(), 1);
-        let mut rctx = ReadIndexContext::parse(msg.get_entries()[0].get_data()).unwrap();
-        if let Some(mut request) = rctx.request.take() {
-            let begin_instant = Instant::now();
-
-            let start_ts = request.get_start_ts().into();
-            self.concurrency_manager.update_max_ts(start_ts);
-            for range in request.mut_key_ranges().iter_mut() {
-                let key_bound = |key: Vec<u8>| {
-                    if key.is_empty() {
-                        None
-                    } else {
-                        Some(txn_types::Key::from_encoded(key))
-                    }
-                };
-                let start_key = key_bound(range.take_start_key());
-                let end_key = key_bound(range.take_end_key());
-                // The replica read is not compatible with `RcCheckTs` isolation level yet.
-                // It's ensured in the tidb side when `RcCheckTs` is enabled for read requests,
-                // the replica read would not be enabled at the same time.
-                let res = self.concurrency_manager.read_range_check(
-                    start_key.as_ref(),
-                    end_key.as_ref(),
-                    |key, lock| {
-                        txn_types::Lock::check_ts_conflict(
-                            Cow::Borrowed(lock),
-                            key,
-                            start_ts,
-                            &Default::default(),
-                            IsolationLevel::Si,
-                        )
-                    },
-                );
-                if let Err(txn_types::Error(box txn_types::ErrorInner::KeyIsLocked(lock))) = res {
-                    rctx.locked = Some(lock);
-                    REPLICA_READ_LOCK_CHECK_HISTOGRAM_VEC_STATIC
-                        .locked
-                        .observe(begin_instant.saturating_elapsed().as_secs_f64());
-                } else {
-                    REPLICA_READ_LOCK_CHECK_HISTOGRAM_VEC_STATIC
-                        .unlocked
-                        .observe(begin_instant.saturating_elapsed().as_secs_f64());
-                }
-            }
-            msg.mut_entries()[0].set_data(rctx.to_bytes().into());
         }
     }
 }
