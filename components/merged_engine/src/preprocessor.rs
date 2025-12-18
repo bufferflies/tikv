@@ -66,7 +66,12 @@ impl Preprocessor {
         let mut region_state = raft
             .load_region_state(shard_meta.id, shard_meta.ver)
             .unwrap_or_else(|| {
-                panic!("{} failed to load region state", shard_meta.tag());
+                let states = raft.get_peer_all_states(shard_meta.id, false);
+                panic!(
+                    "{} failed to load region state, states: {:?}",
+                    shard_meta.tag(),
+                    states
+                );
             });
         let merge_state = region_state
             .has_merge_state()
