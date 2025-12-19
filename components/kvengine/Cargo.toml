@@ -42,8 +42,6 @@ crossbeam = "0.8"
 crossbeam-queue = "0.3.12"
 dashmap = "4.0"
 dyn-clone = "1.0"
-engine_panic = { path = "../engine_panic" }
-engine_rocks = { workspace = true }
 engine_traits = { path = "../engine_traits", default-features = false }
 fail = "0.5"
 farmhash = "1.1.5"

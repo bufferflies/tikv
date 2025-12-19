@@ -15,7 +15,6 @@ use api_version::{
 };
 use cloud_encryption::MasterKey;
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::{CfNamesExt, MiscExt};
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
 use futures::{compat::Future01CompatExt, FutureExt};
@@ -23,7 +22,7 @@ use kvengine::{
     context::IaCtx,
     table::{DataBound, InnerKey},
     table_id::get_table_id_from_data_bound,
-    GLOBAL_SHARD_END_KEY,
+    CF_NAMES, GLOBAL_SHARD_END_KEY,
 };
 use kvproto::{
     metapb,
@@ -812,7 +811,6 @@ impl PdRunner {
                 Err(e) => {
                     error!(
                         "get disk stat for rocksdb failed";
-                        "engine_path" => store_info.kv_engine.path(),
                         "err" => ?e
                     );
                     return;
@@ -855,8 +853,8 @@ impl PdRunner {
             store_info.capacity
         };
         stats.set_capacity(capacity);
-        let used_size = store_info.kv_engine.get_engine_used_size().expect("cf")
-            + store_info.rf_engine.get_engine_stats().disk_size;
+        let used_size =
+            store_info.kv_engine.size() + store_info.rf_engine.get_engine_stats().disk_size;
         stats.set_used_size(used_size);
 
         // Note: `available + used_size` may be larger than `capacity`, when some
@@ -945,7 +943,7 @@ impl PdRunner {
 
         for cf in 0..kv_engine_stats.cf_total_sizes.len() {
             STORE_ENGINE_SIZE_GAUGE_VEC
-                .with_label_values(&["kv", store_info.kv_engine.cf_names()[cf]])
+                .with_label_values(&["kv", CF_NAMES[cf]])
                 .set(kv_engine_stats.cf_total_sizes[cf] as i64);
         }
         STORE_ENGINE_MEM_SIZE_GAUGE_VEC

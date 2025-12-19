@@ -25,7 +25,6 @@ pub use config::{
 pub mod context;
 pub mod dfs;
 pub mod engine;
-pub mod engine_trait;
 mod error;
 pub mod flush;
 pub mod ia;

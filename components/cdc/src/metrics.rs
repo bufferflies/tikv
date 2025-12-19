@@ -1,12 +1,8 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::cell::RefCell;
-
-use engine_rocks::ReadPerfContext;
 use lazy_static::*;
 use prometheus::*;
 use prometheus_static_metric::*;
-use tikv::storage::Statistics;
 
 /// Installing a new capture contains 2 phases, one for incremental scanning and
 /// one for fetching delta changes from raftstore. They can share some similar
@@ -219,80 +215,4 @@ lazy_static! {
 
     pub static ref CDC_ROCKSDB_PERF_COUNTER_STATIC: PerfCounter =
         auto_flush_from!(CDC_ROCKSDB_PERF_COUNTER, PerfCounter);
-}
-
-thread_local! {
-    pub static TLS_CDC_PERF_STATS: RefCell<ReadPerfContext> = RefCell::new(ReadPerfContext::default());
-}
-
-macro_rules! tls_flush_perf_stat {
-    ($local_stats:ident, $stat:ident) => {
-        CDC_ROCKSDB_PERF_COUNTER_STATIC
-            .$stat
-            .inc_by($local_stats.$stat as u64);
-    };
-}
-
-pub fn tls_flush_perf_stats() {
-    TLS_CDC_PERF_STATS.with(|x| {
-        let perf_stats = std::mem::take(&mut *x.borrow_mut());
-        tls_flush_perf_stat!(perf_stats, user_key_comparison_count);
-        tls_flush_perf_stat!(perf_stats, block_cache_hit_count);
-        tls_flush_perf_stat!(perf_stats, block_read_count);
-        tls_flush_perf_stat!(perf_stats, block_read_byte);
-        tls_flush_perf_stat!(perf_stats, block_read_time);
-        tls_flush_perf_stat!(perf_stats, block_cache_index_hit_count);
-        tls_flush_perf_stat!(perf_stats, index_block_read_count);
-        tls_flush_perf_stat!(perf_stats, block_cache_filter_hit_count);
-        tls_flush_perf_stat!(perf_stats, filter_block_read_count);
-        tls_flush_perf_stat!(perf_stats, block_checksum_time);
-        tls_flush_perf_stat!(perf_stats, block_decompress_time);
-        tls_flush_perf_stat!(perf_stats, get_read_bytes);
-        tls_flush_perf_stat!(perf_stats, iter_read_bytes);
-        tls_flush_perf_stat!(perf_stats, internal_key_skipped_count);
-        tls_flush_perf_stat!(perf_stats, internal_delete_skipped_count);
-        tls_flush_perf_stat!(perf_stats, internal_recent_skipped_count);
-        tls_flush_perf_stat!(perf_stats, get_snapshot_time);
-        tls_flush_perf_stat!(perf_stats, get_from_memtable_time);
-        tls_flush_perf_stat!(perf_stats, get_from_memtable_count);
-        tls_flush_perf_stat!(perf_stats, get_post_process_time);
-        tls_flush_perf_stat!(perf_stats, get_from_output_files_time);
-        tls_flush_perf_stat!(perf_stats, seek_on_memtable_time);
-        tls_flush_perf_stat!(perf_stats, seek_on_memtable_count);
-        tls_flush_perf_stat!(perf_stats, next_on_memtable_count);
-        tls_flush_perf_stat!(perf_stats, prev_on_memtable_count);
-        tls_flush_perf_stat!(perf_stats, seek_child_seek_time);
-        tls_flush_perf_stat!(perf_stats, seek_child_seek_count);
-        tls_flush_perf_stat!(perf_stats, seek_min_heap_time);
-        tls_flush_perf_stat!(perf_stats, seek_max_heap_time);
-        tls_flush_perf_stat!(perf_stats, seek_internal_seek_time);
-        tls_flush_perf_stat!(perf_stats, db_mutex_lock_nanos);
-        tls_flush_perf_stat!(perf_stats, db_condition_wait_nanos);
-        tls_flush_perf_stat!(perf_stats, read_index_block_nanos);
-        tls_flush_perf_stat!(perf_stats, read_filter_block_nanos);
-        tls_flush_perf_stat!(perf_stats, new_table_block_iter_nanos);
-        tls_flush_perf_stat!(perf_stats, new_table_iterator_nanos);
-        tls_flush_perf_stat!(perf_stats, block_seek_nanos);
-        tls_flush_perf_stat!(perf_stats, find_table_nanos);
-        tls_flush_perf_stat!(perf_stats, bloom_memtable_hit_count);
-        tls_flush_perf_stat!(perf_stats, bloom_memtable_miss_count);
-        tls_flush_perf_stat!(perf_stats, bloom_sst_hit_count);
-        tls_flush_perf_stat!(perf_stats, bloom_sst_miss_count);
-        tls_flush_perf_stat!(perf_stats, get_cpu_nanos);
-        tls_flush_perf_stat!(perf_stats, iter_next_cpu_nanos);
-        tls_flush_perf_stat!(perf_stats, iter_prev_cpu_nanos);
-        tls_flush_perf_stat!(perf_stats, iter_seek_cpu_nanos);
-        tls_flush_perf_stat!(perf_stats, encrypt_data_nanos);
-        tls_flush_perf_stat!(perf_stats, decrypt_data_nanos);
-    });
-}
-
-pub fn flush_oldvalue_stats(stats: &Statistics, typ: &'static str) {
-    for (cf, cf_details) in stats.details().iter() {
-        for (tag, count) in cf_details.iter() {
-            CDC_OLD_VALUE_SCAN_DETAILS
-                .with_label_values(&[*cf, *tag, typ])
-                .inc_by(*count as u64);
-        }
-    }
 }

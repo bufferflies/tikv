@@ -16,9 +16,7 @@ pub use engine_rocks::RocksSnapshot;
 use engine_rocks::{
     get_env, RocksCfOptions, RocksDbOptions, RocksEngine as BaseRocksEngine, RocksEngineIterator,
 };
-use engine_traits::{
-    CfName, Engines, IterOptions, Iterable, Iterator, KvEngine, Peekable, ReadOptions,
-};
+use engine_traits::{CfName, IterOptions, Peekable, ReadOptions};
 use file_system::IoRateLimiter;
 use futures::{
     channel::{mpsc, oneshot},
@@ -55,16 +53,16 @@ impl Display for Task {
     }
 }
 
-struct Runner(Engines<BaseRocksEngine, BaseRocksEngine>);
+struct Runner((BaseRocksEngine, BaseRocksEngine));
 
 impl Runnable for Runner {
     type Task = Task;
 
     fn run(&mut self, t: Task) {
         match t {
-            Task::Write(modifies, cb) => cb(write_modifies(&self.0.kv, modifies)),
+            Task::Write(modifies, cb) => cb(write_modifies(&self.0.0, modifies)),
             Task::Snapshot(sender) => {
-                let _ = sender.send(Arc::new(self.0.kv.snapshot()));
+                let _ = sender.send(Arc::new(self.0.0.snapshot()));
             }
             Task::Pause(dur) => std::thread::sleep(dur),
         }
@@ -90,9 +88,10 @@ impl Drop for RocksEngineCore {
 pub struct RocksEngine<RE = FakeExtension> {
     core: Arc<Mutex<RocksEngineCore>>,
     sched: Scheduler<Task>,
-    engines: Engines<BaseRocksEngine, BaseRocksEngine>,
+    kv: BaseRocksEngine,
+    raft: BaseRocksEngine,
     not_leader: Arc<AtomicBool>,
-    coprocessor: CoprocessorHost<BaseRocksEngine>,
+    coprocessor: CoprocessorHost,
     ext: RE,
 }
 
@@ -101,7 +100,8 @@ impl<RE> RocksEngine<RE> {
         RocksEngine {
             core: self.core,
             sched: self.sched,
-            engines: self.engines,
+            kv: self.kv,
+            raft: self.raft,
             not_leader: self.not_leader,
             coprocessor: self.coprocessor,
             ext,
@@ -138,13 +138,16 @@ impl RocksEngine {
         let mut raft_engine = db;
         kv_engine.set_shared_block_cache(shared_block_cache);
         raft_engine.set_shared_block_cache(shared_block_cache);
-        let engines = Engines::new(kv_engine, raft_engine);
-        let sched = worker.start("engine-rocksdb", Runner(engines.clone()));
+        let sched = worker.start(
+            "engine-rocksdb",
+            Runner((kv_engine.clone(), raft_engine.clone())),
+        );
         Ok(RocksEngine {
             sched,
             core: Arc::new(Mutex::new(RocksEngineCore { temp_dir, worker })),
             not_leader: Arc::new(AtomicBool::new(false)),
-            engines,
+            kv: kv_engine,
+            raft: raft_engine,
             coprocessor: CoprocessorHost::default(),
             ext: FakeExtension,
         })
@@ -169,12 +172,8 @@ impl<RE> RocksEngine<RE> {
         self.sched.schedule(Task::Pause(dur)).unwrap();
     }
 
-    pub fn engines(&self) -> Engines<BaseRocksEngine, BaseRocksEngine> {
-        self.engines.clone()
-    }
-
     pub fn get_rocksdb(&self) -> BaseRocksEngine {
-        self.engines.kv.clone()
+        self.kv.clone()
     }
 
     pub fn stop(&self) {
@@ -182,7 +181,7 @@ impl<RE> RocksEngine<RE> {
         core.worker.stop();
     }
 
-    pub fn register_observer(&mut self, f: impl FnOnce(&mut CoprocessorHost<BaseRocksEngine>)) {
+    pub fn register_observer(&mut self, f: impl FnOnce(&mut CoprocessorHost)) {
         f(&mut self.coprocessor);
     }
 
@@ -234,7 +233,7 @@ impl<RE: RaftExtension + 'static> Engine for RocksEngine<RE> {
     type Local = BaseRocksEngine;
 
     fn kv_engine(&self) -> Option<BaseRocksEngine> {
-        Some(self.engines.kv.clone())
+        Some(self.kv.clone())
     }
 
     type RaftExtension = RE;
@@ -244,7 +243,7 @@ impl<RE: RaftExtension + 'static> Engine for RocksEngine<RE> {
 
     fn modify_on_kv_engine(&self, region_modifies: HashMap<u64, Vec<Modify>>) -> Result<()> {
         let modifies = region_modifies.into_values().flatten().collect();
-        write_modifies(&self.engines.kv, modifies)
+        write_modifies(&self.kv, modifies)
     }
 
     fn precheck_write_with_ctx(&self, _ctx: &Context) -> Result<()> {
@@ -352,38 +351,38 @@ impl Snapshot for Arc<RocksSnapshot> {
 
 impl EngineIterator for RocksEngineIterator {
     fn next(&mut self) -> Result<bool> {
-        Iterator::next(self).map_err(Error::from)
+        self.next().map_err(Error::from)
     }
 
     fn prev(&mut self) -> Result<bool> {
-        Iterator::prev(self).map_err(Error::from)
+        self.prev().map_err(Error::from)
     }
 
     fn seek(&mut self, key: &Key) -> Result<bool> {
-        Iterator::seek(self, key.as_encoded()).map_err(Error::from)
+        self.seek(key.as_encoded()).map_err(Error::from)
     }
 
     fn seek_for_prev(&mut self, key: &Key) -> Result<bool> {
-        Iterator::seek_for_prev(self, key.as_encoded()).map_err(Error::from)
+        self.seek_for_prev(key.as_encoded()).map_err(Error::from)
     }
 
     fn seek_to_first(&mut self) -> Result<bool> {
-        Iterator::seek_to_first(self).map_err(Error::from)
+        self.seek_to_first().map_err(Error::from)
     }
 
     fn seek_to_last(&mut self) -> Result<bool> {
-        Iterator::seek_to_last(self).map_err(Error::from)
+        self.seek_to_last().map_err(Error::from)
     }
 
     fn valid(&self) -> Result<bool> {
-        Iterator::valid(self).map_err(Error::from)
+        self.valid().map_err(Error::from)
     }
 
     fn key(&self) -> &[u8] {
-        Iterator::key(self)
+        self.key()
     }
 
     fn value(&self) -> &[u8] {
-        Iterator::value(self)
+        self.value()
     }
 }

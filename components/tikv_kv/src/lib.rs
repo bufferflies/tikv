@@ -37,10 +37,7 @@ use std::{
 
 use collections::HashMap;
 use concurrency_manager::TrackedBackupTs;
-use engine_traits::{
-    CfName, IterOptions, KvEngine as LocalEngine, Mutable, ReadOptions, WriteBatch, CF_DEFAULT,
-    CF_LOCK,
-};
+use engine_traits::{CfName, IterOptions, ReadOptions, CF_DEFAULT, CF_LOCK};
 use error_code::{self, ErrorCode, ErrorCodeExt};
 use futures::{compat::Future01CompatExt, prelude::*};
 use into_other::IntoOther;
@@ -347,7 +344,7 @@ pub struct SnapContext<'a> {
 /// Engine defines the common behaviour for a storage engine type.
 pub trait Engine: Send + Clone + 'static {
     type Snap: Snapshot;
-    type Local: LocalEngine;
+    type Local;
 
     /// Local storage engine.
     ///
@@ -741,7 +738,7 @@ pub fn write<E: Engine>(
 }
 
 /// Write modifications into a `BaseRocksEngine` instance.
-pub fn write_modifies(kv_engine: &impl LocalEngine, modifies: Vec<Modify>) -> Result<()> {
+pub fn write_modifies(kv_engine: &engine_rocks::RocksEngine, modifies: Vec<Modify>) -> Result<()> {
     fail_point!("rockskv_write_modifies", |_| Err(box_err!("write failed")));
 
     let mut wb = kv_engine.write_batch();

@@ -1,11 +1,8 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
-use engine_traits::{
-    Error, ExternalSstFileInfo, IterOptions, Iterator, RefIterable, Result, SstCompressionType,
-    SstExt, SstMetaInfo, SstReader, SstWriter, SstWriterBuilder, CF_DEFAULT,
-};
+use engine_traits::{Error, IterOptions, Result, SstCompressionType, SstMetaInfo, CF_DEFAULT};
 use fail::fail_point;
 use kvproto::import_sstpb::SstMeta;
 use rocksdb::{
@@ -15,12 +12,6 @@ use rocksdb::{
 };
 
 use crate::{engine::RocksEngine, options::RocksReadOptions, r2e};
-
-impl SstExt for RocksEngine {
-    type SstReader = RocksSstReader;
-    type SstWriter = RocksSstWriter;
-    type SstWriterBuilder = RocksSstWriterBuilder;
-}
 
 pub struct RocksSstReader {
     inner: SstFileReader,
@@ -59,21 +50,16 @@ impl RocksSstReader {
     }
 }
 
-impl SstReader for RocksSstReader {
-    fn open(path: &str) -> Result<Self> {
-        Self::open_with_env(path, None)
-    }
-    fn verify_checksum(&self) -> Result<()> {
+impl RocksSstReader {
+    pub fn verify_checksum(&self) -> Result<()> {
         self.inner.verify_checksum().map_err(r2e)?;
         Ok(())
     }
 }
 
-impl RefIterable for RocksSstReader {
-    type Iterator<'a> = RocksSstIterator<'a>;
-
+impl RocksSstReader {
     #[inline]
-    fn iter(&self, opts: IterOptions) -> Result<Self::Iterator<'_>> {
+    pub fn iter(&self, opts: IterOptions) -> Result<RocksSstIterator<'_>> {
         let opt: RocksReadOptions = opts.into();
         let opt = opt.into_raw();
         Ok(RocksSstIterator(SstFileReader::iter_opt(&self.inner, opt)))
@@ -86,36 +72,22 @@ pub struct RocksSstIterator<'a>(DBIterator<&'a SstFileReader>);
 // TODO: remove this when using tirocks.
 unsafe impl Send for RocksSstIterator<'_> {}
 
-impl Iterator for RocksSstIterator<'_> {
-    fn seek(&mut self, key: &[u8]) -> Result<bool> {
+impl RocksSstIterator<'_> {
+    pub fn seek(&mut self, key: &[u8]) -> Result<bool> {
         self.0.seek(rocksdb::SeekKey::Key(key)).map_err(r2e)
     }
 
-    fn seek_for_prev(&mut self, key: &[u8]) -> Result<bool> {
-        self.0
-            .seek_for_prev(rocksdb::SeekKey::Key(key))
-            .map_err(r2e)
-    }
-
     /// Seek to the first key in the database.
-    fn seek_to_first(&mut self) -> Result<bool> {
+    pub fn seek_to_first(&mut self) -> Result<bool> {
         self.0.seek(rocksdb::SeekKey::Start).map_err(r2e)
     }
 
     /// Seek to the last key in the database.
-    fn seek_to_last(&mut self) -> Result<bool> {
+    pub fn seek_to_last(&mut self) -> Result<bool> {
         self.0.seek(rocksdb::SeekKey::End).map_err(r2e)
     }
 
-    fn prev(&mut self) -> Result<bool> {
-        #[cfg(not(feature = "nortcheck"))]
-        if !self.valid()? {
-            return Err(r2e("Iterator invalid"));
-        }
-        self.0.prev().map_err(r2e)
-    }
-
-    fn next(&mut self) -> Result<bool> {
+    pub fn next(&mut self) -> Result<bool> {
         #[cfg(not(feature = "nortcheck"))]
         if !self.valid()? {
             return Err(r2e("Iterator invalid"));
@@ -123,17 +95,33 @@ impl Iterator for RocksSstIterator<'_> {
         self.0.next().map_err(r2e)
     }
 
-    fn key(&self) -> &[u8] {
+    pub fn key(&self) -> &[u8] {
         self.0.key()
     }
 
-    fn value(&self) -> &[u8] {
+    pub fn value(&self) -> &[u8] {
         self.0.value()
     }
 
-    fn valid(&self) -> Result<bool> {
+    pub fn valid(&self) -> Result<bool> {
         self.0.valid().map_err(r2e)
     }
+}
+
+/// Collect all items of `it` into a vector, generally used for tests.
+///
+/// # Panics
+///
+/// If any errors occur during iterator.
+pub fn collect_sst(mut it: RocksSstIterator<'_>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut v = Vec::new();
+    let mut it_valid = it.valid().unwrap();
+    while it_valid {
+        let kv = (it.key().to_vec(), it.value().to_vec());
+        v.push(kv);
+        it_valid = it.next().unwrap();
+    }
+    v
 }
 
 pub struct RocksSstWriterBuilder {
@@ -144,8 +132,14 @@ pub struct RocksSstWriterBuilder {
     compression_level: i32,
 }
 
-impl SstWriterBuilder<RocksEngine> for RocksSstWriterBuilder {
-    fn new() -> Self {
+impl Default for RocksSstWriterBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RocksSstWriterBuilder {
+    pub fn new() -> Self {
         RocksSstWriterBuilder {
             cf: None,
             in_memory: false,
@@ -155,32 +149,32 @@ impl SstWriterBuilder<RocksEngine> for RocksSstWriterBuilder {
         }
     }
 
-    fn set_db(mut self, db: &RocksEngine) -> Self {
+    pub fn set_db(mut self, db: &RocksEngine) -> Self {
         self.db = Some(db.as_inner().clone());
         self
     }
 
-    fn set_cf(mut self, cf: &str) -> Self {
+    pub fn set_cf(mut self, cf: &str) -> Self {
         self.cf = Some(cf.to_string());
         self
     }
 
-    fn set_in_memory(mut self, in_memory: bool) -> Self {
+    pub fn set_in_memory(mut self, in_memory: bool) -> Self {
         self.in_memory = in_memory;
         self
     }
 
-    fn set_compression_type(mut self, compression: Option<SstCompressionType>) -> Self {
+    pub fn set_compression_type(mut self, compression: Option<SstCompressionType>) -> Self {
         self.compression_type = compression.map(to_rocks_compression_type);
         self
     }
 
-    fn set_compression_level(mut self, level: i32) -> Self {
+    pub fn set_compression_level(mut self, level: i32) -> Self {
         self.compression_level = level;
         self
     }
 
-    fn build(self, path: &str) -> Result<RocksSstWriter> {
+    pub fn build(self, path: &str) -> Result<RocksSstWriter> {
         let mut env = None;
         let mut io_options = if let Some(db) = self.db.as_ref() {
             env = db.env();
@@ -244,27 +238,20 @@ pub struct RocksSstWriter {
     env: Option<Arc<Env>>,
 }
 
-impl SstWriter for RocksSstWriter {
-    type ExternalSstFileInfo = RocksExternalSstFileInfo;
-    type ExternalSstFileReader = SequentialFile;
-
-    fn put(&mut self, key: &[u8], val: &[u8]) -> Result<()> {
+impl RocksSstWriter {
+    pub fn put(&mut self, key: &[u8], val: &[u8]) -> Result<()> {
         self.writer.put(key, val).map_err(r2e)
     }
 
-    fn delete(&mut self, key: &[u8]) -> Result<()> {
+    pub fn delete(&mut self, key: &[u8]) -> Result<()> {
         self.writer.delete(key).map_err(r2e)
     }
 
-    fn file_size(&mut self) -> u64 {
-        self.writer.file_size()
-    }
-
-    fn finish(mut self) -> Result<Self::ExternalSstFileInfo> {
+    pub fn finish(mut self) -> Result<RocksExternalSstFileInfo> {
         Ok(RocksExternalSstFileInfo(self.writer.finish().map_err(r2e)?))
     }
 
-    fn finish_read(mut self) -> Result<(Self::ExternalSstFileInfo, Self::ExternalSstFileReader)> {
+    pub fn finish_read(mut self) -> Result<(RocksExternalSstFileInfo, SequentialFile)> {
         let env = self
             .env
             .take()
@@ -286,33 +273,9 @@ impl SstWriter for RocksSstWriter {
 
 pub struct RocksExternalSstFileInfo(RawExternalSstFileInfo);
 
-impl ExternalSstFileInfo for RocksExternalSstFileInfo {
-    fn new() -> Self {
-        RocksExternalSstFileInfo(RawExternalSstFileInfo::new())
-    }
-
-    fn file_path(&self) -> PathBuf {
-        self.0.file_path()
-    }
-
-    fn smallest_key(&self) -> &[u8] {
-        self.0.smallest_key()
-    }
-
-    fn largest_key(&self) -> &[u8] {
-        self.0.largest_key()
-    }
-
-    fn sequence_number(&self) -> u64 {
-        self.0.sequence_number()
-    }
-
-    fn file_size(&self) -> u64 {
+impl RocksExternalSstFileInfo {
+    pub fn file_size(&self) -> u64 {
         self.0.file_size()
-    }
-
-    fn num_entries(&self) -> u64 {
-        self.0.num_entries()
     }
 }
 
@@ -354,53 +317,5 @@ pub fn from_rocks_compression_type(ct: DBCompressionType) -> Option<SstCompressi
         DBCompressionType::Snappy => Some(SstCompressionType::Snappy),
         DBCompressionType::Zstd => Some(SstCompressionType::Zstd),
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::Read;
-
-    use tempfile::Builder;
-
-    use super::*;
-    use crate::util::new_default_engine;
-
-    #[test]
-    fn test_smoke() {
-        let path = Builder::new().tempdir().unwrap();
-        let engine = new_default_engine(path.path().to_str().unwrap()).unwrap();
-        let (k, v) = (b"foo", b"bar");
-
-        let p = path.path().join("sst");
-        let mut writer = RocksSstWriterBuilder::new()
-            .set_cf(CF_DEFAULT)
-            .set_db(&engine)
-            .build(p.as_os_str().to_str().unwrap())
-            .unwrap();
-        writer.put(k, v).unwrap();
-        let sst_file = writer.finish().unwrap();
-        assert_eq!(sst_file.num_entries(), 1);
-        assert!(sst_file.file_size() > 0);
-        // There must be a file in disk.
-        std::fs::metadata(p).unwrap();
-
-        // Test in-memory sst writer.
-        let p = path.path().join("inmem.sst");
-        let mut writer = RocksSstWriterBuilder::new()
-            .set_in_memory(true)
-            .set_cf(CF_DEFAULT)
-            .set_db(&engine)
-            .build(p.as_os_str().to_str().unwrap())
-            .unwrap();
-        writer.put(k, v).unwrap();
-        let mut buf = vec![];
-        let (sst_file, mut reader) = writer.finish_read().unwrap();
-        assert_eq!(sst_file.num_entries(), 1);
-        assert!(sst_file.file_size() > 0);
-        reader.read_to_end(&mut buf).unwrap();
-        assert_eq!(buf.len() as u64, sst_file.file_size());
-        // There must not be a file in disk.
-        std::fs::metadata(p).unwrap_err();
     }
 }

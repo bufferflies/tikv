@@ -10,10 +10,8 @@ use std::{
 
 use api_version::api_v2::TIDB_RANGES_COMPLEMENT;
 use encryption::{DataKeyManager, EncrypterWriter};
-use engine_rocks::{get_env, RocksSstReader};
-use engine_traits::{
-    iter_option, EncryptionKeyManager, Iterator, KvEngine, RefIterable, SstMetaInfo, SstReader,
-};
+use engine_rocks::{get_env, RocksEngine, RocksSstReader};
+use engine_traits::{iter_option, EncryptionKeyManager, SstMetaInfo};
 use file_system::{get_io_rate_limiter, sync_dir, File, OpenOptions};
 use keys::{data_end_key, data_key};
 use kvproto::{import_sstpb::*, kvrpcpb::ApiVersion};
@@ -365,10 +363,10 @@ impl ImportDir {
         Ok(true)
     }
 
-    pub fn ingest<E: KvEngine>(
+    pub fn ingest(
         &self,
         metas: &[SstMetaInfo],
-        engine: &E,
+        engine: &RocksEngine,
         key_manager: Option<Arc<DataKeyManager>>,
         api_version: ApiVersion,
     ) -> Result<()> {

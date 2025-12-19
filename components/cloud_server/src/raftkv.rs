@@ -20,7 +20,7 @@ use std::{
 
 use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::{KvEngine, CF_DEFAULT, CF_LOCK, CF_WRITE};
+use engine_traits::{CF_DEFAULT, CF_LOCK, CF_WRITE};
 use futures::{task::AtomicWaker, Future, Stream, StreamExt};
 use kvproto::{
     errorpb,
@@ -587,7 +587,7 @@ impl ReplicaReadLockChecker {
         }
     }
 
-    pub fn register<E: KvEngine + 'static>(self, host: &mut CoprocessorHost<E>) {
+    pub fn register(self, host: &mut CoprocessorHost) {
         host.registry
             .register_read_index_observer(1, BoxReadIndexObserver::new(self));
     }

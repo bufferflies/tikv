@@ -22,7 +22,6 @@ use anyhow::anyhow;
 use api_version::{dispatch_api_version, KvFormat};
 use async_stream::try_stream;
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::PerfLevel;
 use futures::{channel::mpsc, prelude::*};
 use futures_util::future::try_join_all;
 use kvengine::{
@@ -100,9 +99,6 @@ pub struct Endpoint<E: Engine> {
     concurrency_manager: ConcurrencyManager,
 
     region_info_accessor: Option<RegionInfoAccessor>,
-
-    // Perf stats level
-    perf_level: PerfLevel,
 
     resource_tag_factory: ResourceTagFactory,
 
@@ -189,7 +185,6 @@ impl<E: Engine> Endpoint<E> {
             semaphore,
             concurrency_manager,
             region_info_accessor,
-            perf_level: cfg.end_point_perf_level,
             resource_tag_factory,
             recursion_limit: cfg.end_point_recursion_limit,
             batch_row_limit: cfg.end_point_batch_row_limit,
@@ -349,7 +344,6 @@ impl<E: Engine> Endpoint<E> {
                     Some(is_desc_scan),
                     start_ts.into(),
                     cache_match_version,
-                    self.perf_level,
                     lazy_remote_pattern,
                 );
                 with_tls_tracker(|tracker| {
@@ -429,7 +423,6 @@ impl<E: Engine> Endpoint<E> {
                     None,
                     start_ts.into(),
                     cache_match_version,
-                    self.perf_level,
                     None,
                 );
                 with_tls_tracker(|tracker| {
@@ -480,7 +473,6 @@ impl<E: Engine> Endpoint<E> {
                     None,
                     start_ts.into(),
                     cache_match_version,
-                    self.perf_level,
                     None,
                 );
                 with_tls_tracker(|tracker| {
@@ -1104,7 +1096,6 @@ impl<E: Engine> Endpoint<E> {
             None,
             req.start_ts.into(),
             None,
-            self.perf_level,
             None,
         );
         let check_mem_res = Endpoint::<E>::check_memory_locks(&self.concurrency_manager, &req_ctx);
@@ -1253,7 +1244,6 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                     Some(is_desc_scan),
                     start_ts.into(),
                     cache_match_version,
-                    PerfLevel::Uninitialized,
                     None,
                 );
                 // FIXME: Fix the `Locked` error of async commit.
@@ -1309,7 +1299,6 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 None,
                 start_ts.into(),
                 cache_match_version,
-                PerfLevel::Uninitialized,
                 None,
             );
             Box::new(
@@ -1345,8 +1334,6 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 None,
                 start_ts.into(),
                 cache_match_version,
-                // FIXME: How do we set this?
-                PerfLevel::Uninitialized,
                 None,
             );
             with_tls_tracker(|tracker| {
@@ -1949,7 +1936,6 @@ mod tests {
             None,
             TimeStamp::max(),
             None,
-            PerfLevel::EnableCount,
             None,
         );
         block_on(copr.handle_unary_request(ParseCopRequestResult {

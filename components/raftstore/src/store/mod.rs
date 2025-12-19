@@ -6,7 +6,6 @@ pub mod local_metrics;
 pub mod memory;
 pub mod metrics;
 pub mod msg;
-mod peer;
 pub mod transport;
 #[macro_use]
 pub mod util;
@@ -27,7 +26,6 @@ pub use self::{
         PeerTick, RaftCmdExtraOpts, RaftCommand, ReadCallback, ReadResponse, SignificantMsg,
         StoreMsg, StoreTick, WriteCallback, WriteResponse,
     },
-    peer::{Peer, PeerStat},
     peer_storage::{INIT_EPOCH_CONF_VER, INIT_EPOCH_VER, RAFT_INIT_LOG_INDEX, RAFT_INIT_LOG_TERM},
     region_snapshot::{RegionIterator, RegionSnapshot},
     replication_mode::{GlobalReplicationState, StoreGroup},

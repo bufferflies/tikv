@@ -12,7 +12,6 @@ use std::{
 };
 
 use collections::HashMap;
-use engine_panic::PanicEngine;
 use engine_traits::{CfName, IterOptions, ReadOptions, CF_DEFAULT, CF_LOCK, CF_WRITE};
 use futures::{future, stream, Future, Stream};
 use kvproto::kvrpcpb::Context;
@@ -77,9 +76,9 @@ impl Default for BTreeEngine {
 
 impl Engine for BTreeEngine {
     type Snap = BTreeEngineSnapshot;
-    type Local = PanicEngine;
+    type Local = BTreeEngine;
 
-    fn kv_engine(&self) -> Option<PanicEngine> {
+    fn kv_engine(&self) -> Option<BTreeEngine> {
         unimplemented!();
     }
 

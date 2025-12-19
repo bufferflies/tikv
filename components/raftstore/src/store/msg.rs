@@ -2,7 +2,6 @@
 
 use std::{borrow::Cow, fmt};
 
-use engine_traits::{CompactedEvent, KvEngine, Snapshot};
 use futures::channel::mpsc::UnboundedSender;
 use kvproto::{
     brpb::CheckAdminResponse,
@@ -29,9 +28,9 @@ use crate::store::{
 };
 
 #[derive(Debug)]
-pub struct ReadResponse<S: Snapshot> {
+pub struct ReadResponse {
     pub response: RaftCmdResponse,
-    pub snapshot: Option<RegionSnapshot<S>>,
+    pub snapshot: Option<RegionSnapshot>,
     pub txn_extra_op: TxnExtraOp,
 }
 
@@ -43,11 +42,8 @@ pub struct WriteResponse {
 // This is only necessary because of seeming limitations in derive(Clone) w/r/t
 // generics. If it can be deleted in the future in favor of derive, it should
 // be.
-impl<S> Clone for ReadResponse<S>
-where
-    S: Snapshot,
-{
-    fn clone(&self) -> ReadResponse<S> {
+impl Clone for ReadResponse {
+    fn clone(&self) -> ReadResponse {
         ReadResponse {
             response: self.response.clone(),
             snapshot: self.snapshot.clone(),
@@ -56,7 +52,7 @@ where
     }
 }
 
-pub type BoxReadCallback<S> = Box<dyn FnOnce(ReadResponse<S>) + Send>;
+pub type BoxReadCallback = Box<dyn FnOnce(ReadResponse) + Send>;
 pub type BoxWriteCallback = Box<dyn FnOnce(WriteResponse) + Send>;
 pub type ExtCallback = Box<dyn FnOnce() + Send>;
 
@@ -65,12 +61,12 @@ pub type ExtCallback = Box<dyn FnOnce() + Send>;
 ///    `GetRequest` and `SnapRequest`
 ///  - `Write`: a callback for write only requests including `AdminRequest`
 ///    `PutRequest`, `DeleteRequest` and `DeleteRangeRequest`.
-pub enum Callback<S: Snapshot> {
+pub enum Callback {
     /// No callback.
     None,
     /// Read callback.
     Read {
-        cb: BoxReadCallback<S>,
+        cb: BoxReadCallback,
 
         tracker: TrackerToken,
     },
@@ -91,13 +87,10 @@ pub enum Callback<S: Snapshot> {
     },
 }
 
-impl<S: Snapshot> HeapSize for Callback<S> {}
+impl HeapSize for Callback {}
 
-impl<S> Callback<S>
-where
-    S: Snapshot,
-{
-    pub fn read(cb: BoxReadCallback<S>) -> Self {
+impl Callback {
+    pub fn read(cb: BoxReadCallback) -> Self {
         let tracker = get_tls_tracker_token();
         Callback::Read { cb, tracker }
     }
@@ -173,7 +166,7 @@ where
         }
     }
 
-    pub fn invoke_read(self, args: ReadResponse<S>) {
+    pub fn invoke_read(self, args: ReadResponse) {
         match self {
             Callback::Read { cb, .. } => cb(args),
             other => panic!("expect Callback::read(..), got {:?}", other),
@@ -231,8 +224,8 @@ impl<C: ErrorCallback> ErrorCallback for Vec<C> {
     }
 }
 
-impl<S: Snapshot> ReadCallback for Callback<S> {
-    type Response = ReadResponse<S>;
+impl ReadCallback for Callback {
+    type Response = ReadResponse;
 
     #[inline]
     fn set_result(self, result: Self::Response) {
@@ -247,7 +240,7 @@ impl<S: Snapshot> ReadCallback for Callback<S> {
     }
 }
 
-impl<S: Snapshot> WriteCallback for Callback<S> {
+impl WriteCallback for Callback {
     type Response = RaftCmdResponse;
 
     #[inline]
@@ -321,7 +314,7 @@ where
     }
 }
 
-impl<S: Snapshot> ErrorCallback for Callback<S> {
+impl ErrorCallback for Callback {
     #[inline]
     fn report_error(self, err: RaftCmdResponse) {
         self.invoke_with_response(err);
@@ -333,10 +326,7 @@ impl<S: Snapshot> ErrorCallback for Callback<S> {
     }
 }
 
-impl<S> fmt::Debug for Callback<S>
-where
-    S: Snapshot,
-{
+impl fmt::Debug for Callback {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Callback::None => write!(fmt, "Callback::None"),
@@ -447,10 +437,7 @@ pub enum MergeResultKind {
 /// Some significant messages sent to raftstore. Raftstore will dispatch these
 /// messages to Raft groups to update some important internal status.
 #[derive(Debug)]
-pub enum SignificantMsg<SK>
-where
-    SK: Snapshot,
-{
+pub enum SignificantMsg {
     /// Reports whether the snapshot sending is successful or not.
     SnapshotStatus {
         region_id: u64,
@@ -479,9 +466,9 @@ where
     CaptureChange {
         cmd: ChangeObserver,
         region_epoch: RegionEpoch,
-        callback: Callback<SK>,
+        callback: Callback,
     },
-    LeaderCallback(Callback<SK>),
+    LeaderCallback(Callback),
     RaftLogGcFlushed,
     ExitForceLeaderState,
     CheckPendingAdmin(UnboundedSender<CheckAdminResponse>),
@@ -490,14 +477,14 @@ where
 /// Message that will be sent to a peer.
 ///
 /// These messages are not significant and can be dropped occasionally.
-pub enum CasualMessage<EK: KvEngine> {
+pub enum CasualMessage {
     /// Split the target region into several partitions.
     SplitRegion {
         region_epoch: RegionEpoch,
         // It's an encoded key.
         // TODO: support meta key.
         split_keys: Vec<Vec<u8>>,
-        callback: Callback<EK::Snapshot>,
+        callback: Callback,
         source: Cow<'static, str>,
     },
 
@@ -530,7 +517,7 @@ pub enum CasualMessage<EK: KvEngine> {
         end_key: Option<Vec<u8>>,
         policy: CheckPolicy,
         source: &'static str,
-        cb: Callback<EK::Snapshot>,
+        cb: Callback,
     },
     /// Remove snapshot files in `snaps`.
     GcSnap {
@@ -568,7 +555,7 @@ pub enum CasualMessage<EK: KvEngine> {
     Campaign,
 }
 
-impl<EK: KvEngine> fmt::Debug for CasualMessage<EK> {
+impl fmt::Debug for CasualMessage {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CasualMessage::ComputeHashResult {
@@ -637,16 +624,16 @@ pub struct RaftCmdExtraOpts {
 /// Raft command is the command that is expected to be proposed by the
 /// leader of the target raft group.
 #[derive(Debug)]
-pub struct RaftCommand<S: Snapshot> {
+pub struct RaftCommand {
     pub send_time: Instant,
     pub request: RaftCmdRequest,
-    pub callback: Callback<S>,
+    pub callback: Callback,
     pub extra_opts: RaftCmdExtraOpts,
 }
 
-impl<S: Snapshot> RaftCommand<S> {
+impl RaftCommand {
     #[inline]
-    pub fn new(request: RaftCmdRequest, callback: Callback<S>) -> RaftCommand<S> {
+    pub fn new(request: RaftCmdRequest, callback: Callback) -> RaftCommand {
         RaftCommand {
             request,
             callback,
@@ -657,9 +644,9 @@ impl<S: Snapshot> RaftCommand<S> {
 
     pub fn new_ext(
         request: RaftCmdRequest,
-        callback: Callback<S>,
+        callback: Callback,
         extra_opts: RaftCmdExtraOpts,
-    ) -> RaftCommand<S> {
+    ) -> RaftCommand {
         RaftCommand {
             request,
             callback,
@@ -679,7 +666,7 @@ pub struct InspectedRaftMessage {
 
 /// Message that can be sent to a peer.
 #[allow(clippy::large_enum_variant)]
-pub enum PeerMsg<EK: KvEngine> {
+pub enum PeerMsg {
     /// Raft message is the message sent between raft nodes in the same
     /// raft group. Messages need to be redirected to raftstore if target
     /// peer doesn't exist.
@@ -687,14 +674,14 @@ pub enum PeerMsg<EK: KvEngine> {
     /// Raft command is the command that is expected to be proposed by the
     /// leader of the target raft group. If it's failed to be sent, callback
     /// usually needs to be called before dropping in case of resource leak.
-    RaftCommand(RaftCommand<EK::Snapshot>),
+    RaftCommand(RaftCommand),
     /// Tick is periodical task. If target peer doesn't exist there is a
     /// potential that the raft node will not work anymore.
     Tick(PeerTick),
     /// Message that can't be lost but rarely created. If they are lost, real
     /// bad things happen like some peers will be considered dead in the
     /// group.
-    SignificantMsg(SignificantMsg<EK::Snapshot>),
+    SignificantMsg(SignificantMsg),
     /// Start the FSM.
     Start,
     /// A message only used to notify a peer.
@@ -704,7 +691,7 @@ pub enum PeerMsg<EK: KvEngine> {
         ready_number: u64,
     },
     /// Message that is not important and can be dropped occasionally.
-    CasualMessage(CasualMessage<EK>),
+    CasualMessage(CasualMessage),
     /// Ask region to report a heartbeat to PD.
     HeartbeatPd,
     /// Asks region to change replication mode.
@@ -712,7 +699,7 @@ pub enum PeerMsg<EK: KvEngine> {
     Destroy(u64),
 }
 
-impl<EK: KvEngine> fmt::Debug for PeerMsg<EK> {
+impl fmt::Debug for PeerMsg {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PeerMsg::RaftMessage(_) => write!(fmt, "Raft Message"),
@@ -741,7 +728,7 @@ impl<EK: KvEngine> fmt::Debug for PeerMsg<EK> {
     }
 }
 
-impl<EK: KvEngine> PeerMsg<EK> {
+impl PeerMsg {
     /// For some specific kind of messages, it's actually acceptable if failed
     /// to send it by `significant_send`. This function determine if the
     /// current message is acceptable to fail.
@@ -753,10 +740,7 @@ impl<EK: KvEngine> PeerMsg<EK> {
     }
 }
 
-pub enum StoreMsg<EK>
-where
-    EK: KvEngine,
-{
+pub enum StoreMsg {
     RaftMessage(InspectedRaftMessage),
 
     ValidateSstResult {
@@ -772,9 +756,6 @@ where
     StoreUnreachable {
         store_id: u64,
     },
-
-    // Compaction finished event
-    CompactedEvent(EK::CompactedEvent),
     Tick(StoreTick),
     Start {
         store: metapb::Store,
@@ -802,17 +783,13 @@ where
     },
 }
 
-impl<EK> fmt::Debug for StoreMsg<EK>
-where
-    EK: KvEngine,
-{
+impl fmt::Debug for StoreMsg {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             StoreMsg::RaftMessage(_) => write!(fmt, "Raft Message"),
             StoreMsg::StoreUnreachable { store_id } => {
                 write!(fmt, "Store {}  is unreachable", store_id)
             }
-            StoreMsg::CompactedEvent(ref event) => write!(fmt, "CompactedEvent cf {}", event.cf()),
             StoreMsg::ValidateSstResult { .. } => write!(fmt, "Validate SST Result"),
             StoreMsg::ClearRegionSizeInRange {
                 ref start_key,

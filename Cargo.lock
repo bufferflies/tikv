@@ -2448,19 +2448,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine_panic"
-version = "0.0.1"
-dependencies = [
- "engine_traits",
- "kvproto",
- "raft",
- "tikv_alloc",
- "tikv_util",
- "tracker",
- "txn_types",
-]
-
-[[package]]
 name = "engine_rocks"
 version = "0.0.1"
 dependencies = [
@@ -2500,21 +2487,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "engine_test"
-version = "0.0.1"
-dependencies = [
- "collections",
- "encryption",
- "engine_panic",
- "engine_rocks",
- "engine_traits",
- "file_system",
- "tempfile",
- "tikv_alloc",
- "tikv_util",
-]
-
-[[package]]
 name = "engine_traits"
 version = "0.0.1"
 dependencies = [
@@ -2538,17 +2510,6 @@ dependencies = [
  "toml",
  "tracker",
  "txn_types",
-]
-
-[[package]]
-name = "engine_traits_tests"
-version = "0.0.1"
-dependencies = [
- "engine_test",
- "engine_traits",
- "panic_hook",
- "tempfile",
- "tikv_alloc",
 ]
 
 [[package]]
@@ -4150,8 +4111,6 @@ dependencies = [
  "crossbeam-queue",
  "dashmap 4.0.2",
  "dyn-clone",
- "engine_panic",
- "engine_rocks",
  "engine_traits",
  "fail 0.5.0",
  "farmhash",
@@ -6398,9 +6357,7 @@ dependencies = [
  "derivative",
  "encryption",
  "encryption_export",
- "engine_panic",
  "engine_rocks",
- "engine_test",
  "engine_traits",
  "error_code",
  "fail 0.5.0",
@@ -8889,7 +8846,6 @@ dependencies = [
  "crossbeam",
  "encryption_export",
  "engine_rocks",
- "engine_test",
  "engine_traits",
  "fail 0.5.0",
  "file_system",
@@ -8998,7 +8954,6 @@ dependencies = [
  "dashmap 4.0.2",
  "encryption",
  "engine_rocks",
- "engine_test",
  "engine_traits",
  "error_code",
  "external_storage_export",
@@ -9332,11 +9287,8 @@ dependencies = [
  "crossbeam",
  "dashmap 5.1.0",
  "encryption_export",
- "engine_panic",
  "engine_rocks",
- "engine_test",
  "engine_traits",
- "engine_traits_tests",
  "error_code",
  "fail 0.5.0",
  "farmhash",
@@ -9561,9 +9513,7 @@ dependencies = [
  "backtrace",
  "collections",
  "concurrency_manager",
- "engine_panic",
  "engine_rocks",
- "engine_test",
  "engine_traits",
  "error_code",
  "fail 0.5.0",

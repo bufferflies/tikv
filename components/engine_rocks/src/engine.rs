@@ -1,15 +1,13 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
-use engine_traits::{
-    IterOptions, Iterable, KvEngine, Peekable, ReadOptions, Result, SyncMutable, TabletAccessor,
-};
+use engine_traits::{iter_option, IterOptions, Peekable, ReadOptions, Result};
 use rocksdb::{DBIterator, Writable, DB};
 
 use crate::{
     db_vector::RocksDbVector, options::RocksReadOptions, r2e, util::get_cf_handle,
-    RocksEngineIterator, RocksSnapshot,
+    RocksEngineIterator, RocksSnapshot, RocksWriteBatchVec,
 };
 
 #[derive(Clone, Debug)]
@@ -18,6 +16,8 @@ pub struct RocksEngine {
     shared_block_cache: bool,
     support_multi_batch_write: bool,
 }
+
+pub(crate) const WRITE_BATCH_MAX_KEY_NUM: usize = 16;
 
 impl RocksEngine {
     pub(crate) fn new(db: DB) -> RocksEngine {
@@ -30,6 +30,23 @@ impl RocksEngine {
             shared_block_cache: false,
             support_multi_batch_write: db.get_db_options().is_enable_multi_batch_write(),
         }
+    }
+
+    pub fn snapshot(&self) -> RocksSnapshot {
+        RocksSnapshot::new(self.db.clone())
+    }
+
+    pub fn sync(&self) -> Result<()> {
+        self.db.sync_wal().map_err(r2e)
+    }
+
+    pub fn write_batch(&self) -> RocksWriteBatchVec {
+        RocksWriteBatchVec::new(
+            Arc::clone(self.as_inner()),
+            WRITE_BATCH_MAX_KEY_NUM,
+            1,
+            self.support_multi_batch_write(),
+        )
     }
 
     pub fn as_inner(&self) -> &Arc<DB> {
@@ -53,37 +70,12 @@ impl RocksEngine {
     }
 }
 
-impl KvEngine for RocksEngine {
-    type Snapshot = RocksSnapshot;
-
-    fn snapshot(&self) -> RocksSnapshot {
-        RocksSnapshot::new(self.db.clone())
+impl RocksEngine {
+    pub fn iterator(&self, cf: &str) -> Result<RocksEngineIterator> {
+        self.iterator_opt(cf, IterOptions::default())
     }
 
-    fn sync(&self) -> Result<()> {
-        self.db.sync_wal().map_err(r2e)
-    }
-
-    fn bad_downcast<T: 'static>(&self) -> &T {
-        let e: &dyn Any = &self.db;
-        e.downcast_ref().expect("bad engine downcast")
-    }
-}
-
-impl TabletAccessor<RocksEngine> for RocksEngine {
-    fn for_each_opened_tablet(&self, f: &mut dyn FnMut(u64, u64, &RocksEngine)) {
-        f(0, 0, self);
-    }
-
-    fn is_single_engine(&self) -> bool {
-        true
-    }
-}
-
-impl Iterable for RocksEngine {
-    type Iterator = RocksEngineIterator;
-
-    fn iterator_opt(&self, cf: &str, opts: IterOptions) -> Result<Self::Iterator> {
+    fn iterator_opt(&self, cf: &str, opts: IterOptions) -> Result<RocksEngineIterator> {
         let handle = get_cf_handle(&self.db, cf)?;
         let opt: RocksReadOptions = opts.into();
         Ok(RocksEngineIterator::from_raw(DBIterator::new_cf(
@@ -91,6 +83,26 @@ impl Iterable for RocksEngine {
             handle,
             opt.into_raw(),
         )))
+    }
+
+    pub fn scan<F>(
+        &self,
+        cf: &str,
+        start_key: &[u8],
+        end_key: &[u8],
+        fill_cache: bool,
+        mut f: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<bool>,
+    {
+        let iter_opt = iter_option(start_key, end_key, fill_cache);
+        let mut it = self.iterator_opt(cf, iter_opt)?;
+        let mut remained = it.seek(start_key)?;
+        while remained {
+            remained = f(it.key(), it.value())? && it.next()?;
+        }
+        Ok(())
     }
 }
 
@@ -119,44 +131,41 @@ impl Peekable for RocksEngine {
     }
 }
 
-impl SyncMutable for RocksEngine {
-    fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+impl RocksEngine {
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         self.db.put(key, value).map_err(r2e)
     }
 
-    fn put_cf(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn put_cf(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
         let handle = get_cf_handle(&self.db, cf)?;
         self.db.put_cf(handle, key, value).map_err(r2e)
     }
 
-    fn delete(&self, key: &[u8]) -> Result<()> {
+    pub fn put_msg<M: protobuf::Message>(&self, key: &[u8], m: &M) -> Result<()> {
+        self.put(key, &m.write_to_bytes()?)
+    }
+
+    pub fn put_msg_cf<M: protobuf::Message>(&self, cf: &str, key: &[u8], m: &M) -> Result<()> {
+        self.put_cf(cf, key, &m.write_to_bytes()?)
+    }
+
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
         self.db.delete(key).map_err(r2e)
     }
 
-    fn delete_cf(&self, cf: &str, key: &[u8]) -> Result<()> {
+    pub fn delete_cf(&self, cf: &str, key: &[u8]) -> Result<()> {
         let handle = get_cf_handle(&self.db, cf)?;
         self.db.delete_cf(handle, key).map_err(r2e)
-    }
-
-    fn delete_range(&self, begin_key: &[u8], end_key: &[u8]) -> Result<()> {
-        self.db.delete_range(begin_key, end_key).map_err(r2e)
-    }
-
-    fn delete_range_cf(&self, cf: &str, begin_key: &[u8], end_key: &[u8]) -> Result<()> {
-        let handle = get_cf_handle(&self.db, cf)?;
-        self.db
-            .delete_range_cf(handle, begin_key, end_key)
-            .map_err(r2e)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use engine_traits::{Iterable, KvEngine, Peekable, SyncMutable, CF_DEFAULT};
+    use engine_traits::{Peekable, CF_DEFAULT};
     use kvproto::metapb::Region;
     use tempfile::Builder;
 
-    use crate::{util, RocksSnapshot};
+    use crate::util;
 
     #[test]
     fn test_base() {
@@ -205,85 +214,5 @@ mod tests {
         assert_eq!(&*engine.get_value(b"k1").unwrap().unwrap(), b"v1");
         engine.get_value_cf("foo", b"k1").unwrap_err();
         assert_eq!(&*engine.get_value_cf(cf, b"k1").unwrap().unwrap(), b"v2");
-    }
-
-    #[test]
-    fn test_scan() {
-        let path = Builder::new().prefix("var").tempdir().unwrap();
-        let cf = "cf";
-        let engine = util::new_engine(path.path().to_str().unwrap(), &[CF_DEFAULT, cf]).unwrap();
-
-        engine.put(b"a1", b"v1").unwrap();
-        engine.put(b"a2", b"v2").unwrap();
-        engine.put_cf(cf, b"a1", b"v1").unwrap();
-        engine.put_cf(cf, b"a2", b"v22").unwrap();
-
-        let mut data = vec![];
-        engine
-            .scan(CF_DEFAULT, b"", &[0xFF, 0xFF], false, |key, value| {
-                data.push((key.to_vec(), value.to_vec()));
-                Ok(true)
-            })
-            .unwrap();
-        assert_eq!(
-            data,
-            vec![
-                (b"a1".to_vec(), b"v1".to_vec()),
-                (b"a2".to_vec(), b"v2".to_vec()),
-            ]
-        );
-        data.clear();
-
-        engine
-            .scan(cf, b"", &[0xFF, 0xFF], false, |key, value| {
-                data.push((key.to_vec(), value.to_vec()));
-                Ok(true)
-            })
-            .unwrap();
-        assert_eq!(
-            data,
-            vec![
-                (b"a1".to_vec(), b"v1".to_vec()),
-                (b"a2".to_vec(), b"v22".to_vec()),
-            ]
-        );
-        data.clear();
-
-        let pair = engine.seek(CF_DEFAULT, b"a1").unwrap().unwrap();
-        assert_eq!(pair, (b"a1".to_vec(), b"v1".to_vec()));
-        assert!(engine.seek(CF_DEFAULT, b"a3").unwrap().is_none());
-        let pair_cf = engine.seek(cf, b"a1").unwrap().unwrap();
-        assert_eq!(pair_cf, (b"a1".to_vec(), b"v1".to_vec()));
-        assert!(engine.seek(cf, b"a3").unwrap().is_none());
-
-        let mut index = 0;
-        engine
-            .scan(CF_DEFAULT, b"", &[0xFF, 0xFF], false, |key, value| {
-                data.push((key.to_vec(), value.to_vec()));
-                index += 1;
-                Ok(index != 1)
-            })
-            .unwrap();
-
-        assert_eq!(data.len(), 1);
-
-        let snap = RocksSnapshot::new(engine.get_sync_db());
-
-        engine.put(b"a3", b"v3").unwrap();
-        assert!(engine.seek(CF_DEFAULT, b"a3").unwrap().is_some());
-
-        let pair = snap.seek(CF_DEFAULT, b"a1").unwrap().unwrap();
-        assert_eq!(pair, (b"a1".to_vec(), b"v1".to_vec()));
-        assert!(snap.seek(CF_DEFAULT, b"a3").unwrap().is_none());
-
-        data.clear();
-
-        snap.scan(CF_DEFAULT, b"", &[0xFF, 0xFF], false, |key, value| {
-            data.push((key.to_vec(), value.to_vec()));
-            Ok(true)
-        })
-        .unwrap();
-
-        assert_eq!(data.len(), 2);
     }
 }

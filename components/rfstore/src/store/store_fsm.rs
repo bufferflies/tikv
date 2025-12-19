@@ -66,7 +66,7 @@ struct Workers {
     pd_worker: LazyWorker<PdTask>,
     gc_worker: LazyWorker<GcTask>,
     schema_worker: LazyWorker<SchemaTask>,
-    coprocessor_host: CoprocessorHost<kvengine::Engine>,
+    coprocessor_host: CoprocessorHost,
 }
 
 pub struct RaftBatchSystem {
@@ -111,7 +111,7 @@ impl RaftBatchSystem {
         pd_client: Arc<dyn PdClient>,
         pd_worker: LazyWorker<PdTask>,
         mut store_meta: StoreMeta,
-        mut coprocessor_host: CoprocessorHost<kvengine::Engine>,
+        mut coprocessor_host: CoprocessorHost,
         importer: Arc<SstImporter>,
         concurrency_manager: ConcurrencyManager,
         mut resource_controller: ResourceController,
@@ -373,7 +373,7 @@ pub struct StoreMeta {
 
     pub region_map: RegionMap,
 
-    pub cop_host: Option<CoprocessorHost<kvengine::Engine>>,
+    pub cop_host: Option<CoprocessorHost>,
     /// region_id -> reader
     pub readers: Arc<papaya::HashMap<u64, Arc<ReadDelegate>>>,
     /// `MsgRequestPreVote`, `MsgRequestVote` or `MsgAppend` messages from newly
@@ -589,7 +589,7 @@ pub(crate) struct GlobalContext {
     pub(crate) pd_scheduler: Scheduler<PdTask>,
     pub(crate) gc_scheduler: Scheduler<GcTask>,
     pub(crate) schema_scheduler: Scheduler<SchemaTask>,
-    pub(crate) coprocessor_host: CoprocessorHost<kvengine::Engine>,
+    pub(crate) coprocessor_host: CoprocessorHost,
     pub(crate) importer: Arc<SstImporter>,
     /// Saves destroying regions in one loop. It's used to solve the race
     /// between peer gc and split, i.e., split won't create a destroying

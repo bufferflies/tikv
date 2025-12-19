@@ -31,7 +31,6 @@ pub use metrics::{
 };
 pub mod peers;
 pub mod service_worker;
-pub mod traits;
 pub mod utils;
 mod write_batch;
 pub mod writer;
@@ -46,7 +45,6 @@ pub use log_batch::RaftLogOp;
 use metrics::*;
 use thiserror::Error as ThisError;
 use tikv_util::errors::IoError;
-pub use traits::*;
 pub use utils::*;
 pub use write_batch::WriteBatch;
 pub use writer::*;

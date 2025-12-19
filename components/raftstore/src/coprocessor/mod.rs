@@ -491,14 +491,9 @@ impl CmdBatch {
     }
 }
 
-pub trait CmdObserver<E>: Coprocessor {
+pub trait CmdObserver: Coprocessor {
     /// Hook to call after flushing writes to db.
-    fn on_flush_applied_cmd_batch(
-        &self,
-        max_level: ObserveLevel,
-        cmd_batches: &mut Vec<CmdBatch>,
-        engine: &E,
-    );
+    fn on_flush_applied_cmd_batch(&self, max_level: ObserveLevel, cmd_batches: &mut Vec<CmdBatch>);
     // TODO: maybe should move `on_applied_current_term` to a separated
     // `Coprocessor`
     /// Hook to call at the first time the leader applied on its term

@@ -785,7 +785,7 @@ impl Peer {
     /// has been preserved in a durable device.
     pub fn set_region(
         &mut self,
-        host: &coprocessor::CoprocessorHost<kvengine::Engine>,
+        host: &coprocessor::CoprocessorHost,
         region: metapb::Region,
         reason: RegionChangeReason,
     ) {

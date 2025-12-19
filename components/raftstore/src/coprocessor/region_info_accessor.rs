@@ -7,7 +7,6 @@ use std::{
     time::Duration,
 };
 
-use engine_traits::KvEngine;
 use itertools::Itertools;
 use kvproto::metapb::Region;
 use papaya::HashMap;
@@ -206,7 +205,7 @@ impl RoleObserver for RegionEventListener {
 
 /// Creates an `RegionEventListener` and register it to given coprocessor host.
 fn register_region_event_listener(
-    host: &mut CoprocessorHost<impl KvEngine>,
+    host: &mut CoprocessorHost,
     scheduler: Scheduler<RegionInfoQuery>,
 ) {
     let listener = RegionEventListener { scheduler };
@@ -719,7 +718,7 @@ impl RegionInfoAccessor {
     /// `RegionInfoAccessor` doesn't need, and should not be created more than
     /// once. If it's needed in different places, just clone it, and their
     /// contents are shared.
-    pub fn new(host: &mut CoprocessorHost<impl KvEngine>) -> Self {
+    pub fn new(host: &mut CoprocessorHost) -> Self {
         let worker = WorkerBuilder::new("region-collector-worker").create();
         let collector = RegionCollector::default();
         let scheduler = worker.start_with_timer("region-collector-worker", collector.clone());

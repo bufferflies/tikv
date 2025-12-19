@@ -29,10 +29,7 @@ use sst_importer::{
     error_inc, metrics::*, sst_importer::DownloadExt, sst_meta_to_path, Config, Error, Result,
     SstImporter,
 };
-use tikv::{
-    import::{duplicate_detect::DuplicateDetector, make_rpc_error},
-    server::CONFIG_ROCKSDB_GAUGE,
-};
+use tikv::import::{duplicate_detect::DuplicateDetector, make_rpc_error};
 use tikv_util::{
     config::ReadableSize,
     future::{create_stream_with_buffer, paired_future_callback},
@@ -48,7 +45,6 @@ use tokio::{runtime::Runtime, time::sleep};
 #[derive(Clone)]
 pub struct ImportSstService<Router> {
     cfg: Config,
-    engine: kvengine::Engine,
     router: Router,
     threads: tokio::runtime::Handle,
     importer: Arc<SstImporter>,
@@ -71,7 +67,6 @@ where
         cfg: Config,
         raft_entry_max_size: ReadableSize,
         router: Router,
-        engine: kvengine::Engine,
         importer: Arc<SstImporter>,
     ) -> (ImportSstService<Router>, Runtime) {
         let props = tikv_util::thread_group::current_properties();
@@ -87,12 +82,11 @@ where
             .before_stop_wrapper(move || tikv_alloc::remove_thread_memory_accessor())
             .build()
             .unwrap();
-        importer.start_switch_mode_check(threads.handle(), engine.clone());
+        importer.start_switch_mode_check(threads.handle());
         threads.spawn(Self::tick(importer.clone()));
         (
             ImportSstService {
                 cfg,
-                engine,
                 threads: threads.handle().clone(),
                 router,
                 importer,
@@ -239,7 +233,6 @@ macro_rules! impl_write {
             sink: ClientStreamingSink<$resp_ty>,
         ) {
             let import = self.importer.clone();
-            let engine = self.engine.clone();
             let (rx, buf_driver) =
                 create_stream_with_buffer(stream, self.cfg.stream_channel_window);
             let mut rx = rx.map_err(Error::from);
@@ -257,7 +250,7 @@ macro_rules! impl_write {
                         _ => return Err(Error::InvalidChunk),
                     };
 
-                    let writer = match import.$writer_fn(&engine, meta) {
+                    let writer = match import.$writer_fn(meta) {
                         Ok(w) => w,
                         Err(e) => {
                             error!("build writer failed {:?}", e);
@@ -305,13 +298,9 @@ where
         let timer = Instant::now_coarse();
 
         let res = {
-            fn mf(cf: &str, name: &str, v: f64) {
-                CONFIG_ROCKSDB_GAUGE.with_label_values(&[cf, name]).set(v);
-            }
-
             match req.get_mode() {
-                SwitchMode::Normal => self.importer.enter_normal_mode(self.engine.clone(), mf),
-                SwitchMode::Import => self.importer.enter_import_mode(self.engine.clone(), mf),
+                SwitchMode::Normal => self.importer.enter_normal_mode(),
+                SwitchMode::Import => self.importer.enter_import_mode(),
             }
         };
         match res {
@@ -427,7 +416,6 @@ where
         let timer = Instant::now_coarse();
         let importer = Arc::clone(&self.importer);
         let limiter = self.limiter.clone();
-        let engine = self.engine.clone();
         let start = Instant::now();
 
         let handle_task = async move {
@@ -446,7 +434,7 @@ where
                 .into_option()
                 .filter(|c| c.cipher_type != EncryptionMethod::Plaintext);
 
-            let res = importer.download_ext::<kvengine::Engine>(
+            let res = importer.download_ext(
                 req.get_request_type(),
                 req.get_sst(),
                 req.get_storage_backend(),
@@ -454,7 +442,6 @@ where
                 req.get_rewrite_rule(),
                 cipher,
                 limiter,
-                engine,
                 DownloadExt::default(),
             );
             let mut resp = DownloadResponse::default();

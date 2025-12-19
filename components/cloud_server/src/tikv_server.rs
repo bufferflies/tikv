@@ -79,7 +79,6 @@ use tikv::{
     },
     tikv_build_version,
 };
-use tikv_kv::Engine;
 use tikv_util::{
     check_environment_variables,
     config::{ensure_dir_exist, ReadableDuration, ReadableSize, VersionTrack},
@@ -130,7 +129,7 @@ pub struct TikvServer {
     raft_kv: Option<RaftKv>,
     servers: Option<Servers>,
     region_info_accessor: RegionInfoAccessor,
-    coprocessor_host: Option<CoprocessorHost<kvengine::Engine>>,
+    coprocessor_host: Option<CoprocessorHost>,
     to_stop: Vec<Box<dyn Stop>>,
     lock_files: Vec<File>,
     concurrency_manager: ConcurrencyManager,
@@ -819,7 +818,6 @@ impl TikvServer {
             self.config.import.clone(),
             self.config.raft_store.raft_entry_max_size,
             self.router.clone(),
-            raft_kv.kv_engine().unwrap(),
             servers.importer.clone(),
         );
         if servers
@@ -855,7 +853,7 @@ impl TikvServer {
         // Backup service.
         let mut backup_worker = Box::new(self.background_worker.lazy_build("backup-endpoint"));
         let backup_scheduler = backup_worker.scheduler();
-        let backup_service = backup::Service::<kvengine::Engine>::new(backup_scheduler);
+        let backup_service = backup::Service::new(backup_scheduler);
         if servers
             .server
             .register_service(create_backup(backup_service))
@@ -868,7 +866,6 @@ impl TikvServer {
             servers.node.id(),
             raft_kv.clone(),
             self.region_info_accessor.clone(),
-            raft_kv.kv_engine().unwrap(),
             self.config.backup.clone(),
             self.concurrency_manager.clone(),
             self.config.storage.api_version(),

@@ -17,26 +17,26 @@ impl RocksEngineIterator {
     }
 }
 
-impl engine_traits::Iterator for RocksEngineIterator {
-    fn seek(&mut self, key: &[u8]) -> Result<bool> {
+impl RocksEngineIterator {
+    pub fn seek(&mut self, key: &[u8]) -> Result<bool> {
         self.0.seek(rocksdb::SeekKey::Key(key)).map_err(r2e)
     }
 
-    fn seek_for_prev(&mut self, key: &[u8]) -> Result<bool> {
+    pub fn seek_for_prev(&mut self, key: &[u8]) -> Result<bool> {
         self.0
             .seek_for_prev(rocksdb::SeekKey::Key(key))
             .map_err(r2e)
     }
 
-    fn seek_to_first(&mut self) -> Result<bool> {
+    pub fn seek_to_first(&mut self) -> Result<bool> {
         self.0.seek(rocksdb::SeekKey::Start).map_err(r2e)
     }
 
-    fn seek_to_last(&mut self) -> Result<bool> {
+    pub fn seek_to_last(&mut self) -> Result<bool> {
         self.0.seek(rocksdb::SeekKey::End).map_err(r2e)
     }
 
-    fn prev(&mut self) -> Result<bool> {
+    pub fn prev(&mut self) -> Result<bool> {
         #[cfg(not(feature = "nortcheck"))]
         if !self.valid()? {
             return Err(r2e("Iterator invalid"));
@@ -44,7 +44,7 @@ impl engine_traits::Iterator for RocksEngineIterator {
         self.0.prev().map_err(r2e)
     }
 
-    fn next(&mut self) -> Result<bool> {
+    pub fn next(&mut self) -> Result<bool> {
         #[cfg(not(feature = "nortcheck"))]
         if !self.valid()? {
             return Err(r2e("Iterator invalid"));
@@ -52,19 +52,35 @@ impl engine_traits::Iterator for RocksEngineIterator {
         self.0.next().map_err(r2e)
     }
 
-    fn key(&self) -> &[u8] {
+    pub fn key(&self) -> &[u8] {
         #[cfg(not(feature = "nortcheck"))]
         assert!(self.valid().unwrap());
         self.0.key()
     }
 
-    fn value(&self) -> &[u8] {
+    pub fn value(&self) -> &[u8] {
         #[cfg(not(feature = "nortcheck"))]
         assert!(self.valid().unwrap());
         self.0.value()
     }
 
-    fn valid(&self) -> Result<bool> {
+    pub fn valid(&self) -> Result<bool> {
         self.0.valid().map_err(r2e)
     }
+}
+
+/// Collect all items of `it` into a vector, generally used for tests.
+///
+/// # Panics
+///
+/// If any errors occur during iterator.
+pub fn collect_db(mut it: RocksEngineIterator) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut v = Vec::new();
+    let mut it_valid = it.valid().unwrap();
+    while it_valid {
+        let kv = (it.key().to_vec(), it.value().to_vec());
+        v.push(kv);
+        it_valid = it.next().unwrap();
+    }
+    v
 }

@@ -9,9 +9,10 @@ use std::{
     },
 };
 
+use engine_rocks::{RocksDbVector, RocksEngine, RocksEngineIterator, RocksSnapshot};
 use engine_traits::{
-    util::check_key_in_range, Error as EngineError, IterOptions, Iterable, Iterator, KvEngine,
-    Peekable, ReadOptions, Result as EngineResult, Snapshot, CF_RAFT,
+    util::check_key_in_range, Error as EngineError, IterOptions, Peekable, ReadOptions,
+    Result as EngineResult, CF_RAFT,
 };
 use fail::fail_point;
 use keys::DATA_PREFIX_KEY;
@@ -31,8 +32,8 @@ use crate::{
 ///
 /// Only data within a region can be accessed.
 #[derive(Debug)]
-pub struct RegionSnapshot<S: Snapshot> {
-    snap: Arc<S>,
+pub struct RegionSnapshot {
+    snap: Arc<RocksSnapshot>,
     region: Arc<Region>,
     apply_index: Arc<AtomicU64>,
     pub term: Option<NonZeroU64>,
@@ -42,18 +43,12 @@ pub struct RegionSnapshot<S: Snapshot> {
     pub bucket_meta: Option<Arc<BucketMeta>>,
 }
 
-impl<S> RegionSnapshot<S>
-where
-    S: Snapshot,
-{
-    pub fn from_raw<EK>(db: EK, region: Region) -> RegionSnapshot<EK::Snapshot>
-    where
-        EK: KvEngine,
-    {
+impl RegionSnapshot {
+    pub fn from_raw(db: RocksEngine, region: Region) -> RegionSnapshot {
         RegionSnapshot::from_snapshot(Arc::new(db.snapshot()), Arc::new(region))
     }
 
-    pub fn from_snapshot(snap: Arc<S>, region: Arc<Region>) -> RegionSnapshot<S> {
+    pub fn from_snapshot(snap: Arc<RocksSnapshot>, region: Arc<Region>) -> RegionSnapshot {
         RegionSnapshot {
             snap,
             region,
@@ -73,7 +68,7 @@ where
     }
 
     #[inline]
-    pub fn get_snapshot(&self) -> &S {
+    pub fn get_snapshot(&self) -> &RocksSnapshot {
         self.snap.as_ref()
     }
 
@@ -101,7 +96,7 @@ where
         }
     }
 
-    pub fn iter(&self, cf: &str, iter_opt: IterOptions) -> Result<RegionIterator<S>> {
+    pub fn iter(&self, cf: &str, iter_opt: IterOptions) -> Result<RegionIterator> {
         Ok(RegionIterator::new(
             &self.snap,
             Arc::clone(&self.region),
@@ -146,10 +141,7 @@ where
     }
 }
 
-impl<S> Clone for RegionSnapshot<S>
-where
-    S: Snapshot,
-{
+impl Clone for RegionSnapshot {
     fn clone(&self) -> Self {
         RegionSnapshot {
             snap: self.snap.clone(),
@@ -163,11 +155,8 @@ where
     }
 }
 
-impl<S> Peekable for RegionSnapshot<S>
-where
-    S: Snapshot,
-{
-    type DbVector = <S as Peekable>::DbVector;
+impl Peekable for RegionSnapshot {
+    type DbVector = RocksDbVector;
 
     fn get_value_opt(
         &self,
@@ -207,10 +196,7 @@ where
     }
 }
 
-impl<S> RegionSnapshot<S>
-where
-    S: Snapshot,
-{
+impl RegionSnapshot {
     #[inline(never)]
     fn handle_get_value_error(&self, e: EngineError, cf: &str, key: &[u8]) -> EngineError {
         CRITICAL_ERROR.with_label_values(&["rocksdb get"]).inc();
@@ -238,8 +224,8 @@ where
 /// `RegionIterator` wrap a rocksdb iterator and only allow it to
 /// iterate in the region. It behaves as if underlying
 /// db only contains one region.
-pub struct RegionIterator<S: Snapshot> {
-    iter: <S as Iterable>::Iterator,
+pub struct RegionIterator {
+    iter: RocksEngineIterator,
     region: Arc<Region>,
 }
 
@@ -268,16 +254,13 @@ fn update_upper_bound(iter_opt: &mut IterOptions, region: &Region) {
 }
 
 // we use engine::rocks's style iterator, doesn't need to impl std iterator.
-impl<S> RegionIterator<S>
-where
-    S: Snapshot,
-{
+impl RegionIterator {
     pub fn new(
-        snap: &S,
+        snap: &RocksSnapshot,
         region: Arc<Region>,
         mut iter_opt: IterOptions,
         cf: &str,
-    ) -> RegionIterator<S> {
+    ) -> RegionIterator {
         update_lower_bound(&mut iter_opt, &region);
         update_upper_bound(&mut iter_opt, &region);
         let iter = snap

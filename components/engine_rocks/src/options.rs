@@ -1,8 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use rocksdb::{
-    ReadOptions as RawReadOptions, TableFilter, TableProperties, WriteOptions as RawWriteOptions,
-};
+use rocksdb::{ReadOptions as RawReadOptions, TableFilter, TableProperties};
 use tikv_util::codec::number;
 
 pub struct RocksReadOptions(RawReadOptions);
@@ -23,31 +21,6 @@ impl From<engine_traits::ReadOptions> for RocksReadOptions {
 
 impl From<&engine_traits::ReadOptions> for RocksReadOptions {
     fn from(opts: &engine_traits::ReadOptions) -> Self {
-        opts.clone().into()
-    }
-}
-
-pub struct RocksWriteOptions(RawWriteOptions);
-
-impl RocksWriteOptions {
-    pub fn into_raw(self) -> RawWriteOptions {
-        self.0
-    }
-}
-
-impl From<engine_traits::WriteOptions> for RocksWriteOptions {
-    fn from(opts: engine_traits::WriteOptions) -> Self {
-        let mut r = RawWriteOptions::default();
-        r.set_sync(opts.sync());
-        r.set_no_slowdown(opts.no_slowdown());
-        // TODO: enable it.
-        r.set_memtable_insert_hint_per_batch(false);
-        RocksWriteOptions(r)
-    }
-}
-
-impl From<&engine_traits::WriteOptions> for RocksWriteOptions {
-    fn from(opts: &engine_traits::WriteOptions) -> Self {
         opts.clone().into()
     }
 }

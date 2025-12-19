@@ -35,15 +35,6 @@ impl Engines {
     }
 }
 
-impl From<Engines> for engine_traits::Engines<kvengine::Engine, rfengine::RfEngine> {
-    fn from(engines: Engines) -> Self {
-        Self {
-            kv: engines.kv.clone(),
-            raft: engines.raft,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct MetaChangeListener {
     pub sender: mpsc::Sender<StoreMsg>,

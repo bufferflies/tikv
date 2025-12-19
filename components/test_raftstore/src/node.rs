@@ -3,7 +3,6 @@
 use std::sync::{Arc, RwLock};
 
 use collections::HashSet;
-use engine_rocks::RocksSnapshot;
 use kvproto::{kvrpcpb::ApiVersion, raft_cmdpb::*};
 use raftstore::{store::*, Result};
 use test_pd_client::TestPdClient;
@@ -49,7 +48,7 @@ impl Simulator for NodeCluster {
         &self,
         _node_id: u64,
         _request: RaftCmdRequest,
-        _cb: Callback<RocksSnapshot>,
+        _cb: Callback,
         _opts: RaftCmdExtraOpts,
     ) -> Result<()> {
         unimplemented!()
@@ -60,7 +59,7 @@ impl Simulator for NodeCluster {
         _node_id: u64,
         _batch_id: Option<ThreadReadId>,
         _request: RaftCmdRequest,
-        _cb: Callback<RocksSnapshot>,
+        _cb: Callback,
     ) {
         unimplemented!()
     }

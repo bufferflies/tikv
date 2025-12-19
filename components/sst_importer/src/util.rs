@@ -79,12 +79,8 @@ mod tests {
     use encryption::DataKeyManager;
     use engine_rocks::{
         util::new_engine_opt, RocksCfOptions, RocksDbOptions, RocksEngine, RocksSstWriterBuilder,
-        RocksTitanDbOptions,
     };
-    use engine_traits::{
-        CfName, CfOptions, DbOptions, EncryptionKeyManager, ImportExt, Peekable, SstWriter,
-        SstWriterBuilder, TitanCfOptions, CF_DEFAULT,
-    };
+    use engine_traits::{CfName, EncryptionKeyManager, Peekable, CF_DEFAULT};
     use tempfile::Builder;
     use test_util::encryption::new_test_key_manager;
 
@@ -191,23 +187,6 @@ mod tests {
         check_prepare_sst_for_ingestion(
             None, None, None,  // key_manager
             false, // was encrypted
-        );
-    }
-
-    #[test]
-    fn test_prepare_sst_for_ingestion_titan() {
-        let mut db_opts = RocksDbOptions::new();
-        let mut titan_opts = RocksTitanDbOptions::new();
-        // Force all values write out to blob files.
-        titan_opts.set_min_blob_size(0);
-        db_opts.set_titandb_options(&titan_opts);
-        let mut cf_opts = RocksCfOptions::new();
-        cf_opts.set_titan_cf_options(&titan_opts);
-        check_prepare_sst_for_ingestion(
-            Some(db_opts),
-            Some(vec![(CF_DEFAULT, cf_opts)]),
-            None,  // key_manager
-            false, // was_encrypted
         );
     }
 

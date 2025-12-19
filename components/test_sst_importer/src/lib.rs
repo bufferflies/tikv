@@ -8,7 +8,7 @@ use engine_rocks::{
     RocksCfOptions, RocksDbOptions, RocksEngine, RocksSstReader, RocksSstWriterBuilder,
 };
 pub use engine_rocks::{RocksEngine as TestEngine, RocksSstWriter};
-use engine_traits::{KvEngine, SstWriter, SstWriterBuilder};
+use engine_traits::Peekable;
 use kvproto::import_sstpb::*;
 use uuid::Uuid;
 
@@ -78,10 +78,7 @@ pub fn calc_data_crc32(data: &[u8]) -> u32 {
     digest.finalize()
 }
 
-pub fn check_db_range<E>(db: &E, range: (u8, u8))
-where
-    E: KvEngine,
-{
+pub fn check_db_range(db: &RocksEngine, range: (u8, u8)) {
     for i in range.0..range.1 {
         let k = keys::data_key(&[i]);
         assert_eq!(db.get_value(&k).unwrap().unwrap(), &[i]);

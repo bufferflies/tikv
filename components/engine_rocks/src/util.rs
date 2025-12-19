@@ -2,7 +2,7 @@
 
 use std::{fs, path::Path, str::FromStr, sync::Arc};
 
-use engine_traits::{Engines, Range, Result, CF_DEFAULT};
+use engine_traits::{Range, Result, CF_DEFAULT};
 use rocksdb::{
     load_latest_options, CColumnFamilyDescriptor, CFHandle, ColumnFamilyOptions, Env,
     Range as RocksRange, SliceTransform, DB,
@@ -13,14 +13,6 @@ use crate::{
     cf_options::RocksCfOptions, db_options::RocksDbOptions, engine::RocksEngine, r2e,
     rocks_metrics_defs::*, RocksStatistics,
 };
-
-pub fn new_temp_engine(path: &tempfile::TempDir) -> Engines<RocksEngine, RocksEngine> {
-    let raft_path = path.path().join(std::path::Path::new("raft"));
-    Engines::new(
-        new_engine(path.path().to_str().unwrap(), engine_traits::ALL_CFS).unwrap(),
-        new_engine(raft_path.to_str().unwrap(), &[engine_traits::CF_DEFAULT]).unwrap(),
-    )
-}
 
 pub fn new_default_engine(path: &str) -> Result<RocksEngine> {
     new_engine(path, &[CF_DEFAULT])
@@ -296,153 +288,5 @@ impl SliceTransform for NoopSliceTransform {
 
     fn in_range(&mut self, _: &[u8]) -> bool {
         true
-    }
-}
-
-pub fn to_raw_perf_level(level: engine_traits::PerfLevel) -> rocksdb::PerfLevel {
-    match level {
-        engine_traits::PerfLevel::Uninitialized => rocksdb::PerfLevel::Uninitialized,
-        engine_traits::PerfLevel::Disable => rocksdb::PerfLevel::Disable,
-        engine_traits::PerfLevel::EnableCount => rocksdb::PerfLevel::EnableCount,
-        engine_traits::PerfLevel::EnableTimeExceptForMutex => {
-            rocksdb::PerfLevel::EnableTimeExceptForMutex
-        }
-        engine_traits::PerfLevel::EnableTimeAndCpuTimeExceptForMutex => {
-            rocksdb::PerfLevel::EnableTimeAndCPUTimeExceptForMutex
-        }
-        engine_traits::PerfLevel::EnableTime => rocksdb::PerfLevel::EnableTime,
-        engine_traits::PerfLevel::OutOfBounds => rocksdb::PerfLevel::OutOfBounds,
-    }
-}
-
-pub fn from_raw_perf_level(level: rocksdb::PerfLevel) -> engine_traits::PerfLevel {
-    match level {
-        rocksdb::PerfLevel::Uninitialized => engine_traits::PerfLevel::Uninitialized,
-        rocksdb::PerfLevel::Disable => engine_traits::PerfLevel::Disable,
-        rocksdb::PerfLevel::EnableCount => engine_traits::PerfLevel::EnableCount,
-        rocksdb::PerfLevel::EnableTimeExceptForMutex => {
-            engine_traits::PerfLevel::EnableTimeExceptForMutex
-        }
-        rocksdb::PerfLevel::EnableTimeAndCPUTimeExceptForMutex => {
-            engine_traits::PerfLevel::EnableTimeAndCpuTimeExceptForMutex
-        }
-        rocksdb::PerfLevel::EnableTime => engine_traits::PerfLevel::EnableTime,
-        rocksdb::PerfLevel::OutOfBounds => engine_traits::PerfLevel::OutOfBounds,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use engine_traits::{CfOptionsExt, Peekable, SyncMutable, CF_DEFAULT};
-    use rocksdb::DB;
-    use tempfile::Builder;
-
-    use super::*;
-
-    #[test]
-    fn test_cfs_diff() {
-        let a = vec!["1", "2", "3"];
-        let a_diff_a = cfs_diff(&a, &a);
-        assert!(a_diff_a.is_empty());
-        let b = vec!["4"];
-        assert_eq!(a, cfs_diff(&a, &b));
-        let c = vec!["4", "5", "3", "6"];
-        assert_eq!(vec!["1", "2"], cfs_diff(&a, &c));
-        assert_eq!(vec!["4", "5", "6"], cfs_diff(&c, &a));
-        let d = vec!["1", "2", "3", "4"];
-        let a_diff_d = cfs_diff(&a, &d);
-        assert!(a_diff_d.is_empty());
-        assert_eq!(vec!["4"], cfs_diff(&d, &a));
-    }
-
-    #[test]
-    fn test_new_engine_opt() {
-        let path = Builder::new()
-            .prefix("_util_rocksdb_test_check_column_families")
-            .tempdir()
-            .unwrap();
-        let path_str = path.path().to_str().unwrap();
-
-        // create db when db not exist
-        let mut cfs_opts = vec![(CF_DEFAULT, RocksCfOptions::default())];
-        let mut opts = RocksCfOptions::default();
-        opts.set_level_compaction_dynamic_level_bytes(false);
-        cfs_opts.push(("cf_dynamic_level_bytes_disabled", opts.clone()));
-        let db = new_engine_opt(path_str, RocksDbOptions::default(), cfs_opts).unwrap();
-        column_families_must_eq(
-            path_str,
-            vec![CF_DEFAULT, "cf_dynamic_level_bytes_disabled"],
-        );
-        check_dynamic_level_bytes(&db);
-        drop(db);
-
-        // add cf1.
-        let cfs_opts = vec![
-            (CF_DEFAULT, opts.clone()),
-            ("cf_dynamic_level_bytes_disabled", opts.clone()),
-            ("cf1", opts.clone()),
-        ];
-        let db = new_engine_opt(path_str, RocksDbOptions::default(), cfs_opts).unwrap();
-        column_families_must_eq(
-            path_str,
-            vec![CF_DEFAULT, "cf_dynamic_level_bytes_disabled", "cf1"],
-        );
-        check_dynamic_level_bytes(&db);
-        for cf in &[CF_DEFAULT, "cf_dynamic_level_bytes_disabled", "cf1"] {
-            db.put_cf(cf, b"k", b"v").unwrap();
-        }
-        drop(db);
-
-        // change order should not cause data corruption.
-        let cfs_opts = vec![
-            ("cf_dynamic_level_bytes_disabled", opts.clone()),
-            ("cf1", opts.clone()),
-            (CF_DEFAULT, opts),
-        ];
-        let db = new_engine_opt(path_str, RocksDbOptions::default(), cfs_opts).unwrap();
-        column_families_must_eq(
-            path_str,
-            vec![CF_DEFAULT, "cf_dynamic_level_bytes_disabled", "cf1"],
-        );
-        check_dynamic_level_bytes(&db);
-        for cf in &[CF_DEFAULT, "cf_dynamic_level_bytes_disabled", "cf1"] {
-            assert_eq!(db.get_value_cf(cf, b"k").unwrap().unwrap(), b"v");
-        }
-        drop(db);
-
-        // drop cf1.
-        let cfs = vec![CF_DEFAULT, "cf_dynamic_level_bytes_disabled"];
-        let db = new_engine(path_str, &cfs).unwrap();
-        column_families_must_eq(path_str, cfs);
-        check_dynamic_level_bytes(&db);
-        drop(db);
-
-        // drop all cfs.
-        new_engine(path_str, &[CF_DEFAULT]).unwrap();
-        column_families_must_eq(path_str, vec![CF_DEFAULT]);
-
-        // not specifying default cf should error.
-        new_engine(path_str, &[]).unwrap_err();
-        column_families_must_eq(path_str, vec![CF_DEFAULT]);
-    }
-
-    fn column_families_must_eq(path: &str, excepted: Vec<&str>) {
-        let opts = RocksDbOptions::default();
-        let cfs_list = DB::list_column_families(&opts, path).unwrap();
-
-        let mut cfs_existed: Vec<&str> = cfs_list.iter().map(|v| v.as_str()).collect();
-        let mut cfs_excepted: Vec<&str> = excepted.clone();
-        cfs_existed.sort_unstable();
-        cfs_excepted.sort_unstable();
-        assert_eq!(cfs_existed, cfs_excepted);
-    }
-
-    fn check_dynamic_level_bytes(db: &RocksEngine) {
-        let tmp_cf_opts = db.get_options_cf(CF_DEFAULT).unwrap();
-        assert!(tmp_cf_opts.get_level_compaction_dynamic_level_bytes());
-        let tmp_cf_opts = db
-            .get_options_cf("cf_dynamic_level_bytes_disabled")
-            .unwrap();
-        assert!(!tmp_cf_opts.get_level_compaction_dynamic_level_bytes());
     }
 }

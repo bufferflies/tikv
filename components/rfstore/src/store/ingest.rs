@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use collections::HashMap;
-use engine_traits::{IterOptions, Iterator as TraitIterator, RefIterable, CF_DEFAULT, CF_WRITE};
+use engine_traits::{IterOptions, CF_DEFAULT, CF_WRITE};
 use kvengine::{
     table::{table, InnerKey, Value},
     ShardMeta, UserMeta,

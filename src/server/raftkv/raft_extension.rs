@@ -1,29 +1,22 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-};
+use std::ops::{Deref, DerefMut};
 
 use kvproto::raft_serverpb::RaftMessage;
 use raftstore::router::RaftStoreRouter;
 
 #[derive(Clone)]
-pub struct RaftRouterWrap<S, E> {
+pub struct RaftRouterWrap<S> {
     router: S,
-    _phantom: PhantomData<E>,
 }
 
-impl<S, E> RaftRouterWrap<S, E> {
+impl<S> RaftRouterWrap<S> {
     pub fn new(router: S) -> Self {
-        Self {
-            router,
-            _phantom: PhantomData,
-        }
+        Self { router }
     }
 }
 
-impl<S, E> Deref for RaftRouterWrap<S, E> {
+impl<S> Deref for RaftRouterWrap<S> {
     type Target = S;
 
     #[inline]
@@ -32,17 +25,16 @@ impl<S, E> Deref for RaftRouterWrap<S, E> {
     }
 }
 
-impl<S, E> DerefMut for RaftRouterWrap<S, E> {
+impl<S> DerefMut for RaftRouterWrap<S> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.router
     }
 }
 
-impl<S, E> tikv_kv::RaftExtension for RaftRouterWrap<S, E>
+impl<S> tikv_kv::RaftExtension for RaftRouterWrap<S>
 where
-    S: RaftStoreRouter<E> + 'static,
-    E: engine_traits::KvEngine,
+    S: RaftStoreRouter + 'static,
 {
     #[inline]
     fn feed(&self, msg: RaftMessage, key_message: bool) {

@@ -1,8 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{marker::PhantomData, sync::atomic::*};
+use std::sync::atomic::*;
 
-use engine_traits::KvEngine;
 use futures::{channel::mpsc, executor::block_on, FutureExt, SinkExt, StreamExt, TryFutureExt};
 use grpcio::{self, *};
 use kvproto::brpb::*;
@@ -13,28 +12,18 @@ use super::Task;
 /// Service handles the RPC messages for the `Backup` service.
 
 #[derive(Clone)]
-pub struct Service<E> {
+pub struct Service {
     scheduler: Scheduler<Task>,
-    _phantom: PhantomData<E>,
 }
 
-impl<E> Service<E>
-where
-    E: KvEngine,
-{
+impl Service {
     /// Create a new backup service.
     pub fn new(scheduler: Scheduler<Task>) -> Self {
-        Service {
-            scheduler,
-            _phantom: PhantomData,
-        }
+        Service { scheduler }
     }
 }
 
-impl<E> Backup for Service<E>
-where
-    E: KvEngine,
-{
+impl Backup for Service {
     fn check_pending_admin_op(
         &mut self,
         ctx: RpcContext<'_>,
@@ -122,7 +111,6 @@ where
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use engine_rocks::RocksEngine;
     use external_storage_export::make_local_backend;
     use tikv::storage::txn::tests::{must_commit, must_prewrite_put};
     use tikv_util::worker::{dummy_scheduler, ReceiverWrapper};
@@ -134,7 +122,7 @@ mod tests {
     fn new_rpc_suite() -> (Server, BackupClient, ReceiverWrapper<Task>) {
         let env = Arc::new(EnvBuilder::new().build());
         let (scheduler, rx) = dummy_scheduler();
-        let backup_service = super::Service::<RocksEngine>::new(scheduler);
+        let backup_service = super::Service::new(scheduler);
         let builder =
             ServerBuilder::new(env.clone()).register_service(create_backup(backup_service));
         let mut server = builder.bind("127.0.0.1", 0).build().unwrap();

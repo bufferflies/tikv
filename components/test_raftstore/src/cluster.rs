@@ -8,8 +8,8 @@ use std::{
 };
 
 use collections::{HashMap, HashSet};
-use engine_rocks::{RocksEngine, RocksSnapshot};
-use engine_traits::{Engines, CF_DEFAULT};
+use engine_rocks::RocksEngine;
+use engine_traits::CF_DEFAULT;
 use file_system::IoRateLimiter;
 use futures::executor::block_on;
 use kvproto::{
@@ -45,7 +45,7 @@ pub trait Simulator {
         &self,
         node_id: u64,
         request: RaftCmdRequest,
-        cb: Callback<RocksSnapshot>,
+        cb: Callback,
     ) -> Result<()> {
         self.async_command_on_node_with_opts(node_id, request, cb, Default::default())
     }
@@ -53,7 +53,7 @@ pub trait Simulator {
         &self,
         node_id: u64,
         request: RaftCmdRequest,
-        cb: Callback<RocksSnapshot>,
+        cb: Callback,
         opts: RaftCmdExtraOpts,
     ) -> Result<()>;
 
@@ -80,7 +80,7 @@ pub trait Simulator {
         node_id: u64,
         batch_id: Option<ThreadReadId>,
         request: RaftCmdRequest,
-        cb: Callback<RocksSnapshot>,
+        cb: Callback,
     );
 
     fn call_command_on_node(
@@ -110,9 +110,9 @@ pub struct Cluster<T: Simulator> {
     pub count: usize,
 
     pub paths: Vec<TempDir>,
-    pub dbs: Vec<Engines<RocksEngine, RocksEngine>>,
+    pub dbs: Vec<(RocksEngine, RocksEngine)>,
     pub io_rate_limiter: Option<Arc<IoRateLimiter>>,
-    pub engines: HashMap<u64, Engines<RocksEngine, RocksEngine>>,
+    pub engines: HashMap<u64, (RocksEngine, RocksEngine)>,
     pub labels: HashMap<u64, HashMap<String, String>>,
     pub sst_workers: Vec<LazyWorker<String>>,
     pub sst_workers_map: HashMap<u64, usize>,
@@ -184,14 +184,14 @@ impl<T: Simulator> Cluster<T> {
     }
 
     pub fn get_engine(&self, node_id: u64) -> RocksEngine {
-        self.engines[&node_id].kv.clone()
+        self.engines[&node_id].0.clone()
     }
 
     pub fn get_raft_engine(&self, node_id: u64) -> RocksEngine {
-        self.engines[&node_id].raft.clone()
+        self.engines[&node_id].1.clone()
     }
 
-    pub fn get_all_engines(&self, node_id: u64) -> Engines<RocksEngine, RocksEngine> {
+    pub fn get_all_engines(&self, node_id: u64) -> (RocksEngine, RocksEngine) {
         self.engines[&node_id].clone()
     }
 

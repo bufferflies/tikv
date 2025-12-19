@@ -2,7 +2,6 @@
 
 use std::{cmp::min, time::Duration, u64};
 
-use engine_traits::{perf_level_serde, PerfLevel};
 use lazy_static::lazy_static;
 use online_config::OnlineConfig;
 use prometheus::register_gauge_vec;
@@ -221,10 +220,6 @@ pub struct Config {
     // we still allow big raft batch for better throughput.
     pub apply_yield_write_size: ReadableSize,
 
-    #[serde(with = "perf_level_serde")]
-    #[online_config(skip)]
-    pub perf_level: PerfLevel,
-
     #[doc(hidden)]
     #[online_config(skip)]
     /// Disable this feature by set to 0, logic will be removed in other pr.
@@ -418,7 +413,6 @@ impl Default for Config {
             dev_assert: false,
             apply_yield_duration: ReadableDuration::millis(500),
             apply_yield_write_size: ReadableSize::kb(32),
-            perf_level: PerfLevel::Uninitialized,
             evict_cache_on_memory_ratio: 0.0,
             cmd_batch: true,
             cmd_batch_concurrent_ready_max_count: 1,

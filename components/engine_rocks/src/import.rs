@@ -2,17 +2,15 @@
 
 use std::fs::File;
 
-use engine_traits::{ImportExt, IngestExternalFileOptions, Result};
+use engine_traits::Result;
 use rocksdb::{
     set_external_sst_file_global_seq_no, IngestExternalFileOptions as RawIngestExternalFileOptions,
 };
 
 use crate::{engine::RocksEngine, r2e, util};
 
-impl ImportExt for RocksEngine {
-    type IngestExternalFileOptions = RocksIngestExternalFileOptions;
-
-    fn ingest_external_file_cf(&self, cf: &str, files: &[&str]) -> Result<()> {
+impl RocksEngine {
+    pub fn ingest_external_file_cf(&self, cf: &str, files: &[&str]) -> Result<()> {
         let cf = util::get_cf_handle(self.as_inner(), cf)?;
         let mut opts = RocksIngestExternalFileOptions::new();
         opts.move_files(true);
@@ -42,7 +40,7 @@ impl ImportExt for RocksEngine {
 
 pub struct RocksIngestExternalFileOptions(RawIngestExternalFileOptions);
 
-impl IngestExternalFileOptions for RocksIngestExternalFileOptions {
+impl RocksIngestExternalFileOptions {
     fn new() -> RocksIngestExternalFileOptions {
         RocksIngestExternalFileOptions(RawIngestExternalFileOptions::new())
     }
@@ -54,13 +52,9 @@ impl IngestExternalFileOptions for RocksIngestExternalFileOptions {
 
 #[cfg(test)]
 mod tests {
-    use engine_traits::{
-        FlowControlFactorsExt, MiscExt, Mutable, SstWriter, SstWriterBuilder, WriteBatch,
-        WriteBatchExt, ALL_CFS, CF_DEFAULT,
-    };
+    use engine_traits::{ALL_CFS, CF_DEFAULT};
     use tempfile::Builder;
 
-    use super::*;
     use crate::{util::new_engine_opt, RocksCfOptions, RocksDbOptions, RocksSstWriterBuilder};
 
     #[test]

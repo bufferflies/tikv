@@ -6,7 +6,7 @@ edition = "2018"
 publish = false
 
 [features]
-default = ["test-engine-kv-rocksdb", "test-engine-raft-raft-engine", "cloud-aws", "cloud-gcp", "cloud-azure"]
+default = ["cloud-aws", "cloud-gcp", "cloud-azure"]
 tcmalloc = ["tikv/tcmalloc"]
 jemalloc = ["tikv/jemalloc"]
 mimalloc = ["tikv/mimalloc"]
@@ -17,14 +17,6 @@ failpoints = ["tikv/failpoints"]
 cloud-aws = ["tikv/cloud-aws"]
 cloud-gcp = ["tikv/cloud-gcp"]
 cloud-azure = ["tikv/cloud-azure"]
-test-engine-kv-rocksdb = [
-  "tikv/test-engine-kv-rocksdb"
-]
-test-engine-raft-raft-engine = [
-  "tikv/test-engine-raft-raft-engine"
-]
-test-engines-rocksdb = ["tikv/test-engines-rocksdb"]
-test-engines-panic = ["tikv/test-engines-panic"]
 
 pprof-fp = ["tikv/pprof-fp"]
 

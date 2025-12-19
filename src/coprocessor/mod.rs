@@ -42,7 +42,6 @@ pub use checksum::checksum_crc64_xor;
 pub use endpoint::{
     make_error_response, parse_request_and_handle_remote_cop, prefetch_ia_remote_segments,
 };
-use engine_traits::PerfLevel;
 use kvproto::{coprocessor as coppb, kvrpcpb};
 use lazy_static::lazy_static;
 use rand::prelude::*;
@@ -145,9 +144,6 @@ pub struct ReqContextInner {
     /// The upper bound key in ranges of the request
     pub upper_bound: Vec<u8>,
 
-    /// Perf level
-    pub perf_level: PerfLevel,
-
     /// pattern for lazy remote execution based on actual execution cost.
     pub lazy_remote_pattern: Option<String>,
 }
@@ -162,7 +158,6 @@ impl ReqContextInner {
         is_desc_scan: Option<bool>,
         txn_start_ts: TimeStamp,
         cache_match_version: Option<u64>,
-        perf_level: PerfLevel,
         lazy_remote_pattern: Option<String>,
     ) -> Self {
         let mut deadline_duration = max_handle_duration;
@@ -193,7 +188,6 @@ impl ReqContextInner {
             cache_match_version,
             lower_bound,
             upper_bound,
-            perf_level,
             lazy_remote_pattern,
         }
     }
@@ -208,7 +202,6 @@ impl ReqContextInner {
             None,
             TimeStamp::max(),
             None,
-            PerfLevel::EnableCount,
             None,
         )
     }
@@ -258,7 +251,6 @@ impl ReqContext {
         is_desc_scan: Option<bool>,
         txn_start_ts: TimeStamp,
         cache_match_version: Option<u64>,
-        perf_level: PerfLevel,
         lazy_remote_pattern: Option<String>,
     ) -> Self {
         ReqContextInner::new(
@@ -269,7 +261,6 @@ impl ReqContext {
             is_desc_scan,
             txn_start_ts,
             cache_match_version,
-            perf_level,
             lazy_remote_pattern,
         )
         .into()
@@ -324,7 +315,6 @@ mod tests {
             None,
             TimeStamp::max(),
             None,
-            PerfLevel::EnableCount,
             None,
         )
     }
@@ -382,7 +372,6 @@ mod tests {
         let is_desc_scan = Some(true);
         let txn_start_ts = TimeStamp::new(9898);
         let cache_match_version = Some(42);
-        let perf_level = PerfLevel::EnableCount;
 
         let mut inner = ReqContextInner::new(
             pb_ctx.clone(),
@@ -392,7 +381,6 @@ mod tests {
             is_desc_scan,
             txn_start_ts,
             cache_match_version,
-            perf_level,
             None,
         );
 
@@ -404,7 +392,6 @@ mod tests {
             is_desc_scan,
             txn_start_ts,
             cache_match_version,
-            perf_level,
             None,
         );
 

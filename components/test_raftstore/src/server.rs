@@ -8,7 +8,6 @@ use std::{
 use causal_ts::CausalTsProviderImpl;
 use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
-use engine_rocks::{RocksEngine, RocksSnapshot};
 use grpcio::Service;
 use grpcio_health::HealthService;
 use kvproto::raft_cmdpb::*;
@@ -27,7 +26,7 @@ use txn_types::TxnExtraScheduler;
 
 use super::*;
 
-pub type SimulateEngine = RaftKv<RocksEngine, MockRaftStoreRouter>;
+pub type SimulateEngine = RaftKv<MockRaftStoreRouter>;
 
 #[derive(Default, Clone)]
 pub struct AddressMap {
@@ -64,7 +63,7 @@ impl StoreAddrResolver for AddressMap {
 }
 
 type PendingServices = Vec<Box<dyn Fn() -> Service>>;
-type CopHooks = Vec<Box<dyn Fn(&mut CoprocessorHost<RocksEngine>)>>;
+type CopHooks = Vec<Box<dyn Fn(&mut CoprocessorHost)>>;
 
 pub struct ServerCluster {
     pub storages: HashMap<u64, SimulateEngine>,
@@ -109,7 +108,7 @@ impl Simulator for ServerCluster {
         &self,
         _node_id: u64,
         _request: RaftCmdRequest,
-        _cb: Callback<RocksSnapshot>,
+        _cb: Callback,
         _opts: RaftCmdExtraOpts,
     ) -> Result<()> {
         unimplemented!()
@@ -120,7 +119,7 @@ impl Simulator for ServerCluster {
         _node_id: u64,
         _batch_id: Option<ThreadReadId>,
         _request: RaftCmdRequest,
-        _cb: Callback<RocksSnapshot>,
+        _cb: Callback,
     ) {
         unimplemented!()
     }

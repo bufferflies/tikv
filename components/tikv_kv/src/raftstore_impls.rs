@@ -2,7 +2,7 @@
 
 use std::{num::NonZeroU64, sync::Arc};
 
-use engine_traits::{CfName, IterOptions, Peekable, ReadOptions, Snapshot};
+use engine_traits::{CfName, IterOptions, Peekable, ReadOptions};
 use kvproto::kvrpcpb::ExtraOp as TxnExtraOp;
 use pd_client::BucketMeta;
 use raftstore::{
@@ -22,11 +22,11 @@ impl From<RaftServerError> for Error {
     }
 }
 
-pub struct RegionSnapshotExt<'a, S: Snapshot> {
-    snapshot: &'a RegionSnapshot<S>,
+pub struct RegionSnapshotExt<'a> {
+    snapshot: &'a RegionSnapshot,
 }
 
-impl<'a, S: Snapshot> SnapshotExt for RegionSnapshotExt<'a, S> {
+impl<'a> SnapshotExt for RegionSnapshotExt<'a> {
     #[inline]
     fn get_data_version(&self) -> Option<u64> {
         self.snapshot.get_apply_index().ok()
@@ -57,9 +57,9 @@ impl<'a, S: Snapshot> SnapshotExt for RegionSnapshotExt<'a, S> {
     }
 }
 
-impl<S: Snapshot> EngineSnapshot for RegionSnapshot<S> {
-    type Iter = RegionIterator<S>;
-    type Ext<'a> = RegionSnapshotExt<'a, S>;
+impl EngineSnapshot for RegionSnapshot {
+    type Iter = RegionIterator;
+    type Ext<'a> = RegionSnapshotExt<'a>;
 
     fn get(&self, key: &Key) -> kv::Result<Option<Value>> {
         fail_point!("raftkv_snapshot_get", |_| Err(box_err!(
@@ -102,12 +102,12 @@ impl<S: Snapshot> EngineSnapshot for RegionSnapshot<S> {
         Some(self.get_end_key())
     }
 
-    fn ext(&self) -> RegionSnapshotExt<'_, S> {
+    fn ext(&self) -> RegionSnapshotExt<'_> {
         RegionSnapshotExt { snapshot: self }
     }
 }
 
-impl<S: Snapshot> EngineIterator for RegionIterator<S> {
+impl EngineIterator for RegionIterator {
     fn next(&mut self) -> kv::Result<bool> {
         RegionIterator::next(self).map_err(KvError::from)
     }

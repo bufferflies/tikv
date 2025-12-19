@@ -20,16 +20,10 @@
 #[allow(unused_extern_crates)]
 extern crate tikv_alloc;
 
-#[cfg(test)]
-extern crate test;
-
 mod cf_names;
 
 mod cf_options;
 pub use crate::cf_options::*;
-mod checkpoint;
-pub use crate::checkpoint::*;
-mod compact;
 
 mod db_options;
 pub use crate::db_options::*;
@@ -42,28 +36,14 @@ pub use crate::import::*;
 mod logger;
 pub use crate::logger::*;
 mod misc;
-pub use crate::misc::*;
-pub mod range_properties;
 mod snapshot;
 pub use crate::snapshot::*;
 mod sst;
 pub use crate::sst::*;
-mod sst_partitioner;
-pub use crate::sst_partitioner::*;
 mod status;
 pub use crate::status::*;
-mod table_properties;
-pub use crate::table_properties::*;
 mod write_batch;
 pub use crate::write_batch::*;
-pub mod mvcc_properties;
-pub use crate::mvcc_properties::*;
-pub mod perf_context;
-pub use crate::perf_context::*;
-mod perf_context_impl;
-pub use crate::perf_context_impl::{
-    PerfStatisticsInstant, ReadPerfContext, ReadPerfInstant, WritePerfContext, WritePerfInstant,
-};
 mod perf_context_metrics;
 pub use perf_context_metrics::APPLY_PERF_CONTEXT_TIME_HISTOGRAM_STATIC;
 
@@ -73,37 +53,18 @@ pub use crate::engine_iterator::*;
 pub mod options;
 pub mod util;
 
-mod compact_listener;
-pub use compact_listener::*;
-
-pub mod decode_properties;
-pub use decode_properties::*;
-pub mod properties;
-pub use properties::*;
-
 pub mod rocks_metrics;
 pub use rocks_metrics::*;
 
 pub mod rocks_metrics_defs;
 pub use rocks_metrics_defs::*;
 
-pub mod event_listener;
-pub use event_listener::*;
-
-pub mod flow_listener;
-pub use flow_listener::*;
-
 pub mod config;
 pub use config::*;
-
-pub mod ttl_properties;
-pub use ttl_properties::*;
 
 pub mod encryption;
 
 pub mod file_system;
-
-mod raft_engine;
 
 pub use rocksdb::{
     set_perf_flags, set_perf_level, PerfContext, PerfFlag, PerfFlags, PerfLevel,

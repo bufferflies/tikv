@@ -30,47 +30,6 @@ impl Default for ReadOptions {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct WriteOptions {
-    sync: bool,
-    no_slowdown: bool,
-    disable_wal: bool,
-}
-
-impl WriteOptions {
-    pub fn new() -> WriteOptions {
-        WriteOptions {
-            sync: false,
-            no_slowdown: false,
-            disable_wal: false,
-        }
-    }
-
-    pub fn set_sync(&mut self, sync: bool) {
-        self.sync = sync;
-    }
-
-    pub fn sync(&self) -> bool {
-        self.sync
-    }
-
-    pub fn set_no_slowdown(&mut self, no_slowdown: bool) {
-        self.no_slowdown = no_slowdown;
-    }
-
-    pub fn no_slowdown(&self) -> bool {
-        self.no_slowdown
-    }
-
-    pub fn set_disable_wal(&mut self, disable_wal: bool) {
-        self.disable_wal = disable_wal;
-    }
-
-    pub fn disable_wal(&self) -> bool {
-        self.disable_wal
-    }
-}
-
 #[derive(Clone, PartialEq)]
 pub enum SeekMode {
     TotalOrder,

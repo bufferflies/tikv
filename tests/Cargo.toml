@@ -65,7 +65,7 @@ harness = false
 path = "cloud_engine_benches/storage_class/mod.rs"
 
 [features]
-default = ["failpoints", "testexport", "test-engine-kv-rocksdb", "test-engine-raft-raft-engine", "cloud-aws", "cloud-gcp", "cloud-azure"]
+default = ["failpoints", "testexport", "cloud-aws", "cloud-gcp", "cloud-azure"]
 failpoints = ["fail/failpoints", "tikv/failpoints", "pd_client/failpoints", "tikv_util/failpoints", "native_br/failpoints"]
 cloud-aws = ["external_storage_export/cloud-aws"]
 cloud-gcp = ["external_storage_export/cloud-gcp"]
@@ -89,19 +89,6 @@ profiling = ["profiler/profiling"]
 # Usage: set environment variable RUST_LOG (e.g, export RUST_LOG="info,raft=debug")
 # Ref: https://docs.rs/env_logger/latest/env_logger/#enabling-logging
 env-logger = ["tikv_util/env-logger", "slog-envlogger"]
-
-test-engine-kv-rocksdb = [
-    "raftstore/test-engine-kv-rocksdb"
-]
-test-engine-raft-raft-engine = [
-    "raftstore/test-engine-raft-raft-engine"
-]
-test-engines-rocksdb = [
-    "raftstore/test-engines-rocksdb",
-]
-test-engines-panic = [
-    "raftstore/test-engines-panic",
-]
 jemalloc = ["tikv/jemalloc"]
 mimalloc = ["tikv/mimalloc"]
 snmalloc = ["tikv/snmalloc"]
@@ -197,7 +184,6 @@ concurrency_manager = { workspace = true }
 criterion = "0.3"
 criterion-cpu-time = "0.1"
 engine_rocks = { workspace = true }
-engine_test = { workspace = true }
 engine_traits = { workspace = true }
 external_storage_export = { workspace = true }
 file_system = { workspace = true }

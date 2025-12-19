@@ -129,7 +129,7 @@ use crate::{
         metrics::{CommandKind, *},
         txn::{
             commands::{RawAtomicStore, RawCompareAndSwap, TypedCommand},
-            flow_controller::{EngineFlowController, FlowController},
+            flow_controller::FlowController,
             scheduler::Scheduler as TxnScheduler,
             Command, ErrorInner as TxnError,
         },
@@ -346,14 +346,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
 
     pub fn get_normal_pool_size(&self) -> usize {
         self.read_pool.get_normal_pool_size()
-    }
-
-    fn with_perf_context<Fn, T>(cmd: CommandKind, f: Fn) -> T
-    where
-        Fn: FnOnce() -> T,
-    {
-        // Safety: the read pools ensure that a TLS engine exists.
-        unsafe { with_perf_context::<E, _, _>(cmd, f) }
     }
 
     #[inline]
@@ -1369,7 +1361,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
 
                 let snapshot =
                     Self::with_tls_engine(|engine| Self::snapshot(engine, snap_ctx)).await?;
-                Self::with_perf_context(CMD, || {
+                {
                     let begin_instant = Instant::now();
                     let mut statistics = Statistics::default();
                     let buckets = snapshot.ext().get_buckets();
@@ -1413,7 +1405,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                     ));
 
                     Ok(locks)
-                })
+                }
             }
             .in_resource_metering_tag(resource_tag),
             priority,
@@ -3181,7 +3173,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> TestStorageBuilder<E, L, F> {
                 in_memory_pessimistic_lock: self.in_memory_pessimistic_lock,
                 wake_up_delay_duration_ms: self.wake_up_delay_duration_ms,
             },
-            Arc::new(FlowController::Singleton(EngineFlowController::empty())),
+            Arc::new(FlowController::NoLimit),
             DummyReporter,
             self.resource_tag_factory,
             Arc::new(QuotaLimiter::default()),
@@ -3212,7 +3204,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> TestStorageBuilder<E, L, F> {
                 in_memory_pessimistic_lock: self.in_memory_pessimistic_lock,
                 wake_up_delay_duration_ms: self.wake_up_delay_duration_ms,
             },
-            Arc::new(FlowController::Singleton(EngineFlowController::empty())),
+            Arc::new(FlowController::NoLimit),
             DummyReporter,
             ResourceTagFactory::new_for_test(),
             Arc::new(QuotaLimiter::default()),

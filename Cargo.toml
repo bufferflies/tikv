@@ -25,10 +25,6 @@ cloud-aws = ["encryption_export/cloud-aws", "sst_importer/cloud-aws"]
 cloud-gcp = ["encryption_export/cloud-gcp", "sst_importer/cloud-gcp"]
 cloud-azure = ["encryption_export/cloud-azure", "sst_importer/cloud-azure"]
 testexport = ["raftstore/testexport", "api_version/testexport"]
-test-engine-kv-rocksdb = ["engine_test/test-engine-kv-rocksdb"]
-test-engine-raft-raft-engine = ["engine_test/test-engine-raft-raft-engine"]
-test-engines-rocksdb = ["engine_test/test-engines-rocksdb"]
-test-engines-panic = ["engine_test/test-engines-panic"]
 cloud-storage-grpc = ["sst_importer/cloud-storage-grpc"]
 cloud-storage-dylib = ["sst_importer/cloud-storage-dylib"]
 pprof-fp = ["pprof/frame-pointer"]
@@ -68,11 +64,8 @@ crc64fast = "0.1"
 crossbeam = "0.8"
 dashmap = "5"
 encryption_export = { workspace = true }
-engine_panic = { workspace = true }
 engine_rocks = { workspace = true }
-engine_test = { workspace = true }
 engine_traits = { workspace = true }
-engine_traits_tests = { workspace = true }
 error_code = { workspace = true }
 fail = "0.5"
 farmhash = "1.1.5"
@@ -328,11 +321,8 @@ concurrency_manager = { path = "components/concurrency_manager" }
 crc32c = "=0.6.4"
 encryption = { path = "components/encryption" }
 encryption_export = { path = "components/encryption/export" }
-engine_panic = { path = "components/engine_panic" }
 engine_rocks = { path = "components/engine_rocks" }
-engine_test = { path = "components/engine_test", default-features = false }
 engine_traits = { path = "components/engine_traits" }
-engine_traits_tests = { path = "components/engine_traits_tests", default-features = false }
 error_code = { path = "components/error_code" }
 external_storage = { path = "components/external_storage" }
 external_storage_export = { path = "components/external_storage/export" }

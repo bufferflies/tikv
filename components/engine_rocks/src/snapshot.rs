@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use engine_traits::{self, IterOptions, Iterable, Peekable, ReadOptions, Result, Snapshot};
+use engine_traits::{self, IterOptions, Peekable, ReadOptions, Result};
 use rocksdb::{rocksdb_options::UnsafeSnap, DBIterator, DB};
 
 use crate::{
@@ -32,8 +32,6 @@ impl RocksSnapshot {
     }
 }
 
-impl Snapshot for RocksSnapshot {}
-
 impl Debug for RocksSnapshot {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
         write!(fmt, "Engine Snapshot Impl")
@@ -48,10 +46,8 @@ impl Drop for RocksSnapshot {
     }
 }
 
-impl Iterable for RocksSnapshot {
-    type Iterator = RocksEngineIterator;
-
-    fn iterator_opt(&self, cf: &str, opts: IterOptions) -> Result<Self::Iterator> {
+impl RocksSnapshot {
+    pub fn iterator_opt(&self, cf: &str, opts: IterOptions) -> Result<RocksEngineIterator> {
         let opt: RocksReadOptions = opts.into();
         let mut opt = opt.into_raw();
         unsafe {

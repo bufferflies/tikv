@@ -4,7 +4,7 @@
 
 use std::{convert::TryInto, sync::Arc};
 
-use engine_traits::{KvEngine, TabletFactory, CF_DEFAULT};
+use engine_traits::CF_DEFAULT;
 use file_system::{get_io_rate_limiter, IoPriority, IoType};
 use online_config::{ConfigChange, ConfigManager, ConfigValue, Result as CfgResult};
 use strum::IntoEnumIterator;
@@ -16,25 +16,22 @@ use crate::{
     storage::{lock_manager::LockManager, txn::flow_controller::FlowController, TxnScheduler},
 };
 
-pub struct StorageConfigManger<E: Engine, K: KvEngine, L: LockManager> {
-    tablet_factory: Arc<dyn TabletFactory<K> + Send + Sync>,
+pub struct StorageConfigManger<E: Engine, L: LockManager> {
     shared_block_cache: bool,
     flow_controller: Arc<FlowController>,
     _scheduler: TxnScheduler<E, L>,
 }
 
-unsafe impl<E: Engine, K: KvEngine, L: LockManager> Send for StorageConfigManger<E, K, L> {}
-unsafe impl<E: Engine, K: KvEngine, L: LockManager> Sync for StorageConfigManger<E, K, L> {}
+unsafe impl<E: Engine, L: LockManager> Send for StorageConfigManger<E, L> {}
+unsafe impl<E: Engine, L: LockManager> Sync for StorageConfigManger<E, L> {}
 
-impl<E: Engine, K: KvEngine, L: LockManager> StorageConfigManger<E, K, L> {
+impl<E: Engine, L: LockManager> StorageConfigManger<E, L> {
     pub fn new(
-        tablet_factory: Arc<dyn TabletFactory<K> + Send + Sync>,
         shared_block_cache: bool,
         flow_controller: Arc<FlowController>,
         scheduler: TxnScheduler<E, L>,
     ) -> Self {
         StorageConfigManger {
-            tablet_factory,
             shared_block_cache,
             flow_controller,
             _scheduler: scheduler,
@@ -42,7 +39,7 @@ impl<E: Engine, K: KvEngine, L: LockManager> StorageConfigManger<E, K, L> {
     }
 }
 
-impl<EK: Engine, K: KvEngine, L: LockManager> ConfigManager for StorageConfigManger<EK, K, L> {
+impl<EK: Engine, L: LockManager> ConfigManager for StorageConfigManger<EK, L> {
     fn dispatch(&mut self, mut change: ConfigChange) -> CfgResult<()> {
         if let Some(ConfigValue::Module(mut block_cache)) = change.remove("block_cache") {
             if !self.shared_block_cache {
@@ -51,7 +48,6 @@ impl<EK: Engine, K: KvEngine, L: LockManager> ConfigManager for StorageConfigMan
             if let Some(size) = block_cache.remove("capacity") {
                 if size != ConfigValue::None {
                     let s: ReadableSize = size.into();
-                    self.tablet_factory.set_shared_block_cache_capacity(s.0)?;
                     // Write config to metric
                     CONFIG_ROCKSDB_GAUGE
                         .with_label_values(&[CF_DEFAULT, "block_cache_size"])
@@ -61,16 +57,6 @@ impl<EK: Engine, K: KvEngine, L: LockManager> ConfigManager for StorageConfigMan
         } else if let Some(ConfigValue::Module(mut flow_control)) = change.remove("flow_control") {
             if let Some(v) = flow_control.remove("enable") {
                 let enable: bool = v.into();
-                let enable_str = if enable { "true" } else { "false" };
-                self.tablet_factory.for_each_opened_tablet(
-                    &mut |_region_id, _suffix, tablet: &K| {
-                        for cf in tablet.cf_names() {
-                            tablet
-                                .set_options_cf(cf, &[("disable_write_stall", enable_str)])
-                                .unwrap();
-                        }
-                    },
-                );
                 self.flow_controller.enable(enable);
             }
         }

@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use api_version::{dispatch_api_version, match_template_api_version, KeyMode, KvFormat, RawValue};
 use encryption::DataKeyManager;
-use engine_traits::{raw_ttl::ttl_to_expire_ts, KvEngine, SstWriter};
+use engine_rocks::RocksSstWriter;
+use engine_traits::raw_ttl::ttl_to_expire_ts;
 use kvproto::{import_sstpb::*, kvrpcpb::ApiVersion};
 use tikv_util::time::Instant;
 use txn_types::{is_short_value, Key, TimeStamp, Write as KvWrite, WriteType};
@@ -17,13 +18,13 @@ pub enum SstWriterType {
     Raw,
 }
 
-pub struct TxnSstWriter<E: KvEngine> {
-    default: E::SstWriter,
+pub struct TxnSstWriter {
+    default: RocksSstWriter,
     default_entries: u64,
     default_bytes: u64,
     default_path: ImportPath,
     default_meta: SstMeta,
-    write: E::SstWriter,
+    write: RocksSstWriter,
     write_entries: u64,
     write_bytes: u64,
     write_path: ImportPath,
@@ -32,10 +33,10 @@ pub struct TxnSstWriter<E: KvEngine> {
     api_version: ApiVersion,
 }
 
-impl<E: KvEngine> TxnSstWriter<E> {
+impl TxnSstWriter {
     pub fn new(
-        default: E::SstWriter,
-        write: E::SstWriter,
+        default: RocksSstWriter,
+        write: RocksSstWriter,
         default_path: ImportPath,
         write_path: ImportPath,
         default_meta: SstMeta,
@@ -152,8 +153,8 @@ impl<E: KvEngine> TxnSstWriter<E> {
     }
 }
 
-pub struct RawSstWriter<E: KvEngine> {
-    default: E::SstWriter,
+pub struct RawSstWriter {
+    default: RocksSstWriter,
     default_entries: u64,
     default_deletes: u64,
     default_bytes: u64,
@@ -163,9 +164,9 @@ pub struct RawSstWriter<E: KvEngine> {
     api_version: ApiVersion,
 }
 
-impl<E: KvEngine> RawSstWriter<E> {
+impl RawSstWriter {
     pub fn new(
-        default: E::SstWriter,
+        default: RocksSstWriter,
         default_path: ImportPath,
         default_meta: SstMeta,
         key_manager: Option<Arc<DataKeyManager>>,
@@ -291,17 +292,15 @@ impl<E: KvEngine> RawSstWriter<E> {
 #[cfg(test)]
 mod tests {
     use api_version::{ApiV1Ttl, ApiV2};
-    use engine_rocks::RocksEngine;
-    use engine_traits::{DATA_CFS, DATA_KEY_PREFIX_LEN};
+    use engine_traits::DATA_KEY_PREFIX_LEN;
     use tempfile::TempDir;
-    use test_sst_importer::*;
     use uuid::Uuid;
 
     use super::*;
     use crate::{Config, SstImporter};
 
     // Return the temp dir path to avoid it drop out of the scope.
-    fn new_writer<W, F: Fn(&SstImporter, &RocksEngine, SstMeta) -> Result<W>>(
+    fn new_writer<W, F: Fn(&SstImporter, SstMeta) -> Result<W>>(
         f: F,
         api_version: ApiVersion,
     ) -> (W, TempDir) {
@@ -311,9 +310,7 @@ mod tests {
         let importer_dir = tempfile::tempdir().unwrap();
         let cfg = Config::default();
         let importer = SstImporter::new(&cfg, &importer_dir, None, api_version).unwrap();
-        let db_path = importer_dir.path().join("db");
-        let db = new_test_engine(db_path.to_str().unwrap(), DATA_CFS);
-        (f(&importer, &db, meta).unwrap(), importer_dir)
+        (f(&importer, meta).unwrap(), importer_dir)
     }
 
     #[test]

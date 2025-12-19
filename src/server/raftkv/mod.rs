@@ -12,7 +12,7 @@ use std::{
 };
 
 use collections::HashMap;
-use engine_traits::{KvEngine, Snapshot};
+use engine_rocks::RocksEngine;
 use futures::{Future, Stream};
 use futures_util::stream::empty;
 use kvproto::{errorpb, kvrpcpb::Context, raft_cmdpb::Response};
@@ -63,33 +63,28 @@ impl From<Error> for kv::Error {
     }
 }
 
-pub enum CmdRes<S>
-where
-    S: Snapshot,
-{
+pub enum CmdRes {
     Resp(Vec<Response>),
-    Snap(RegionSnapshot<S>),
+    Snap(RegionSnapshot),
 }
 
 /// `RaftKv` is a storage engine base on `RaftStore`.
 #[derive(Clone)]
-pub struct RaftKv<E, S>
+pub struct RaftKv<S>
 where
-    E: KvEngine,
-    S: RaftStoreRouter<E> + 'static,
+    S: RaftStoreRouter + 'static,
 {
-    router: RaftRouterWrap<S, E>,
-    engine: E,
+    router: RaftRouterWrap<S>,
+    engine: RocksEngine,
     txn_extra_scheduler: Option<Arc<dyn TxnExtraScheduler>>,
 }
 
-impl<E, S> RaftKv<E, S>
+impl<S> RaftKv<S>
 where
-    E: KvEngine,
-    S: RaftStoreRouter<E> + 'static,
+    S: RaftStoreRouter + 'static,
 {
     /// Create a RaftKv using specified configuration.
-    pub fn new(router: S, engine: E, _: RegionInfoAccessor) -> RaftKv<E, S> {
+    pub fn new(router: S, engine: RocksEngine, _: RegionInfoAccessor) -> RaftKv<S> {
         RaftKv {
             router: RaftRouterWrap::new(router),
             engine,
@@ -102,39 +97,36 @@ where
     }
 }
 
-impl<E, S> Display for RaftKv<E, S>
+impl<S> Display for RaftKv<S>
 where
-    E: KvEngine,
-    S: RaftStoreRouter<E> + 'static,
+    S: RaftStoreRouter + 'static,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "RaftKv")
     }
 }
 
-impl<E, S> Debug for RaftKv<E, S>
+impl<S> Debug for RaftKv<S>
 where
-    E: KvEngine,
-    S: RaftStoreRouter<E> + 'static,
+    S: RaftStoreRouter + 'static,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "RaftKv")
     }
 }
 
-impl<E, S> Engine for RaftKv<E, S>
+impl<S> Engine for RaftKv<S>
 where
-    E: KvEngine,
-    S: RaftStoreRouter<E> + 'static,
+    S: RaftStoreRouter + 'static,
 {
-    type Snap = RegionSnapshot<E::Snapshot>;
-    type Local = E;
+    type Snap = RegionSnapshot;
+    type Local = RocksEngine;
 
-    fn kv_engine(&self) -> Option<E> {
+    fn kv_engine(&self) -> Option<Self::Local> {
         Some(self.engine.clone())
     }
 
-    type RaftExtension = RaftRouterWrap<S, E>;
+    type RaftExtension = RaftRouterWrap<S>;
     #[inline]
     fn raft_extension(&self) -> &Self::RaftExtension {
         &self.router

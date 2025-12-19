@@ -3,7 +3,6 @@
 // #[PerformanceCriticalPath]
 //! Multi-version concurrency control functionality.
 
-mod consistency_check;
 pub(super) mod metrics;
 pub(crate) mod reader;
 pub(super) mod txn;
@@ -20,7 +19,6 @@ pub use txn_types::{
 };
 
 pub use self::{
-    consistency_check::{Mvcc as MvccConsistencyCheckObserver, MvccInfoIterator},
     metrics::{GC_DELETE_VERSIONS_HISTOGRAM, MVCC_VERSIONS_HISTOGRAM},
     reader::*,
     txn::{GcInfo, MvccTxn, ReleasedLock, MAX_TXN_WRITE_SIZE},

@@ -9,10 +9,8 @@ use std::{
 };
 
 use encryption_export::{FileConfig, MasterKeyConfig};
-use engine_rocks::{config::BlobRunMode, RocksEngine, RocksSnapshot};
-use engine_traits::{
-    Engines, Iterable, Peekable, RaftEngineDebug, RaftEngineReadOnly, ALL_CFS, CF_RAFT,
-};
+use engine_rocks::{config::BlobRunMode, RocksEngine};
+use engine_traits::Peekable;
 use futures::executor::block_on;
 use grpcio::{ChannelBuilder, Environment};
 use kvproto::{
@@ -23,7 +21,6 @@ use kvproto::{
         AdminCmdType, AdminRequest, ChangePeerRequest, ChangePeerV2Request, CmdType,
         RaftCmdRequest, RaftCmdResponse, Request, StatusCmdType, StatusRequest,
     },
-    raft_serverpb::{PeerState, RaftLocalState, RegionLocalState},
     tikvpb::TikvClient,
 };
 use pd_client::PdClient;
@@ -78,39 +75,6 @@ pub fn must_get_cf_equal(engine: &RocksEngine, cf: &str, key: &[u8], value: &[u8
 
 pub fn must_get_cf_none(engine: &RocksEngine, cf: &str, key: &[u8]) {
     must_get(engine, cf, key, None);
-}
-
-pub fn must_region_cleared(engine: &Engines<RocksEngine, RocksEngine>, region: &metapb::Region) {
-    let id = region.get_id();
-    let state_key = keys::region_state_key(id);
-    let state: RegionLocalState = engine.kv.get_msg_cf(CF_RAFT, &state_key).unwrap().unwrap();
-    assert_eq!(state.get_state(), PeerState::Tombstone, "{:?}", state);
-    let start_key = keys::data_key(region.get_start_key());
-    let end_key = keys::data_key(region.get_end_key());
-    for cf in ALL_CFS {
-        engine
-            .kv
-            .scan(cf, &start_key, &end_key, false, |k, v| {
-                panic!(
-                    "[region {}] unexpected ({:?}, {:?}) in cf {:?}",
-                    id, k, v, cf
-                );
-            })
-            .unwrap();
-    }
-
-    engine
-        .raft
-        .scan_entries(id, |_| panic!("[region {}] unexpected entry", id))
-        .unwrap();
-
-    let state: Option<RaftLocalState> = engine.raft.get_raft_state(id).unwrap();
-    assert!(
-        state.is_none(),
-        "[region {}] raft state key should be removed: {:?}",
-        id,
-        state
-    );
 }
 
 lazy_static! {
@@ -332,7 +296,7 @@ impl Drop for CallbackLeakDetector {
     }
 }
 
-pub fn make_cb(cmd: &RaftCmdRequest) -> (Callback<RocksSnapshot>, mpsc::Receiver<RaftCmdResponse>) {
+pub fn make_cb(cmd: &RaftCmdRequest) -> (Callback, mpsc::Receiver<RaftCmdResponse>) {
     let mut is_read = cmd.has_status_request();
     let mut is_write = cmd.has_admin_request();
     for req in cmd.get_requests() {
@@ -349,7 +313,7 @@ pub fn make_cb(cmd: &RaftCmdRequest) -> (Callback<RocksSnapshot>, mpsc::Receiver
     let (tx, rx) = mpsc::channel();
     let mut detector = CallbackLeakDetector::default();
     let cb = if is_read {
-        Callback::read(Box::new(move |resp: ReadResponse<RocksSnapshot>| {
+        Callback::read(Box::new(move |resp: ReadResponse| {
             detector.called = true;
             // we don't care error actually.
             let _ = tx.send(resp.response);
@@ -368,7 +332,7 @@ pub fn make_cb_ext(
     cmd: &RaftCmdRequest,
     proposed: Option<ExtCallback>,
     committed: Option<ExtCallback>,
-) -> (Callback<RocksSnapshot>, mpsc::Receiver<RaftCmdResponse>) {
+) -> (Callback, mpsc::Receiver<RaftCmdResponse>) {
     let (cb, receiver) = make_cb(cmd);
     if let Callback::Write { cb, .. } = cb {
         (Callback::write_ext(cb, proposed, committed), receiver)
@@ -422,7 +386,7 @@ pub fn async_read_on_peer<T: Simulator>(
 pub fn batch_read_on_peer<T: Simulator>(
     cluster: &mut Cluster<T>,
     requests: &[(metapb::Peer, metapb::Region)],
-) -> Vec<ReadResponse<RocksSnapshot>> {
+) -> Vec<ReadResponse> {
     let batch_id = Some(ThreadReadId::new());
     let (tx, rx) = mpsc::sync_channel(3);
     let mut results = vec![];
@@ -1028,17 +992,6 @@ pub fn must_check_txn_status(
 
 pub fn get_tso(pd_client: &TestPdClient) -> u64 {
     block_on(pd_client.get_tso()).unwrap().into_inner()
-}
-
-pub fn get_raft_msg_or_default<M: protobuf::Message + Default>(
-    engines: &Engines<RocksEngine, RocksEngine>,
-    key: &[u8],
-) -> M {
-    engines
-        .kv
-        .get_msg_cf(CF_RAFT, key)
-        .unwrap()
-        .unwrap_or_default()
 }
 
 pub fn must_raw_put(client: &TikvClient, ctx: Context, key: Vec<u8>, value: Vec<u8>) {

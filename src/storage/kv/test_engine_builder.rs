@@ -124,17 +124,15 @@ impl Default for TestEngineBuilder {
 
 #[cfg(test)]
 mod tests {
-    use engine_rocks::ReadPerfInstant;
     use engine_traits::IterOptions;
-    use kvproto::kvrpcpb::Context;
     use tikv_kv::tests::*;
-    use txn_types::{Key, TimeStamp};
+    use txn_types::Key;
 
     use super::{
         super::{CfStatistics, Engine, Snapshot, TEST_ENGINE_CFS},
         *,
     };
-    use crate::storage::{Cursor, CursorBuilder, ScanMode};
+    use crate::storage::{Cursor, ScanMode};
 
     #[test]
     fn test_rocksdb() {
@@ -188,15 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rocksdb_perf_statistics() {
-        let mut engine = TestEngineBuilder::new()
-            .cfs(TEST_ENGINE_CFS)
-            .build()
-            .unwrap();
-        test_perf_statistics(&mut engine);
-    }
-
-    #[test]
     fn test_max_skippable_internal_keys_error() {
         let mut engine = TestEngineBuilder::new().build().unwrap();
         must_put(&engine, b"foo", b"bar");
@@ -222,151 +211,5 @@ mod tests {
                 .to_string()
                 .contains("Result incomplete: Too many internal keys skipped")
         );
-    }
-
-    fn test_perf_statistics<E: Engine>(engine: &mut E) {
-        must_put(engine, b"foo", b"bar1");
-        must_put(engine, b"foo2", b"bar2");
-        must_put(engine, b"foo3", b"bar3"); // deleted
-        must_put(engine, b"foo4", b"bar4");
-        must_put(engine, b"foo42", b"bar42"); // deleted
-        must_put(engine, b"foo5", b"bar5"); // deleted
-        must_put(engine, b"foo6", b"bar6");
-        must_delete(engine, b"foo3");
-        must_delete(engine, b"foo42");
-        must_delete(engine, b"foo5");
-
-        let snapshot = engine.snapshot(Default::default()).unwrap();
-        let mut iter = Cursor::new(
-            snapshot.iter(CF_DEFAULT, IterOptions::default()).unwrap(),
-            ScanMode::Forward,
-            false,
-        );
-
-        let mut statistics = CfStatistics::default();
-
-        let perf_statistics = ReadPerfInstant::new();
-        iter.seek(&Key::from_raw(b"foo30"), &mut statistics)
-            .unwrap();
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 0);
-
-        let perf_statistics = ReadPerfInstant::new();
-        iter.near_seek(&Key::from_raw(b"foo55"), &mut statistics)
-            .unwrap();
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 2);
-
-        let perf_statistics = ReadPerfInstant::new();
-        iter.prev(&mut statistics);
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 2);
-
-        iter.prev(&mut statistics);
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 3);
-
-        iter.prev(&mut statistics);
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 3);
-    }
-
-    #[test]
-    fn test_prefix_seek_skip_tombstone() {
-        let mut engine = TestEngineBuilder::new().build().unwrap();
-        engine
-            .put_cf(
-                &Context::default(),
-                "write",
-                Key::from_raw(b"aoo").append_ts(TimeStamp::zero()),
-                b"ba".to_vec(),
-            )
-            .unwrap();
-        for key in &[
-            b"foo".to_vec(),
-            b"foo1".to_vec(),
-            b"foo2".to_vec(),
-            b"foo3".to_vec(),
-        ] {
-            engine
-                .put_cf(
-                    &Context::default(),
-                    "write",
-                    Key::from_raw(key).append_ts(TimeStamp::zero()),
-                    b"bar".to_vec(),
-                )
-                .unwrap();
-            engine
-                .delete_cf(
-                    &Context::default(),
-                    "write",
-                    Key::from_raw(key).append_ts(TimeStamp::zero()),
-                )
-                .unwrap();
-        }
-
-        engine
-            .put_cf(
-                &Context::default(),
-                "write",
-                Key::from_raw(b"foo4").append_ts(TimeStamp::zero()),
-                b"bar4".to_vec(),
-            )
-            .unwrap();
-
-        let snapshot = engine.snapshot(Default::default()).unwrap();
-        let mut iter = CursorBuilder::new(&snapshot, CF_WRITE)
-            .prefix_seek(true)
-            .scan_mode(ScanMode::Forward)
-            .build()
-            .unwrap();
-
-        let mut statistics = CfStatistics::default();
-        let perf_statistics = ReadPerfInstant::new();
-        iter.seek(
-            &Key::from_raw(b"aoo").append_ts(TimeStamp::zero()),
-            &mut statistics,
-        )
-        .unwrap();
-        assert_eq!(iter.valid().unwrap(), true);
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 0);
-
-        let perf_statistics = ReadPerfInstant::new();
-        iter.seek(
-            &Key::from_raw(b"foo").append_ts(TimeStamp::zero()),
-            &mut statistics,
-        )
-        .unwrap();
-        assert_eq!(iter.valid().unwrap(), false);
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 1);
-        let perf_statistics = ReadPerfInstant::new();
-        iter.seek(
-            &Key::from_raw(b"foo1").append_ts(TimeStamp::zero()),
-            &mut statistics,
-        )
-        .unwrap();
-        assert_eq!(iter.valid().unwrap(), false);
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 1);
-        let perf_statistics = ReadPerfInstant::new();
-        iter.seek(
-            &Key::from_raw(b"foo2").append_ts(TimeStamp::zero()),
-            &mut statistics,
-        )
-        .unwrap();
-        assert_eq!(iter.valid().unwrap(), false);
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 1);
-        let perf_statistics = ReadPerfInstant::new();
-        assert_eq!(
-            iter.seek(
-                &Key::from_raw(b"foo4").append_ts(TimeStamp::zero()),
-                &mut statistics
-            )
-            .unwrap(),
-            true
-        );
-        assert_eq!(iter.valid().unwrap(), true);
-        assert_eq!(
-            iter.key(&mut statistics),
-            Key::from_raw(b"foo4")
-                .append_ts(TimeStamp::zero())
-                .as_encoded()
-                .as_slice()
-        );
-        assert_eq!(perf_statistics.delta().internal_delete_skipped_count, 0);
     }
 }

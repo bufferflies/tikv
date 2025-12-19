@@ -577,9 +577,9 @@ impl<'a, S: 'a + Snapshot> CursorBuilder<'a, S> {
 mod tests {
     use engine_rocks::{
         util::{new_engine_opt, FixedPrefixSliceTransform},
-        RocksCfOptions, RocksDbOptions, RocksEngine, RocksSnapshot,
+        RocksCfOptions, RocksDbOptions, RocksEngine,
     };
-    use engine_traits::{IterOptions, SyncMutable, CF_DEFAULT};
+    use engine_traits::{IterOptions, CF_DEFAULT};
     use keys::data_key;
     use kvproto::metapb::{Peer, Region};
     use raftstore::store::RegionSnapshot;
@@ -630,7 +630,7 @@ mod tests {
 
         let (region, _) = load_default_dataset(engine.clone());
 
-        let snap = RegionSnapshot::<RocksSnapshot>::from_raw(engine, region);
+        let snap = RegionSnapshot::from_raw(engine, region);
         let mut statistics = CfStatistics::default();
         let mut iter_opt = IterOptions::default();
         iter_opt.use_prefix_seek();
@@ -678,7 +678,7 @@ mod tests {
         .unwrap();
         let (region, test_data) = load_default_dataset(engine.clone());
 
-        let snap = RegionSnapshot::<RocksSnapshot>::from_raw(engine.clone(), region);
+        let snap = RegionSnapshot::from_raw(engine.clone(), region);
         let mut statistics = CfStatistics::default();
         let it = snap.iter(CF_DEFAULT, IterOptions::default()).unwrap();
         let mut iter = Cursor::new(it, ScanMode::Mixed, false);
@@ -733,7 +733,7 @@ mod tests {
         // test last region
         let mut region = Region::default();
         region.mut_peers().push(Peer::default());
-        let snap = RegionSnapshot::<RocksSnapshot>::from_raw(engine, region);
+        let snap = RegionSnapshot::from_raw(engine, region);
         let it = snap.iter(CF_DEFAULT, IterOptions::default()).unwrap();
         let mut iter = Cursor::new(it, ScanMode::Mixed, false);
         assert!(

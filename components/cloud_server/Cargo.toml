@@ -16,12 +16,6 @@ mem-profiling = ["tikv/mem-profiling"]
 failpoints = ["fail/failpoints"]
 cloud-aws = ["encryption_export/cloud-aws"]
 cloud-gcp = ["encryption_export/cloud-gcp"]
-test-engines-rocksdb = [
-    "tikv/test-engines-rocksdb",
-]
-test-engines-panic = [
-    "tikv/test-engines-panic",
-]
 
 nortcheck = ["engine_rocks/nortcheck"]
 

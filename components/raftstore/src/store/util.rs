@@ -15,7 +15,6 @@ use std::{
 };
 
 use collections::HashSet;
-use engine_traits::KvEngine;
 use kvproto::{
     kvrpcpb::{self, KeyRange, LeaderInfo},
     metapb::{self, Peer, PeerRole, Region, RegionEpoch},
@@ -1094,10 +1093,10 @@ impl RegionReadProgressRegistry {
 
     // Update `safe_ts` with the provided `LeaderInfo` and return the regions that
     // have the same `LeaderInfo`
-    pub fn handle_check_leaders<E: KvEngine>(
+    pub fn handle_check_leaders(
         &self,
         leaders: Vec<LeaderInfo>,
-        coprocessor: &CoprocessorHost<E>,
+        coprocessor: &CoprocessorHost,
     ) -> Vec<u64> {
         let mut regions = Vec::with_capacity(leaders.len());
         let registry = self.registry.lock().unwrap();
@@ -1179,7 +1178,7 @@ impl RegionReadProgress {
         }
     }
 
-    pub fn update_applied<E: KvEngine>(&self, applied: u64, coprocessor: &CoprocessorHost<E>) {
+    pub fn update_applied(&self, applied: u64, coprocessor: &CoprocessorHost) {
         let mut core = self.core.lock().unwrap();
         if let Some(ts) = core.update_applied(applied) {
             if !core.pause {
@@ -1219,11 +1218,11 @@ impl RegionReadProgress {
         }
     }
 
-    pub fn merge_safe_ts<E: KvEngine>(
+    pub fn merge_safe_ts(
         &self,
         source_safe_ts: u64,
         merge_index: u64,
-        coprocessor: &CoprocessorHost<E>,
+        coprocessor: &CoprocessorHost,
     ) {
         let mut core = self.core.lock().unwrap();
         if let Some(ts) = core.merge_safe_ts(source_safe_ts, merge_index) {
@@ -1242,10 +1241,10 @@ impl RegionReadProgress {
 
     // Consume the provided `LeaderInfo` to update `safe_ts` and return whether the
     // provided `LeaderInfo` is same as ours
-    pub fn consume_leader_info<E: KvEngine>(
+    pub fn consume_leader_info(
         &self,
         leader_info: &LeaderInfo,
-        coprocessor: &CoprocessorHost<E>,
+        coprocessor: &CoprocessorHost,
     ) -> bool {
         let mut core = self.core.lock().unwrap();
         if leader_info.has_read_state() {
@@ -1617,7 +1616,6 @@ impl LatencyInspector {
 mod tests {
     use std::thread;
 
-    use engine_test::kv::KvTestEngine;
     use kvproto::{
         metapb::{self, RegionEpoch},
         raft_cmdpb::AdminRequest,
@@ -2162,7 +2160,7 @@ mod tests {
         assert_eq!(rrp.safe_ts(), 10);
         assert_eq!(pending_items_num(&rrp), 10);
 
-        let coprocessor_host = CoprocessorHost::<KvTestEngine>::default();
+        let coprocessor_host = CoprocessorHost::default();
         rrp.update_applied(20, &coprocessor_host);
         assert_eq!(rrp.safe_ts(), 20);
         assert_eq!(pending_items_num(&rrp), 0);

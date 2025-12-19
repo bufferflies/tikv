@@ -14,7 +14,6 @@ use std::{
     thread::JoinHandle,
 };
 
-use engine_traits::KvEngine;
 use kvproto::metapb::RegionEpoch;
 use pd_client::PdClient;
 use raftstore::coprocessor::CoprocessorHost;
@@ -195,10 +194,7 @@ impl LockManager {
     /// Creates a `RoleChangeNotifier` of the deadlock detector worker and
     /// registers it to the `CoprocessorHost` to observe the role change
     /// events of the leader region.
-    pub fn register_detector_role_change_observer(
-        &self,
-        host: &mut CoprocessorHost<impl KvEngine>,
-    ) {
+    pub fn register_detector_role_change_observer(&self, host: &mut CoprocessorHost) {
         let role_change_notifier = RoleChangeNotifier::new(self.detector_scheduler.clone());
         role_change_notifier.register(host);
     }
@@ -304,7 +300,6 @@ impl LockManagerTrait for LockManager {
 mod tests {
     use std::{thread, time::Duration};
 
-    use engine_test::kv::KvTestEngine;
     use futures::executor::block_on;
     use kvproto::metapb::{Peer, Region};
     use raft::StateRole;
@@ -319,7 +314,7 @@ mod tests {
     use crate::storage::lock_manager::LockDigest;
 
     fn start_lock_manager() -> LockManager {
-        let mut coprocessor_host = CoprocessorHost::<KvTestEngine>::default();
+        let mut coprocessor_host = CoprocessorHost::default();
 
         let cfg = Config {
             wait_for_lock_timeout: ReadableDuration::millis(3000),

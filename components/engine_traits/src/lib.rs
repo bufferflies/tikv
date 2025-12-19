@@ -57,9 +57,6 @@
 //!   by creating instances of the TiKV-specific [`Iterator`] trait. This
 //!   includes engines and snapshots.
 //!
-//! - [`SyncMutable`] and [`Mutable`] - types to which single key/value pairs
-//!   can be written. This includes engines and write batches.
-//!
 //! - [`WriteBatch`] - types that can commit multiple key/value pairs in
 //!   batches. A `WriteBatchExt::WriteBatch` commits all pairs in one atomic
 //!   transaction. A `WriteBatchExt::WriteBatchVec` does not (FIXME: is this
@@ -254,8 +251,6 @@
 
 #[macro_use(fail_point)]
 extern crate fail;
-#[cfg(test)]
-extern crate test;
 
 // These modules contain traits that need to be implemented by engines, either
 // they are required by KvEngine or are an associated type of KvEngine. It is
@@ -265,53 +260,20 @@ extern crate test;
 
 mod cf_names;
 pub use crate::cf_names::*;
-mod cf_options;
-pub use crate::cf_options::*;
-mod compact;
-pub use crate::compact::*;
-mod db_options;
-pub use crate::db_options::*;
 mod db_vector;
 pub use crate::db_vector::*;
-mod engine;
-pub use crate::engine::*;
 mod file_system;
 pub use crate::file_system::*;
-mod import;
-pub use import::*;
-mod misc;
-pub use misc::*;
-mod snapshot;
-pub use crate::snapshot::*;
 mod sst;
 pub use crate::sst::*;
-mod write_batch;
-pub use crate::write_batch::*;
 mod encryption;
 pub use crate::encryption::*;
-mod mvcc_properties;
-mod sst_partitioner;
-pub use crate::sst_partitioner::*;
-mod range_properties;
-pub use crate::{mvcc_properties::*, range_properties::*};
-mod ttl_properties;
-pub use crate::ttl_properties::*;
-mod perf_context;
-pub use crate::perf_context::*;
-mod flow_control_factors;
-pub use crate::flow_control_factors::*;
-mod table_properties;
-pub use crate::table_properties::*;
-mod checkpoint;
-pub use crate::checkpoint::*;
 
 // These modules contain more general traits, some of which may be implemented
 // by multiple types.
 
 mod iterable;
 pub use crate::iterable::*;
-mod mutable;
-pub use crate::mutable::*;
 mod peekable;
 pub use crate::peekable::*;
 
@@ -320,8 +282,6 @@ pub use crate::peekable::*;
 
 mod cf_defs;
 pub use crate::cf_defs::*;
-mod engines;
-pub use engines::*;
 mod errors;
 pub use crate::errors::*;
 mod options;
@@ -329,20 +289,10 @@ pub use crate::options::*;
 pub mod range;
 pub use crate::range::*;
 
-// FIXME: Move raft engine traits to a separate crate.
-
-mod raft_engine;
-pub use raft_engine::{
-    CacheStats, RaftEngine, RaftEngineDebug, RaftEngineReadOnly, RaftLogBatch, RaftLogGcTask,
-    RAFT_LOG_MULTI_GET_CNT,
-};
-
 // These modules need further scrutiny
 
-pub mod compaction_job;
 pub mod raw_ttl;
 pub mod util;
-pub use compaction_job::*;
 
 // FIXME: This should live somewhere else
 pub const DATA_KEY_PREFIX_LEN: usize = 1;

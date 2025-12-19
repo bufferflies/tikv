@@ -1,16 +1,14 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
 // #[PerformanceCriticalPath] called by Fsm on_ready_compute_hash
-use std::{marker::PhantomData, mem, ops::Deref};
+use std::{mem, ops::Deref};
 
-use engine_traits::{CfName, KvEngine};
+use engine_traits::CfName;
 use kvproto::{metapb::Region, raft_cmdpb::RaftCmdRequest};
 use protobuf::Message;
 use raft::eraftpb;
 
 use super::*;
-use crate::store::CasualRouter;
-
 struct Entry<T> {
     priority: u32,
     observer: T,
@@ -75,57 +73,6 @@ macro_rules! impl_box_observer {
     };
 }
 
-// This is the same as impl_box_observer_g except $ob has a typaram
-macro_rules! impl_box_observer_g {
-    ($name:ident, $ob:ident, $wrapper:ident) => {
-        pub struct $name<E: KvEngine>(Box<dyn ClonableObserver<Ob = dyn $ob<E>> + Send>);
-        impl<E: KvEngine + 'static + Send> $name<E> {
-            pub fn new<T: 'static + $ob<E> + Clone>(observer: T) -> $name<E> {
-                $name(Box::new($wrapper {
-                    inner: observer,
-                    _phantom: PhantomData,
-                }))
-            }
-        }
-        impl<E: KvEngine + 'static> Clone for $name<E> {
-            fn clone(&self) -> $name<E> {
-                $name((**self).box_clone())
-            }
-        }
-        impl<E: KvEngine> Deref for $name<E> {
-            type Target = Box<dyn ClonableObserver<Ob = dyn $ob<E>> + Send>;
-
-            fn deref(&self) -> &Box<dyn ClonableObserver<Ob = dyn $ob<E>> + Send> {
-                &self.0
-            }
-        }
-
-        struct $wrapper<E: KvEngine, T: $ob<E> + Clone> {
-            inner: T,
-            _phantom: PhantomData<E>,
-        }
-        impl<E: KvEngine + 'static + Send, T: 'static + $ob<E> + Clone> ClonableObserver
-            for $wrapper<E, T>
-        {
-            type Ob = dyn $ob<E>;
-            fn inner(&self) -> &Self::Ob {
-                &self.inner as _
-            }
-
-            fn inner_mut(&mut self) -> &mut Self::Ob {
-                &mut self.inner as _
-            }
-
-            fn box_clone(&self) -> Box<dyn ClonableObserver<Ob = Self::Ob> + Send> {
-                Box::new($wrapper {
-                    inner: self.inner.clone(),
-                    _phantom: PhantomData,
-                })
-            }
-        }
-    };
-}
-
 impl_box_observer!(BoxAdminObserver, AdminObserver, WrappedAdminObserver);
 impl_box_observer!(BoxQueryObserver, QueryObserver, WrappedQueryObserver);
 impl_box_observer!(
@@ -150,40 +97,21 @@ impl_box_observer!(
     ReadIndexObserver,
     WrappedReadIndexObserver
 );
-impl_box_observer_g!(BoxCmdObserver, CmdObserver, WrappedCmdObserver);
+impl_box_observer!(BoxCmdObserver, CmdObserver, WrappedCmdObserver);
 
 /// Registry contains all registered coprocessors.
-#[derive(Clone)]
-pub struct Registry<E>
-where
-    E: KvEngine + 'static,
-{
+#[derive(Clone, Default)]
+pub struct Registry {
     admin_observers: Vec<Entry<BoxAdminObserver>>,
     query_observers: Vec<Entry<BoxQueryObserver>>,
     apply_snapshot_observers: Vec<Entry<BoxApplySnapshotObserver>>,
     role_observers: Vec<Entry<BoxRoleObserver>>,
     region_change_observers: Vec<Entry<BoxRegionChangeObserver>>,
-    cmd_observers: Vec<Entry<BoxCmdObserver<E>>>,
+    cmd_observers: Vec<Entry<BoxCmdObserver>>,
     read_index_observers: Vec<Entry<BoxReadIndexObserver>>,
     pd_task_observers: Vec<Entry<BoxPdTaskObserver>>,
     update_safe_ts_observers: Vec<Entry<BoxUpdateSafeTsObserver>>,
     // TODO: add endpoint
-}
-
-impl<E: KvEngine> Default for Registry<E> {
-    fn default() -> Registry<E> {
-        Registry {
-            admin_observers: Default::default(),
-            query_observers: Default::default(),
-            apply_snapshot_observers: Default::default(),
-            role_observers: Default::default(),
-            region_change_observers: Default::default(),
-            cmd_observers: Default::default(),
-            read_index_observers: Default::default(),
-            pd_task_observers: Default::default(),
-            update_safe_ts_observers: Default::default(),
-        }
-    }
 }
 
 macro_rules! push {
@@ -199,7 +127,7 @@ macro_rules! push {
     };
 }
 
-impl<E: KvEngine> Registry<E> {
+impl Registry {
     pub fn register_admin_observer(&mut self, priority: u32, ao: BoxAdminObserver) {
         push!(priority, ao, self.admin_observers);
     }
@@ -228,7 +156,7 @@ impl<E: KvEngine> Registry<E> {
         push!(priority, rlo, self.region_change_observers);
     }
 
-    pub fn register_cmd_observer(&mut self, priority: u32, rlo: BoxCmdObserver<E>) {
+    pub fn register_cmd_observer(&mut self, priority: u32, rlo: BoxCmdObserver) {
         push!(priority, rlo, self.cmd_observers);
     }
 
@@ -286,32 +214,14 @@ macro_rules! loop_ob {
 }
 
 /// Admin and invoke all coprocessors.
-#[derive(Clone)]
-pub struct CoprocessorHost<E>
-where
-    E: KvEngine + 'static,
-{
-    pub registry: Registry<E>,
+#[derive(Clone, Default)]
+pub struct CoprocessorHost {
+    pub registry: Registry,
     pub cfg: Config,
 }
 
-impl<E: KvEngine> Default for CoprocessorHost<E>
-where
-    E: 'static,
-{
-    fn default() -> Self {
-        CoprocessorHost {
-            registry: Default::default(),
-            cfg: Default::default(),
-        }
-    }
-}
-
-impl<E: KvEngine> CoprocessorHost<E> {
-    pub fn new<C: CasualRouter<E> + Clone + Send + 'static>(
-        _ch: C,
-        cfg: Config,
-    ) -> CoprocessorHost<E> {
+impl CoprocessorHost {
+    pub fn new(cfg: Config) -> CoprocessorHost {
         let registry = Registry::default();
         CoprocessorHost { registry, cfg }
     }
@@ -579,7 +489,6 @@ impl<E: KvEngine> CoprocessorHost<E> {
         &self,
         max_level: ObserveLevel,
         mut cmd_batches: Vec<CmdBatch>,
-        engine: &E,
     ) {
         // Some observer assert `cmd_batches` is not empty
         if cmd_batches.is_empty() {
@@ -592,7 +501,7 @@ impl<E: KvEngine> CoprocessorHost<E> {
         }
         for observer in &self.registry.cmd_observers {
             let observer = observer.observer.inner();
-            observer.on_flush_applied_cmd_batch(max_level, &mut cmd_batches, engine);
+            observer.on_flush_applied_cmd_batch(max_level, &mut cmd_batches);
         }
     }
 
@@ -639,7 +548,6 @@ impl<E: KvEngine> CoprocessorHost<E> {
 mod tests {
     use std::sync::Arc;
 
-    use engine_panic::PanicEngine;
     use kvproto::{
         metapb::Region,
         raft_cmdpb::{AdminRequest, AdminResponse, RaftCmdRequest, RaftCmdResponse, Request},
@@ -902,13 +810,8 @@ mod tests {
         }
     }
 
-    impl CmdObserver<PanicEngine> for TestCoprocessor {
-        fn on_flush_applied_cmd_batch(
-            &self,
-            _: ObserveLevel,
-            _: &mut Vec<CmdBatch>,
-            _: &PanicEngine,
-        ) {
+    impl CmdObserver for TestCoprocessor {
+        fn on_flush_applied_cmd_batch(&self, _: ObserveLevel, _: &mut Vec<CmdBatch>) {
             self.called.fetch_add(
                 ObserverIndex::OnFlushAppliedCmdBatch as usize,
                 Ordering::SeqCst,
@@ -942,7 +845,7 @@ mod tests {
 
     #[test]
     fn test_trigger_right_hook() {
-        let mut host = CoprocessorHost::<PanicEngine>::default();
+        let mut host = CoprocessorHost::default();
         let ob = TestCoprocessor::default();
         host.registry
             .register_admin_observer(1, BoxAdminObserver::new(ob.clone()));
@@ -1012,7 +915,7 @@ mod tests {
         );
         let mut cb = CmdBatch::new(&observe_info, 0);
         cb.push(&observe_info, 0, Cmd::default());
-        host.on_flush_applied_cmd_batch(cb.level, vec![cb], &PanicEngine);
+        host.on_flush_applied_cmd_batch(cb.level, vec![cb]);
         index += ObserverIndex::PostApplyQuery as usize;
         index += ObserverIndex::OnFlushAppliedCmdBatch as usize;
         assert_all!([&ob.called], &[index]);
@@ -1078,7 +981,7 @@ mod tests {
 
     #[test]
     fn test_order() {
-        let mut host = CoprocessorHost::<PanicEngine>::default();
+        let mut host = CoprocessorHost::default();
 
         let ob1 = TestCoprocessor::default();
         host.registry

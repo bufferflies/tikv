@@ -11,7 +11,7 @@ use std::{
 use async_channel::SendError;
 use causal_ts::{CausalTsProvider, CausalTsProviderImpl};
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::{name_to_cf, raw_ttl::ttl_current_ts, CfName, KvEngine, SstCompressionType};
+use engine_traits::{name_to_cf, raw_ttl::ttl_current_ts, CfName, SstCompressionType};
 use external_storage::{BackendConfig, HdfsConfig};
 use external_storage_export::{create_storage, ExternalStorage};
 use futures::{channel::mpsc::*, executor::block_on};
@@ -158,12 +158,12 @@ pub struct BackupRange {
 
 /// The generic saveable writer. for generic `InMemBackupFiles`.
 /// Maybe what we really need is make Writer a trait...
-enum KvWriter<E: KvEngine> {
-    Txn(BackupWriter<E>),
-    Raw(BackupRawKvWriter<E>),
+enum KvWriter {
+    Txn(BackupWriter),
+    Raw(BackupRawKvWriter),
 }
 
-impl<E: KvEngine> fmt::Debug for KvWriter<E> {
+impl fmt::Debug for KvWriter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Txn(_) => f.debug_tuple("Txn").finish(),
@@ -172,7 +172,7 @@ impl<E: KvEngine> fmt::Debug for KvWriter<E> {
     }
 }
 
-impl<E: KvEngine> KvWriter<E> {
+impl KvWriter {
     async fn save(self, storage: &dyn ExternalStorage) -> Result<Vec<File>> {
         match self {
             Self::Txn(writer) => writer.save(storage).await,
@@ -189,8 +189,8 @@ impl<E: KvEngine> KvWriter<E> {
 }
 
 #[derive(Debug)]
-struct InMemBackupFiles<E: KvEngine> {
-    files: KvWriter<E>,
+struct InMemBackupFiles {
+    files: KvWriter,
     start_key: Vec<u8>,
     end_key: Vec<u8>,
     start_version: TimeStamp,
@@ -198,8 +198,8 @@ struct InMemBackupFiles<E: KvEngine> {
     region: Region,
 }
 
-async fn save_backup_file_worker<E: KvEngine>(
-    rx: async_channel::Receiver<InMemBackupFiles<E>>,
+async fn save_backup_file_worker(
+    rx: async_channel::Receiver<InMemBackupFiles>,
     tx: UnboundedSender<BackupResponse>,
     storage: Arc<dyn ExternalStorage>,
     codec: KeyValueCodec,
@@ -271,10 +271,10 @@ async fn save_backup_file_worker<E: KvEngine>(
 
 /// Send the save task to the save worker.
 /// Record the wait time at the same time.
-async fn send_to_worker_with_metrics<E: KvEngine>(
-    tx: &async_channel::Sender<InMemBackupFiles<E>>,
-    files: InMemBackupFiles<E>,
-) -> std::result::Result<(), SendError<InMemBackupFiles<E>>> {
+async fn send_to_worker_with_metrics(
+    tx: &async_channel::Sender<InMemBackupFiles>,
+    files: InMemBackupFiles,
+) -> std::result::Result<(), SendError<InMemBackupFiles>> {
     let files = match tx.try_send(files) {
         Ok(_) => return Ok(()),
         Err(e) => e.into_inner(),
@@ -287,14 +287,14 @@ async fn send_to_worker_with_metrics<E: KvEngine>(
 
 impl BackupRange {
     /// Get entries from the scanner and save them to storage
-    async fn backup<E: Engine, K: KvEngine>(
+    async fn backup<E: Engine>(
         &self,
-        writer_builder: BackupWriterBuilder<K>,
+        writer_builder: BackupWriterBuilder,
         mut engine: E,
         concurrency_manager: ConcurrencyManager,
         backup_ts: TimeStamp,
         begin_ts: TimeStamp,
-        saver: async_channel::Sender<InMemBackupFiles<K>>,
+        saver: async_channel::Sender<InMemBackupFiles>,
         storage_name: &str,
     ) -> Result<Statistics> {
         assert!(!self.codec.is_raw_kv);
@@ -437,9 +437,9 @@ impl BackupRange {
         Ok(stat)
     }
 
-    fn backup_raw<E: KvEngine, S: Snapshot>(
+    fn backup_raw<S: Snapshot>(
         &self,
-        writer: &mut BackupRawKvWriter<E>,
+        writer: &mut BackupRawKvWriter,
         snapshot: &S,
     ) -> Result<Statistics> {
         assert!(self.codec.is_raw_kv);
@@ -498,20 +498,18 @@ impl BackupRange {
         Ok(statistics)
     }
 
-    async fn backup_raw_kv_to_file<E: Engine, K: KvEngine>(
+    async fn backup_raw_kv_to_file<E: Engine>(
         &self,
         mut engine: E,
-        kv: K,
         limiter: &Limiter,
         file_name: String,
         cf: CfNameWrap,
         compression_type: Option<SstCompressionType>,
         compression_level: i32,
         cipher: CipherInfo,
-        saver_tx: async_channel::Sender<InMemBackupFiles<K>>,
+        saver_tx: async_channel::Sender<InMemBackupFiles>,
     ) -> Result<Statistics> {
         let mut writer = match BackupRawKvWriter::new(
-            kv,
             &file_name,
             cf,
             limiter.clone(),
@@ -651,11 +649,10 @@ impl SoftLimitKeeper {
 /// The endpoint of backup.
 ///
 /// It coordinates backup tasks and dispatches them to different workers.
-pub struct Endpoint<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> {
+pub struct Endpoint<E: Engine, R: RegionInfoProvider + Clone + 'static> {
     store_id: u64,
     pool: RefCell<ControlThreadPool>,
     io_pool: Runtime,
-    kv: K,
     config_manager: ConfigManager,
     concurrency_manager: ConcurrencyManager,
     softlimit: SoftLimitKeeper,
@@ -803,17 +800,16 @@ impl<R: RegionInfoProvider> Progress<R> {
     }
 }
 
-impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E, K, R> {
+impl<E: Engine, R: RegionInfoProvider + Clone + 'static> Endpoint<E, R> {
     pub fn new(
         store_id: u64,
         engine: E,
         region_info: R,
-        kv: K,
         config: BackupConfig,
         concurrency_manager: ConcurrencyManager,
         api_version: ApiVersion,
         causal_ts_provider: Option<Arc<CausalTsProviderImpl>>,
-    ) -> Endpoint<E, K, R> {
+    ) -> Endpoint<E, R> {
         let pool = ControlThreadPool::new();
         let rt = utils::create_tokio_runtime(config.io_thread_size, "backup-io").unwrap();
         let config_manager = ConfigManager(Arc::new(RwLock::new(config)));
@@ -824,7 +820,6 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
             engine,
             region_info,
             pool: RefCell::new(pool),
-            kv,
             io_pool: rt,
             softlimit,
             config_manager,
@@ -859,14 +854,13 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
         &self,
         prs: Arc<Mutex<Progress<R>>>,
         request: Request,
-        saver_tx: async_channel::Sender<InMemBackupFiles<K>>,
+        saver_tx: async_channel::Sender<InMemBackupFiles>,
         resp_tx: UnboundedSender<BackupResponse>,
         _backend: Arc<dyn ExternalStorage>,
     ) {
         let start_ts = request.start_ts;
         let backup_ts = request.end_ts;
         let engine = self.engine.clone();
-        let kv = self.kv.clone();
         let store_id = self.store_id;
         let concurrency_manager = self.concurrency_manager.clone();
         let batch_size = self.config_manager.0.read().unwrap().batch_size;
@@ -925,8 +919,7 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
                     let stat = if is_raw_kv {
                         brange
                             .backup_raw_kv_to_file(
-                                engine,
-                                kv.clone(),
+                                engine.clone(),
                                 &request.limiter,
                                 name,
                                 cf.into(),
@@ -941,7 +934,6 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
                             store_id,
                             request.limiter.clone(),
                             brange.region.clone(),
-                            kv.clone(),
                             ct,
                             request.compression_level,
                             sst_max_size,
@@ -1090,9 +1082,7 @@ impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Endpoint<E
     }
 }
 
-impl<E: Engine, K: KvEngine, R: RegionInfoProvider + Clone + 'static> Runnable
-    for Endpoint<E, K, R>
-{
+impl<E: Engine, R: RegionInfoProvider + Clone + 'static> Runnable for Endpoint<E, R> {
     type Task = Task;
 
     fn run(&mut self, task: Task) {
@@ -1235,7 +1225,6 @@ pub mod tests {
     };
 
     use api_version::{api_v2::RAW_KEY_PREFIX, dispatch_api_version, KvFormat, RawValue};
-    use engine_traits::MiscExt;
     use external_storage_export::{make_local_backend, make_noop_backend};
     use file_system::{IoOp, IoRateLimiter, IoType};
     use futures::{executor::block_on, stream::StreamExt};
@@ -1314,10 +1303,7 @@ pub mod tests {
         }
     }
 
-    pub fn new_endpoint() -> (
-        TempDir,
-        Endpoint<RocksEngine, engine_rocks::RocksEngine, MockRegionInfoProvider>,
-    ) {
+    pub fn new_endpoint() -> (TempDir, Endpoint<RocksEngine, MockRegionInfoProvider>) {
         new_endpoint_with_limiter(None, ApiVersion::V1, false, None)
     }
 
@@ -1326,10 +1312,7 @@ pub mod tests {
         api_version: ApiVersion,
         is_raw_kv: bool,
         causal_ts_provider: Option<Arc<CausalTsProviderImpl>>,
-    ) -> (
-        TempDir,
-        Endpoint<RocksEngine, engine_rocks::RocksEngine, MockRegionInfoProvider>,
-    ) {
+    ) -> (TempDir, Endpoint<RocksEngine, MockRegionInfoProvider>) {
         let temp = TempDir::new().unwrap();
         let rocks = TestEngineBuilder::new()
             .path(temp.path())
@@ -1344,14 +1327,12 @@ pub mod tests {
             .unwrap();
         let concurrency_manager = ConcurrencyManager::new(1.into());
         let need_encode_key = !is_raw_kv || api_version == ApiVersion::V2;
-        let db = rocks.get_rocksdb();
         (
             temp,
             Endpoint::new(
                 1,
                 rocks,
                 MockRegionInfoProvider::new(need_encode_key),
-                db,
                 BackupConfig {
                     num_threads: 4,
                     batch_size: 8,

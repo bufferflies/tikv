@@ -6,6 +6,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 pub const WRITE_CF: usize = 0;
 pub const LOCK_CF: usize = 1;
 pub const EXTRA_CF: usize = 2;
+pub const CF_NAMES: [&str; 3] = ["write", "lock", "extra"];
 
 pub const USER_META_FORMAT_V1: u8 = 1;
 

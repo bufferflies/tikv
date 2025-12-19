@@ -8,7 +8,6 @@ use std::{
 };
 
 use collections::HashMap;
-use engine_traits::KvEngine;
 use futures::{
     future::{self, FutureExt, TryFutureExt},
     sink::SinkExt,
@@ -544,7 +543,7 @@ impl RoleChangeNotifier {
         }
     }
 
-    pub(crate) fn register(self, host: &mut CoprocessorHost<impl KvEngine>) {
+    pub(crate) fn register(self, host: &mut CoprocessorHost) {
         host.registry
             .register_role_observer(1, BoxRoleObserver::new(self.clone()));
         host.registry
@@ -1100,7 +1099,6 @@ impl Deadlock for Service {
 
 #[cfg(test)]
 pub mod tests {
-    use engine_test::kv::KvTestEngine;
     use futures::executor::block_on;
     use raftstore::coprocessor::RegionChangeReason;
     use security::{GetSecurityManager, SecurityConfig};
@@ -1466,9 +1464,7 @@ pub mod tests {
         }
     }
 
-    fn start_deadlock_detector(
-        host: &mut CoprocessorHost<KvTestEngine>,
-    ) -> (FutureWorker<Task>, Scheduler) {
+    fn start_deadlock_detector(host: &mut CoprocessorHost) -> (FutureWorker<Task>, Scheduler) {
         let waiter_mgr_worker = FutureWorker::new("dummy-waiter-mgr");
         let waiter_mgr_scheduler = WaiterMgrScheduler::new(waiter_mgr_worker.scheduler());
         let mut detector_worker = FutureWorker::new("test-deadlock-detector");
