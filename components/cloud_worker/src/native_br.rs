@@ -247,22 +247,33 @@ pub(crate) async fn handle_restore_keyspace(
         }
     };
 
-    let target_keyspace = query_pairs.get("keyspace");
-    if target_keyspace.is_none() {
-        return Ok(make_response(
-            StatusCode::BAD_REQUEST,
-            "Keyspace name is none",
-        ));
-    }
-    let mut source_keyspace = query_pairs.get("source_keyspace");
-    let inplace_restore = source_keyspace.is_none();
-    if inplace_restore {
-        // treat source as target
-        source_keyspace = target_keyspace;
-    }
+    let target_keyspace = match query_pairs.get("keyspace") {
+        Some(ks) if !ks.is_empty() => ks.to_string(),
+        Some(_) => {
+            return Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "Keyspace name is empty",
+            ));
+        }
+        None => {
+            return Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "Keyspace name is none",
+            ));
+        }
+    };
 
-    let source_keyspace = source_keyspace.unwrap().to_string();
-    let target_keyspace = target_keyspace.unwrap().to_string();
+    // It's inplace restore for "keyspace" when "source_keyspace" is not specified.
+    let source_keyspace = match query_pairs.get("source_keyspace") {
+        Some(ks) if !ks.is_empty() => ks.to_string(),
+        Some(_) => {
+            return Ok(make_response(
+                StatusCode::BAD_REQUEST,
+                "Source keyspace name is empty",
+            ));
+        }
+        None => target_keyspace.clone(),
+    };
 
     let keyspace_tag = format!("{}->{}", source_keyspace, target_keyspace);
 
@@ -1415,7 +1426,6 @@ pub mod test_utils {
 
     use chrono::{DateTime, Utc};
     use security::{HttpResult, RestfulClient, SecurityManager};
-    use tikv_util::box_try;
 
     use crate::native_br::{
         BackupItem, ListBackupResponse, RestoreProgressResponse, JSON_TIME_FORMAT,
@@ -1438,7 +1448,7 @@ pub mod test_utils {
         ) -> HttpResult<Self> {
             Ok(Self {
                 cluster_id,
-                inner: box_try!(RestfulClient::new("native_br_cli", endpoints, security_mgr)),
+                inner: RestfulClient::new("native_br_cli", endpoints, security_mgr)?,
             })
         }
 
@@ -1455,33 +1465,33 @@ pub mod test_utils {
                     ),
                 ])
                 .finish();
-            Ok(box_try!(
-                self.inner.get(format!("api/v1/backups?{query}")).await
-            ))
+            self.inner.get(format!("api/v1/backups?{query}")).await
         }
 
         pub async fn restore_keyspace_to_backup(
             &self,
             restore_id: u64,
             keyspace: String,
+            source_keyspace: Option<String>,
             backup: &BackupItem,
         ) -> HttpResult<RestoreProgressResponse> {
-            let query = url::form_urlencoded::Serializer::new(String::new())
-                .extend_pairs([
-                    ("cluster_id", self.cluster_id.to_string()),
-                    ("keyspace", keyspace),
-                    ("backup_id", backup.id.to_string()),
-                    ("backup_name", backup.name.clone()),
-                ])
-                .finish();
-            Ok(box_try!(
-                self.inner
-                    .put(
-                        format!("api/v1/restore_keyspace/{restore_id}?{query}"),
-                        &DummyRequest {}
-                    )
-                    .await
-            ))
+            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+            serializer.extend_pairs([
+                ("cluster_id", self.cluster_id.to_string()),
+                ("keyspace", keyspace),
+                ("backup_id", backup.id.to_string()),
+                ("backup_name", backup.name.clone()),
+            ]);
+            if let Some(source_keyspace) = source_keyspace {
+                serializer.append_pair("source_keyspace", &source_keyspace);
+            }
+            let query = serializer.finish();
+            self.inner
+                .put(
+                    format!("api/v1/restore_keyspace/{restore_id}?{query}"),
+                    &DummyRequest {},
+                )
+                .await
         }
 
         pub async fn restore_keyspace_to_point_in_time(
@@ -1500,14 +1510,12 @@ pub mod test_utils {
                     ),
                 ])
                 .finish();
-            Ok(box_try!(
-                self.inner
-                    .put(
-                        format!("api/v1/restore_keyspace/{restore_id}?{query}"),
-                        &DummyRequest {}
-                    )
-                    .await
-            ))
+            self.inner
+                .put(
+                    format!("api/v1/restore_keyspace/{restore_id}?{query}"),
+                    &DummyRequest {},
+                )
+                .await
         }
 
         pub async fn get_restore_progress(
@@ -1521,11 +1529,9 @@ pub mod test_utils {
                     ("keyspace", keyspace),
                 ])
                 .finish();
-            Ok(box_try!(
-                self.inner
-                    .get(format!("api/v1/restore_keyspace/{restore_id}?{query}"))
-                    .await
-            ))
+            self.inner
+                .get(format!("api/v1/restore_keyspace/{restore_id}?{query}"))
+                .await
         }
     }
 }

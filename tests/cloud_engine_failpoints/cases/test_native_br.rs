@@ -15,6 +15,7 @@ use cloud_worker::native_br::{test_utils::NativeBrSvcClient, BackupItem, Restore
 use collections::HashMap;
 use fail::cfg_callback;
 use futures::executor::block_on;
+use http::StatusCode;
 use kvengine::dfs::S3Fs;
 use kvproto::{
     kvrpcpb::Op,
@@ -29,7 +30,7 @@ use native_br::{
 };
 use pd_client::PdClient;
 use rand::Rng;
-use security::{SecurityConfig, SecurityManager};
+use security::{HttpClientError, SecurityConfig, SecurityManager};
 use test_cloud_server::{
     alloc_node_id, alloc_node_id_vec,
     client::{
@@ -331,7 +332,8 @@ fn test_restore_on_disk_full() {
 #[test]
 fn test_native_br_service() {
     test_util::init_log_for_test();
-    const KEYSPACE_ID: u32 = 1;
+    const KEYSPACE_A_ID: u32 = 1;
+    const KEYSPACE_B_ID: u32 = 42;
     const DATA_LEN: usize = 100;
     const VALUE_SIZE: usize = 64;
 
@@ -363,9 +365,10 @@ fn test_native_br_service() {
     let cluster_id = pd_client.get_cluster_id().unwrap();
 
     let mut client = cluster.new_client();
-    client.split_keyspace(KEYSPACE_ID);
+    client.split_keyspace(KEYSPACE_A_ID);
+    client.split_keyspace(KEYSPACE_B_ID);
 
-    let i_to_key = i_to_keyspace_key(KEYSPACE_ID);
+    let i_to_key = i_to_keyspace_key(KEYSPACE_A_ID);
     client.put_kv(0..DATA_LEN, &i_to_key, random_value::<VALUE_SIZE>);
     client.verify_data_with_ref_store();
 
@@ -387,6 +390,30 @@ fn test_native_br_service() {
         .unwrap();
     info!("backup: {:?}", backup);
 
+    // Empty keyspace is illegal and should return HTTP 400.
+    let err = block_on(br_cli.get_restore_progress(1000, "".to_string())).unwrap_err();
+    match err {
+        HttpClientError::Http(status, _) => assert_eq!(status, StatusCode::BAD_REQUEST),
+        err => panic!("unexpected error: {:?}", err),
+    }
+    let err = block_on(br_cli.restore_keyspace_to_backup(100, "".to_string(), None, &backup))
+        .unwrap_err();
+    match err {
+        HttpClientError::Http(status, _) => assert_eq!(status, StatusCode::BAD_REQUEST),
+        err => panic!("unexpected error: {:?}", err),
+    }
+    let err = block_on(br_cli.restore_keyspace_to_backup(
+        101,
+        "ks101".to_string(),
+        Some("".to_string()),
+        &backup,
+    ))
+    .unwrap_err();
+    match err {
+        HttpClientError::Http(status, _) => assert_eq!(status, StatusCode::BAD_REQUEST),
+        err => panic!("unexpected error: {:?}", err),
+    }
+
     // More data.
     client.put_kv(
         DATA_LEN / 3..DATA_LEN * 2 / 3,
@@ -395,16 +422,18 @@ fn test_native_br_service() {
     );
     client.verify_data_with_ref_store();
 
-    // Restore.
-    let keyspace_name = format!("ks{KEYSPACE_ID}");
+    // Inplace restore.
+    let keyspace_a_name = format!("ks{KEYSPACE_A_ID}");
     let progress =
-        block_on(br_cli.restore_keyspace_to_backup(1, keyspace_name.clone(), &backup)).unwrap();
+        block_on(br_cli.restore_keyspace_to_backup(1, keyspace_a_name.clone(), None, &backup))
+            .unwrap();
     info!("create restore: {:?}", progress);
 
     // Must fail due to get keyspace name error.
     TryWaiter::timeout(30).interval(1).must_wait(
         || {
-            let progress = block_on(br_cli.get_restore_progress(1, keyspace_name.clone())).unwrap();
+            let progress =
+                block_on(br_cli.get_restore_progress(1, keyspace_a_name.clone())).unwrap();
             info!("restore progress: {:?}", progress);
             progress.status == RestoreState::Error
         },
@@ -420,27 +449,29 @@ fn test_native_br_service() {
     cluster.start_tikv_workers(vec![tikv_worker_id], tikv_worker_opts.clone());
 
     // Check task persistence.
-    let progress = block_on(br_cli.get_restore_progress(1, keyspace_name.clone())).unwrap();
+    let progress = block_on(br_cli.get_restore_progress(1, keyspace_a_name.clone())).unwrap();
     info!("restore progress (after restart): {:?}", progress);
     assert_eq!(progress.status, RestoreState::Error);
     assert_eq!(progress.error, "interrupted");
 
     // Retry with incorrect restore params.
     let err =
-        block_on(br_cli.restore_keyspace_to_point_in_time(1, keyspace_name.clone(), datetime0))
+        block_on(br_cli.restore_keyspace_to_point_in_time(1, keyspace_a_name.clone(), datetime0))
             .unwrap_err();
     info!("retry restore error: {:?}", err);
     assert!(err.to_string().contains("restore params not match"));
 
     // Retry restore.
     let progress =
-        block_on(br_cli.restore_keyspace_to_backup(1, keyspace_name.clone(), &backup)).unwrap();
+        block_on(br_cli.restore_keyspace_to_backup(1, keyspace_a_name.clone(), None, &backup))
+            .unwrap();
     info!("retry restore: {:?}", progress);
 
     // Wait succeed.
     TryWaiter::timeout(30).interval(1).must_wait(
         || {
-            let progress = block_on(br_cli.get_restore_progress(1, keyspace_name.clone())).unwrap();
+            let progress =
+                block_on(br_cli.get_restore_progress(1, keyspace_a_name.clone())).unwrap();
             info!("restore progress: {:?}", progress);
             assert_ne!(
                 progress.status,
@@ -459,6 +490,37 @@ fn test_native_br_service() {
         .unwrap();
     assert_eq!(existed, DATA_LEN);
     assert_eq!(deleted, 0);
+
+    // Restore from keyspace A to B and verify data.
+    {
+        let keyspace_b_name = format!("ks{KEYSPACE_B_ID}");
+        let progress = block_on(br_cli.restore_keyspace_to_backup(
+            2,
+            keyspace_b_name.clone(),
+            Some(keyspace_a_name.clone()),
+            &backup,
+        ))
+        .unwrap();
+        info!("create restore (A->B): {:?}", progress);
+
+        TryWaiter::timeout(60).interval(1).must_wait(
+            || {
+                let progress =
+                    block_on(br_cli.get_restore_progress(2, keyspace_b_name.clone())).unwrap();
+                info!("restore progress (A->B): {:?}", progress);
+                progress.status == RestoreState::Succeed
+            },
+            || "restore (A->B) not succeed".to_string(),
+        );
+
+        let mut expected_ref_store = ref_store0.clone();
+        expected_ref_store.rewrite_keyspace_prefix(KEYSPACE_B_ID);
+        let (existed, deleted) = client
+            .verify_data_with_given_ref_store(&expected_ref_store, None, &RequestOptions::default())
+            .unwrap();
+        assert_eq!(existed, DATA_LEN);
+        assert_eq!(deleted, 0);
+    }
 
     fail::remove(mock_get_keyspace_fp);
     fail::remove(mock_no_tiflash);
