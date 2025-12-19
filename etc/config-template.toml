@@ -190,6 +190,9 @@
 ## Time to wait before closing the connection without receiving KeepAlive ping Ack.
 # grpc-keepalive-timeout = "3s"
 
+## Close idle gRPC connections after this duration. Set to "0s" to disable.
+# grpc-connection-idle-time = "30m"
+
 ## Set maximum message length in bytes that gRPC can send. `-1` means unlimited.
 # max-grpc-send-msg-len = 10485760
 

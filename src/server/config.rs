@@ -26,6 +26,7 @@ const DEFAULT_GRPC_MEMORY_POOL_QUOTA: u64 = isize::MAX as u64;
 const DEFAULT_GRPC_STREAM_INITIAL_WINDOW_SIZE: u64 = 2 * 1024 * 1024;
 const DEFAULT_GRPC_GZIP_COMPRESSION_LEVEL: usize = 2;
 const DEFAULT_GRPC_MIN_MESSAGE_SIZE_TO_COMPRESS: usize = 4096;
+const DEFAULT_GRPC_CONNECTION_IDLE_SECS: u64 = 30 * 60;
 
 // Number of rows in each chunk.
 const DEFAULT_ENDPOINT_BATCH_ROW_LIMIT: usize = 64;
@@ -126,6 +127,9 @@ pub struct Config {
     pub grpc_keepalive_time: ReadableDuration,
     #[online_config(skip)]
     pub grpc_keepalive_timeout: ReadableDuration,
+    /// Close idle gRPC connections after this duration. 0 disables it.
+    #[online_config(skip)]
+    pub grpc_connection_idle_time: ReadableDuration,
     // When the coprocessor response reached this value, we update paging_size to return early.
     pub cop_max_resp_size: ReadableSize,
     /// How many snapshots can be sent concurrently.
@@ -245,6 +249,7 @@ impl Default for Config {
             // than 10 senconds.
             grpc_keepalive_time: ReadableDuration::secs(10),
             grpc_keepalive_timeout: ReadableDuration::secs(3),
+            grpc_connection_idle_time: ReadableDuration::secs(DEFAULT_GRPC_CONNECTION_IDLE_SECS),
             cop_max_resp_size: ReadableSize::mb(32),
             concurrent_send_snap_limit: 32,
             concurrent_recv_snap_limit: 32,

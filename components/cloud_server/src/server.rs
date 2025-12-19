@@ -2,6 +2,7 @@
 
 use std::{
     error::Error as StdError,
+    ffi::CString,
     i32,
     io::Error as IoError,
     net::{AddrParseError, IpAddr, SocketAddr},
@@ -63,6 +64,14 @@ const MEMORY_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 pub const GRPC_THREAD_PREFIX: &str = "grpc-server";
 pub const READPOOL_NORMAL_THREAD_PREFIX: &str = "store-read-norm";
 pub const STATS_THREAD_PREFIX: &str = "transport-stats";
+
+fn duration_to_i32_ms(duration: Duration) -> Option<i32> {
+    let ms = duration.as_millis();
+    if ms == 0 {
+        return None;
+    }
+    Some(ms.min(i32::MAX as u128) as i32)
+}
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -197,7 +206,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         let ip = format!("{}", addr.ip());
         let mem_quota = ResourceQuota::new(Some("ServerMemQuota"))
             .resize_memory(cfg.value().grpc_memory_pool_quota.0 as usize);
-        let channel_args = ChannelBuilder::new(Arc::clone(&env))
+        let mut channel_builder = ChannelBuilder::new(Arc::clone(&env))
             .stream_initial_window_size(cfg.value().grpc_stream_initial_window_size.0 as i32)
             .max_concurrent_stream(cfg.value().grpc_concurrent_stream)
             .max_receive_message_len(-1)
@@ -207,8 +216,12 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             .keepalive_time(cfg.value().grpc_keepalive_time.into())
             .keepalive_timeout(cfg.value().grpc_keepalive_timeout.into())
             .default_compression_algorithm(cfg.value().grpc_compression_algorithm())
-            .default_gzip_compression_level(cfg.value().grpc_gzip_compression_level)
-            .build_args();
+            .default_gzip_compression_level(cfg.value().grpc_gzip_compression_level);
+        if let Some(ms) = duration_to_i32_ms(cfg.value().grpc_connection_idle_time.0) {
+            channel_builder = channel_builder
+                .raw_cfg_int(CString::new("grpc.max_connection_idle_ms").unwrap(), ms);
+        }
+        let channel_args = channel_builder.build_args();
         let health_service = HealthService::default();
         let builder = {
             let mut sb = ServerBuilder::new(Arc::clone(&env))
@@ -373,6 +386,61 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
     // in test to avoid port conflict.
     pub fn listening_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{ffi::CString, sync::Arc, time::Duration};
+
+    use futures::executor::block_on;
+    use grpcio::{ChannelBuilder, ConnectivityState, EnvBuilder, ServerBuilder};
+    use grpcio_health::{create_health, proto::HealthCheckRequest, HealthClient, HealthService};
+
+    use super::duration_to_i32_ms;
+
+    #[test]
+    fn test_grpc_connection_idle_closes() {
+        let env = Arc::new(EnvBuilder::new().cq_count(1).build());
+        let health_service = HealthService::default();
+        health_service.set_serving_status("", grpcio_health::ServingStatus::Serving);
+
+        let mut channel_builder = ChannelBuilder::new(env.clone());
+        if let Some(ms) = duration_to_i32_ms(Duration::from_secs(1)) {
+            channel_builder = channel_builder
+                .raw_cfg_int(CString::new("grpc.max_connection_idle_ms").unwrap(), ms);
+        }
+        let channel_args = channel_builder.build_args();
+
+        let mut server = ServerBuilder::new(env.clone())
+            .channel_args(channel_args)
+            .register_service(create_health(health_service.clone()))
+            .bind("127.0.0.1", 0)
+            .build()
+            .unwrap();
+        let addr = server
+            .bind_addrs()
+            .next()
+            .map(|(host, port)| format!("{}:{}", host, port))
+            .unwrap();
+        server.start();
+
+        let channel = ChannelBuilder::new(env).connect(&addr);
+        let client = HealthClient::new(channel.clone());
+        client.check(&HealthCheckRequest::default()).unwrap();
+
+        assert!(block_on(channel.wait_for_connected(Duration::from_secs(3))));
+        assert_eq!(
+            channel.check_connectivity_state(false),
+            ConnectivityState::GRPC_CHANNEL_READY
+        );
+
+        let changed = block_on(channel.wait_for_state_change(
+            ConnectivityState::GRPC_CHANNEL_READY,
+            Duration::from_secs(10),
+        ));
+        assert!(changed, "connection should change state after idle timeout");
+        server.shutdown();
     }
 }
 

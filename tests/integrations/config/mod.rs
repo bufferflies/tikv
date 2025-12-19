@@ -99,6 +99,7 @@ fn test_serde_custom_tikv_config() {
         grpc_concurrency_factor: 0.75,
         grpc_keepalive_time: ReadableDuration::secs(3),
         grpc_keepalive_timeout: ReadableDuration::secs(60),
+        grpc_connection_idle_time: ReadableDuration::secs(30 * 60),
         cop_max_resp_size: ReadableSize::mb(32),
         end_point_concurrency: None,
         end_point_max_tasks: None,
