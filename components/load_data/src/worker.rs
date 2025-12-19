@@ -49,8 +49,8 @@ use crate::{
     error::{Error, Result},
     kv::{DuplicateEntry, KvPair, KvPairsReader, MergeIterator, SstMeta},
     metrics::{
-        LOAD_DATA_INGEST_RANEG_GROUP_FAILURES_COUNTER, LOAD_DATA_SPLIT_REGION_FAILURES_COUNTER,
-        LOAD_DATA_WRU_COST_COUNTER,
+        LOAD_DATA_INGEST_RANEG_GROUP_FAILURES_COUNTER, LOAD_DATA_INGEST_SST_FILE_COUNTER,
+        LOAD_DATA_SPLIT_REGION_FAILURES_COUNTER, LOAD_DATA_WRU_COST_COUNTER,
     },
     task::{
         FlushResult, FlushStates, LoadDataConfig, LoadDataContext, LoadTaskScheduler,
@@ -69,6 +69,7 @@ pub const MAX_SLEEP_DURATION: Duration = Duration::from_secs(30);
 pub const DEFAULT_AVG_BATCH_PROPORTION: f64 = 0.5;
 pub const REPLICA_NUMS: f64 = 3.0;
 pub const TXN_FILE_RU_DISCOUNT_RATIO: f64 = 0.0625;
+pub const FILE_COUNTING_STEP: usize = 100;
 
 pub enum KvPairsWorkerMsg {
     AddChunk {
@@ -490,7 +491,13 @@ impl KvPairsWorker {
 
             file_metas.push(unhandled_flush_file.file_meta);
         }
-        self.scheduler.add_flushed_files(need_handled);
+        let keyspace_id = self.task_ctx.keyspace_id.unwrap_or_default();
+        self.scheduler.add_flushed_files(
+            need_handled,
+            "l0_kv_pairs",
+            &self.task_ctx.task_id,
+            keyspace_id,
+        );
 
         let mut checkpoint_guard = self.checkpoint.lock().unwrap();
         checkpoint_guard.update_l0_flushed_info(
@@ -711,6 +718,8 @@ impl KvPairsWorker {
         let mut batches = vec![];
         let mut kv_count = 0;
         let mut kv_size = 0;
+        let mut flushed_files_count = 0;
+        let keyspace_id = self.task_ctx.keyspace_id.unwrap_or_default();
         while merge_iter.valid() {
             let (batch, batch_kv_count) =
                 self.read_batch(&mut merge_iter, self.config.flush_batch_size)?;
@@ -737,6 +746,16 @@ impl KvPairsWorker {
                     match rx.recv().unwrap() {
                         Ok(l1_file) => {
                             self.l1_file_metas.push(l1_file);
+                            flushed_files_count += 1;
+                            if flushed_files_count == FILE_COUNTING_STEP {
+                                self.scheduler.add_flushed_files(
+                                    FILE_COUNTING_STEP,
+                                    "l1_kv_pairs",
+                                    &self.task_ctx.task_id,
+                                    keyspace_id,
+                                );
+                                flushed_files_count = 0;
+                            }
                         }
                         Err(err) => {
                             errs.push(err);
@@ -760,6 +779,16 @@ impl KvPairsWorker {
             match rx.recv().unwrap() {
                 Ok(l1_file) => {
                     self.l1_file_metas.push(l1_file);
+                    flushed_files_count += 1;
+                    if flushed_files_count == FILE_COUNTING_STEP {
+                        self.scheduler.add_flushed_files(
+                            FILE_COUNTING_STEP,
+                            "l1_kv_pairs",
+                            &self.task_ctx.task_id,
+                            keyspace_id,
+                        );
+                        flushed_files_count = 0;
+                    }
                 }
                 Err(err) => {
                     errs.push(err);
@@ -769,6 +798,12 @@ impl KvPairsWorker {
         if !errs.is_empty() {
             return Err(errs.pop().unwrap());
         }
+        self.scheduler.add_flushed_files(
+            flushed_files_count,
+            "l1_kv_pairs",
+            &self.task_ctx.task_id,
+            keyspace_id,
+        );
 
         if !merge_iter.duplicated_entries.is_empty() {
             info!(
@@ -780,7 +815,6 @@ impl KvPairsWorker {
             );
             self.dup_entries = merge_iter.duplicated_entries;
         }
-        self.scheduler.add_flushed_files(self.l1_file_metas.len());
 
         let mut checkpoint_guard = self.checkpoint.lock().unwrap();
         checkpoint_guard.update_l1_flushed_info(
@@ -1217,7 +1251,7 @@ impl BuildingWorker {
                     * REPLICA_NUMS;
 
             LOAD_DATA_WRU_COST_COUNTER
-                .with_label_values(&[&keyspace_id.to_string(), &self.task_ctx.task_id])
+                .with_label_values(&[&self.task_ctx.task_id, &keyspace_id.to_string()])
                 .inc_by(wru as u64);
         }
 
@@ -1281,7 +1315,9 @@ impl BuildingWorker {
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let mut sent_count = 0;
         let mut recv_count = 0;
+        let mut created_file_count = 0;
         let mut merge_iter = MergeIterator::new(readers, &self.task_ctx.outer_key_prefix)?;
+        let keyspace_id = self.task_ctx.keyspace_id.unwrap_or_default();
 
         let mut errs = vec![];
         while merge_iter.valid() {
@@ -1305,6 +1341,15 @@ impl BuildingWorker {
                     }
                     Ok(sst_meta) => {
                         self.sst_metas.push(sst_meta);
+                        created_file_count += 1;
+                        if created_file_count == FILE_COUNTING_STEP {
+                            self.scheduler.add_created_files(
+                                FILE_COUNTING_STEP,
+                                &self.task_ctx.task_id,
+                                keyspace_id,
+                            );
+                            created_file_count = 0;
+                        }
                     }
                 }
             }
@@ -1320,12 +1365,24 @@ impl BuildingWorker {
                 }
                 Ok(sst_meta) => {
                     self.sst_metas.push(sst_meta);
+                    created_file_count += 1;
+                    if created_file_count == FILE_COUNTING_STEP {
+                        self.scheduler.add_created_files(
+                            FILE_COUNTING_STEP,
+                            &self.task_ctx.task_id,
+                            keyspace_id,
+                        );
+                        created_file_count = 0;
+                    }
                 }
             }
         }
         if !errs.is_empty() {
             return Err(errs.pop().unwrap());
         }
+        self.scheduler
+            .add_created_files(created_file_count, &self.task_ctx.task_id, keyspace_id);
+
         if !merge_iter.duplicated_entries.is_empty() {
             info!(
                 "{} worker-{} got {} duplicated entries, size {}",
@@ -1336,7 +1393,6 @@ impl BuildingWorker {
             );
             self.dup_entries = merge_iter.duplicated_entries;
         }
-        self.scheduler.add_created_files(self.sst_metas.len());
 
         let mut checkpoint_guard = self.checkpoint_store.lock().unwrap();
         checkpoint_guard.update_sst_metas(
@@ -1713,20 +1769,29 @@ impl BuildingWorker {
 
         let mut disk_full_regions = vec![];
         let mut errors = vec![];
-        let mut handle_ingest_res = |(region, res): (metapb::Region, Result<()>)| match res {
-            Ok(()) => {
-                let success_start = max(region.get_start_key(), outer_first_key.as_slice());
-                let success_end = min(region.get_end_key(), outer_last_key.as_slice());
-                success_ranges.insert(success_start.to_vec(), success_end.to_vec());
-                self.scheduler.add_ingested_regions();
-            }
-            Err(err) => {
-                if matches!(err, Error::StoreDiskFull(_)) {
-                    disk_full_regions.push(region.id);
+        let mut handle_ingest_res =
+            |(region, res, ingested_sst): (metapb::Region, Result<()>, usize)| match res {
+                Ok(()) => {
+                    let success_start = max(region.get_start_key(), outer_first_key.as_slice());
+                    let success_end = min(region.get_end_key(), outer_last_key.as_slice());
+                    success_ranges.insert(success_start.to_vec(), success_end.to_vec());
+                    self.scheduler.add_ingested_regions();
+                    let keyspace_id = self.task_ctx.keyspace_id.unwrap_or_default().to_string();
+                    info!(
+                        "{} worker-{} ingested sst {} to region {:?}",
+                        self.task_ctx.task_id, self.worker_id, ingested_sst, region
+                    );
+                    LOAD_DATA_INGEST_SST_FILE_COUNTER
+                        .with_label_values(&[&self.task_ctx.task_id, &keyspace_id])
+                        .inc_by(ingested_sst as u64);
                 }
-                errors.push(err);
-            }
-        };
+                Err(err) => {
+                    if matches!(err, Error::StoreDiskFull(_)) {
+                        disk_full_regions.push(region.id);
+                    }
+                    errors.push(err);
+                }
+            };
 
         let (tx, rx) = tikv_util::mpsc::unbounded();
         let mut msg_cnt = 0;
@@ -1738,7 +1803,8 @@ impl BuildingWorker {
                 sst_metas,
                 self.task_ctx.commit_ts,
             );
-            if cs.get_ingest_files().get_table_creates().is_empty() {
+            let ingested_sst = cs.get_ingest_files().get_table_creates().len();
+            if ingested_sst == 0 {
                 continue;
             }
             if self.scheduler.is_canceled() {
@@ -1756,7 +1822,7 @@ impl BuildingWorker {
                     task_id, worker_id, region, leader, cs
                 );
                 let res = ingest_files_to_leader(pd_cli, cs, &region, leader).await;
-                let _ = tx.send((region, res));
+                let _ = tx.send((region, res, ingested_sst));
             });
             if msg_cnt < self.ingest_concurrency {
                 msg_cnt += 1;

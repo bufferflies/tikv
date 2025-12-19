@@ -285,11 +285,8 @@ impl Dispatcher {
                         .unwrap()
                         .clean_checkpoint_data();
 
-                    let keyspace_id = self
-                        .task_ctx
-                        .keyspace_id
-                        .map(|keyspace_id| keyspace_id.to_string());
-                    remove_metrics(&self.task_ctx.task_id, keyspace_id);
+                    let keyspace_id = self.task_ctx.keyspace_id.unwrap_or_default().to_string();
+                    remove_metrics(&self.task_ctx.task_id, &keyspace_id);
                     return;
                 }
             }

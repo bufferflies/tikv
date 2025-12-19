@@ -15,7 +15,9 @@ use serde_derive::{Deserialize, Serialize};
 use tikv_util::{mpsc::Sender, warn};
 
 use crate::{
-    checkpoint::LocalFileCheckpointStorage, kv::DuplicateEntry, metrics::LOAD_DATA_TASK_STATE,
+    checkpoint::LocalFileCheckpointStorage,
+    kv::DuplicateEntry,
+    metrics::{LOAD_DATA_CREATING_FILE_COUNTER, LOAD_DATA_TASK_STATE},
 };
 
 const DEFAULT_MAX_IN_MEM_SIZE: usize = 256 * 1024 * 1024; // 256MB
@@ -233,14 +235,28 @@ impl LoadTaskScheduler {
         states.finished
     }
 
-    pub(crate) fn add_created_files(&self, n: usize) {
+    pub(crate) fn add_created_files(&self, n: usize, task_id: &str, keyspace_id: u32) {
         let mut states = self.states.write().unwrap();
         states.created_files += n;
+
+        LOAD_DATA_CREATING_FILE_COUNTER
+            .with_label_values(&[task_id, &keyspace_id.to_string(), "sst"])
+            .inc_by(n as u64);
     }
 
-    pub(crate) fn add_flushed_files(&self, n: usize) {
+    pub(crate) fn add_flushed_files(
+        &self,
+        n: usize,
+        file_type: &str,
+        task_id: &str,
+        keyspace_id: u32,
+    ) {
         let mut states = self.states.write().unwrap();
         states.flushed_files += n;
+
+        LOAD_DATA_CREATING_FILE_COUNTER
+            .with_label_values(&[task_id, &keyspace_id.to_string(), file_type])
+            .inc_by(n as u64);
     }
 
     pub(crate) fn add_total_kvs(&self, total_kvs: usize) {
