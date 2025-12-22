@@ -37,6 +37,7 @@ use futures::executor::block_on;
 use grpcio::{EnvBuilder, Environment};
 use kvengine::{
     dfs::Dfs,
+    ia::util::IaConfig,
     limiter::{LimiterOptions, StoreLimiter},
     IoContext,
 };
@@ -222,6 +223,8 @@ impl TikvServer {
         let dfs_conf = &config.dfs;
         let dfs: Arc<dyn Dfs> = if dfs_conf.s3_bucket.is_empty() && dfs_conf.s3_endpoint.is_empty()
         {
+            info!("disable IA because builtin DFS is used");
+            config.kvengine.ia = IaConfig::disabled();
             let builtin_dfs = builtin_dfs::BuiltinDfs::new(pd_client.clone());
             Arc::new(builtin_dfs)
         } else if dfs_conf.s3_endpoint == "memory" {
