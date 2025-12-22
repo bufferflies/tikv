@@ -478,6 +478,7 @@ pub struct ShardStats {
     pub unconverted_l0_count: usize,
     pub columnar_levels: Vec<ColumnarLevelStats>,
     pub vector_indexes: VectorIndexStats,
+    pub encryption: bool,
 }
 
 impl ShardStats {
@@ -940,6 +941,7 @@ impl super::Shard {
             unconverted_l0_count,
             columnar_levels,
             vector_indexes,
+            encryption: self.is_encrypted(),
         }
     }
 

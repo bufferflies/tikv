@@ -2,8 +2,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    ops,
-    path::Path,
+    fs, ops,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread::sleep,
     time::Duration,
@@ -1262,6 +1262,26 @@ impl ServerCluster {
                 .expect("create ThroughputLimiter failed");
             Arc::new(limiter)
         })
+    }
+
+    fn region_panic_mark_path(&self, node_id: u16, region_id: u64) -> PathBuf {
+        Path::new(&self.get_node_config(node_id).storage.data_dir)
+            .join(format!("panic_region_{}", region_id))
+    }
+
+    pub fn create_region_panic_mark(&self, node_id: u16, region_id: u64) {
+        let path = self.region_panic_mark_path(node_id, region_id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, "10").unwrap();
+    }
+
+    pub fn remove_region_panic_mark(&self, node_id: u16, region_id: u64) {
+        let path = self.region_panic_mark_path(node_id, region_id);
+        if let Err(e) = fs::remove_file(&path) {
+            warn!("remove panic region mark failed: {:?}", e; "path" => ?path);
+        }
     }
 }
 

@@ -14,7 +14,7 @@ use std::{
 };
 
 use api_version::{api_v2::TXN_KEY_PREFIX, ApiV2};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use collections::{HashMap, HashMapExt, HashSet};
 use concurrency_manager::ConcurrencyManager;
 use flate2::{write::GzEncoder, Compression};
@@ -35,7 +35,7 @@ use keys::next_key;
 use kvengine::{
     dfs::FileType,
     table::{BoundedDataSet, InnerKey, SnapVersion},
-    IdVer, Shard, ShardStats, ShardTag, GLOBAL_SHARD_END_KEY,
+    IdVer, Shard, ShardStats, ShardTag, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
 };
 use kvenginepb::ChangeSet;
 use kvproto::{
@@ -121,6 +121,9 @@ const BACKUP_TS_WAIT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const STORES_INFO_CACHE_TTL: Duration = Duration::from_secs(5);
 // Maximum TTL when fail to get stores info from PD.
 const STORES_INFO_CACHE_MAX_TTL: Duration = Duration::from_secs(60);
+
+// When doing unsafe recover, add this delta to term and last_index.
+const UNSAFE_RECOVER_DELTA: u64 = 64;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -225,6 +228,7 @@ impl StatusServer {
         term: u64,
         inner_key_off: u32,
         new_cs: Option<ChangeSet>,
+        prop_encryption_val: Option<Bytes>,
     ) -> Result<kvenginepb::ChangeSet> {
         let region_local_state = match load_region_state(rf, peer_id, ver) {
             Some(val) => val,
@@ -259,6 +263,11 @@ impl StatusServer {
         props.set_shard_id(region_id);
         props.mut_keys().push(TERM_KEY.to_string());
         props.mut_values().push(term.to_le_bytes().to_vec());
+        if let Some(prop_encryption_val) = prop_encryption_val {
+            props.mut_keys().push(ENCRYPTION_KEY.to_string());
+            props.mut_values().push(prop_encryption_val.to_vec());
+        }
+
         let cs_val = cs.write_to_bytes().unwrap();
         write_engine_meta_bytes(wb, peer_id, region_id, keyspace_id, &cs_val);
         Ok(cs)
@@ -1303,8 +1312,8 @@ impl StatusServer {
             let raft_state_last_index = old_raft_state.get_last_index();
             let raft_log_last_index = rf.get_last_index(peer_id).unwrap_or(RAFT_INIT_LOG_INDEX);
             let origin_last_index = std::cmp::max(raft_state_last_index, raft_log_last_index);
-            // Add a delta to last_index 3 to replicate empty snapshot to followers.
-            let last_index = origin_last_index + 3;
+            // Add a delta to last_index to replicate empty snapshot to followers.
+            let last_index = origin_last_index + UNSAFE_RECOVER_DELTA;
             info!(
                 "unsafe_recover region: {} peer: {} truncate raft log to {}",
                 region_id, peer_id, last_index
@@ -1328,9 +1337,10 @@ impl StatusServer {
             let mut properties = kvengine::Properties::new();
             properties = properties.apply_pb(snap.get_properties());
             let meta_term = properties.get(TERM_KEY).unwrap().get_u64_le();
+            let prop_encryption_val = properties.get(ENCRYPTION_KEY);
 
-            // Add a delta to term 3 make sure it's greater than term in pd cache.
-            let term = std::cmp::max(raft_log_term, meta_term) + 3;
+            // Add a delta to term make sure it's greater than term in pd cache.
+            let term = std::cmp::max(raft_log_term, meta_term) + UNSAFE_RECOVER_DELTA;
 
             let _ = match Self::write_empty_engine_meta(
                 rf,
@@ -1343,6 +1353,7 @@ impl StatusServer {
                 term,
                 inner_key_off,
                 cs_snap.clone(),
+                prop_encryption_val,
             ) {
                 Ok(cs) => {
                     info!(

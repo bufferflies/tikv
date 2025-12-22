@@ -37,6 +37,7 @@ mod rfengine;
 mod split;
 mod storage_class;
 mod transaction;
+mod unsafe_recover;
 
 pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
 

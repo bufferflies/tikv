@@ -1703,6 +1703,10 @@ impl Shard {
         self.encryption_key.clone()
     }
 
+    pub fn is_encrypted(&self) -> bool {
+        self.encryption_key.is_some()
+    }
+
     // When recover is called multiple times, the write_sequence may be smaller than
     // the meta.data_sequence, so we need to update it before recover to avoid
     // entries unavailable error.
