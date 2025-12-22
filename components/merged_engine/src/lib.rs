@@ -452,6 +452,7 @@ impl MergedEngine {
                 Some(&tombstone_regions),
             )
         }));
+        kv.set_loaded();
 
         // Should be invoked after `load_shards_impl` (to setup the dependency).
         let delay_destroy_regions =
@@ -1051,6 +1052,7 @@ impl MergedEngine {
             None,
             ctx.master_key.clone(),
             ctx.pd.get_security_mgr(),
+            false,
         )?;
         kv_engine.set_engine_id(ctx.config.merged_store_id);
         Ok(kv_engine)

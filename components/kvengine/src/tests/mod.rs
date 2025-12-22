@@ -131,6 +131,7 @@ fn new_test_engine_opt(
         None,
         MasterKey::new(&[1u8; 32]),
         Arc::new(SecurityManager::default()),
+        true,
     )
     .unwrap();
     {

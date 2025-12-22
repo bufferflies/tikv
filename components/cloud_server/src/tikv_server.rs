@@ -1164,6 +1164,7 @@ impl TikvServer {
             opt_ks_gc_sp_cache,
             master_key,
             security_mgr,
+            true,
         )?;
         Ok((kv_engine, sender, receiver))
     }

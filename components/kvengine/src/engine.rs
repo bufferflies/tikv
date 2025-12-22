@@ -94,6 +94,7 @@ impl Engine {
         ks_gc_sp_map: Option<Arc<DashMap<u32, u64>>>,
         master_key: MasterKey,
         security_mgr: Arc<SecurityManager>,
+        set_loaded: bool,
     ) -> Result<Engine> {
         info!("open KVEngine");
         let lock_path = opts.local_dirs[0].join("LOCK");
@@ -191,7 +192,9 @@ impl Engine {
 
         info!("engine load {} shards", metas.len());
         tikv_util::init_task_local_sync(|| en.load_shards(metas, recoverer, None))?;
-        en.loaded.store(true, Ordering::Relaxed);
+        if set_loaded {
+            en.set_loaded();
+        }
         let flush_en = en.clone();
         en.add_worker_handle(
             thread::Builder::new()
@@ -295,6 +298,10 @@ impl Engine {
             token_rx.recv().unwrap();
         }
         Ok(())
+    }
+
+    pub fn set_loaded(&self) {
+        self.loaded.store(true, Ordering::Relaxed);
     }
 
     // This method is used for merged_engine to prepare remote files for recovery.
