@@ -23,7 +23,7 @@ use crate::metrics::{elapsed_secs, ENGINE_ARENA_GROW_DURATION_HISTOGRAM};
 pub const NULL_ARENA_ADDR: u64 = 0;
 
 const NULL_BLOCK_OFF: u32 = 0xffff_ffff;
-const MAX_VAL_SIZE: u32 = 1 << (24 - 1);
+const MAX_VAL_SIZE: u32 = 32 * 1024 * 1024; // 32MB
 
 const BLOCK_ALIGN: u32 = 8;
 const ALIGN_MASK: u32 = 0xffff_fff8;
@@ -426,15 +426,16 @@ mod tests {
             }
         }
         let total_size = arena.values.total_size.load(Ordering::Acquire);
+        let entry_size = 8 * 1024 * 1024;
         // Alloc after blocks exhausted should panic.
         let result = std::panic::catch_unwind(|| {
             for _ in 0..100 {
-                arena.values.alloc(MAX_VAL_SIZE);
+                arena.values.alloc(entry_size);
             }
         });
         assert!(result.is_err());
         let max_total_size = arena.values.total_size.load(Ordering::Acquire);
-        assert_eq!(max_total_size - total_size, MAX_VAL_SIZE * 60);
+        assert_eq!(max_total_size - total_size, entry_size * 60);
     }
 
     #[test]

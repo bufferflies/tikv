@@ -155,7 +155,7 @@ impl Default for Config {
             raft_max_election_timeout_ticks: 0,
             raft_max_size_per_msg: ReadableSize::mb(1),
             raft_max_inflight_msgs: 256,
-            raft_entry_max_size: ReadableSize::mb(8),
+            raft_entry_max_size: ReadableSize::mb(32),
             max_peer_down_duration: ReadableDuration::minutes(10),
             max_leader_missing_duration: ReadableDuration::hours(2),
             abnormal_leader_missing_duration: ReadableDuration::minutes(10),
