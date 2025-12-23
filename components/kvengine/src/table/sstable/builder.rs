@@ -336,6 +336,8 @@ impl Builder {
             meta_offset: footer.meta_offset(),
             smallest: self.smallest.clone(),
             biggest: self.biggest.clone(),
+            #[cfg(test)]
+            tiny_meta_offset: footer.tiny_meta_offset(),
         }
     }
 
@@ -414,7 +416,7 @@ impl Builder {
 pub const FOOTER_SIZE: usize = mem::size_of::<Footer>();
 
 #[repr(C)]
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Footer {
     pub old_data_offset: u32,
     pub index_offset: u32,
@@ -455,6 +457,11 @@ impl Footer {
     // Index is the first meta section after data sections.
     pub fn meta_offset(&self) -> u32 {
         self.index_offset
+    }
+
+    // Tiny meta is the data necessary for opening a SsTable.
+    pub fn tiny_meta_offset(&self) -> u32 {
+        self.properties_offset
     }
 
     pub fn unmarshal(&mut self, mut data: &[u8]) {
@@ -764,6 +771,9 @@ pub struct BuildResult {
     pub meta_offset: u32,
     pub smallest: Vec<u8>,
     pub biggest: Vec<u8>,
+
+    #[cfg(test)]
+    pub tiny_meta_offset: u32,
 }
 
 pub(crate) fn key_diff_idx(k1: &[u8], k2: &[u8]) -> usize {

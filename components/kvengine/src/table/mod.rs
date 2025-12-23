@@ -9,6 +9,7 @@ pub mod merge_iterator;
 pub mod schema_file;
 pub mod sstable;
 pub mod table;
+pub mod tiny_meta;
 pub mod txn_file;
 pub mod vector_index;
 

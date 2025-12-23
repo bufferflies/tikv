@@ -19,7 +19,7 @@ use xorf::{BinaryFuse8, Filter};
 
 use super::{builder::*, iterator::TableIterator};
 use crate::{
-    ia::{ia_auto_file::IaAutoFile, types::FileSegmentIdent},
+    ia::{ia_auto_file::IaAutoFile, ia_file::IaFile, types::FileSegmentIdent},
     next_version, next_version_async,
     table::{
         file::{File, TtlCache},
@@ -430,6 +430,10 @@ impl SsTableCore {
         )))
     }
 
+    pub fn footer(&self) -> Footer {
+        self.footer
+    }
+
     pub fn init_index(&self, offset: u32, length: usize) -> Result<Index> {
         let idx_data = self
             .file
@@ -636,6 +640,10 @@ impl SsTableCore {
 
     pub fn file(&self) -> &Arc<dyn File> {
         &self.file
+    }
+
+    pub fn try_get_ia_file(&self) -> Option<Arc<IaFile>> {
+        self.file.clone().as_any().downcast::<IaFile>().ok()
     }
 
     pub fn try_get_auto_ia_file(&self) -> Option<Arc<IaAutoFile>> {
@@ -1050,7 +1058,7 @@ impl quick_cache::Weighter<BlockCacheKey, Bytes> for BlockWeighter {
     }
 }
 
-fn validate_checksum(file: &dyn File, data: &[u8], footer: &Footer) -> Result<()> {
+pub(crate) fn validate_checksum(file_id: u64, data: &[u8], footer: &Footer) -> Result<()> {
     if data.len() < 4 {
         return Err(table::Error::InvalidChecksum(String::from(
             "data is too short",
@@ -1062,7 +1070,7 @@ fn validate_checksum(file: &dyn File, data: &[u8], footer: &Footer) -> Result<()
     let got_checksum = checksum_type.checksum(content);
     if checksum != got_checksum {
         error!("checksum mismatch";
-            "file" => file.id(),
+            "file" => file_id,
             "expect" => checksum,
             "got" => got_checksum,
             "footer" => ?footer,
@@ -1082,7 +1090,7 @@ pub(crate) fn validate_checksum_with_fix(
     file: &dyn File,
     encryption_key: Option<&EncryptionKey>,
 ) -> Result<()> {
-    match validate_checksum(file, data, footer) {
+    match validate_checksum(file.id(), data, footer) {
         Ok(()) => Ok(()),
         Err(err) => {
             if let Some(file_path) = file.path() {

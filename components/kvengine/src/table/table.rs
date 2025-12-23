@@ -518,6 +518,8 @@ pub enum Error {
     IaMgr(String),
     #[error("Deadline is exceeded: {0}")]
     DeadlineExceeded(String),
+    #[error("Corrupted meta pack: {0}")]
+    CorruptedMetaPack(String),
     #[error("{0}")]
     Other(String),
 }
@@ -526,6 +528,12 @@ impl From<dfs::Error> for Error {
     #[inline]
     fn from(e: dfs::Error) -> Error {
         Error::Io(e.to_string())
+    }
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for Error {
+    fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Error {
+        Error::Other(e.to_string())
     }
 }
 
