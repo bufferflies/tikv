@@ -1453,6 +1453,7 @@ pub fn new_test_config(
     config.kvengine.ia.auto_ia_check_interval = ReadableDuration::secs(10);
     config.kvengine.value_cache_capacity = AbsoluteOrPercentSize::Abs(ReadableSize::mb(1));
     config.kvengine.extra_dirs = vec![format!("{}/{}_extra", base_dir.to_str().unwrap(), node_id)];
+    config.kvengine.value_cache_double_check = rng.gen_bool(0.5);
 
     // Work around https://github.com/tidbcloud/cloud-storage-engine/issues/882.
     config.server.raft_client_initial_reconnect_backoff = ReadableDuration::millis(100);

@@ -182,7 +182,28 @@ impl<S: Snapshot> CloudStore<S> {
         }
         let item = if let Some(cache) = value_cache {
             if let Some(val) = cache.get(snap, &raw_key, start_ts, has_lock) {
-                return Ok(Item::from_cached_value(&val));
+                let hit_item = if cache.is_double_check() {
+                    let origin_item = snap.get(WRITE_CF, &raw_key, start_ts).await;
+                    if origin_item.version != val.version
+                        || origin_item.get_value() != val.value.chunk()
+                    {
+                        error!(
+                            "value cache mismatch: read missing or invalid";
+                            "key" => log_wrappers::Value::key(&raw_key),
+                            "region_id" => snap.get_id(),
+                            "shard_ver" => snap.get_version(),
+                            "keyspace_id" => snap.get_keyspace_id(),
+                            "start_ts" => start_ts,
+                            "cached_version" => val.version,
+                            "read_version" => origin_item.version,
+                        );
+                        debug_assert!(false);
+                    }
+                    origin_item
+                } else {
+                    Item::from_cached_value(&val)
+                };
+                return Ok(hit_item);
             }
             // We use the u64::MAX to get first to fill the cache, if version is newer,
             // use start_ts to get again. If the we use start_ts first to get the value,

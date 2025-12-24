@@ -119,6 +119,8 @@ pub struct Config {
 
     /// the capacity of value cache.
     pub value_cache_capacity: AbsoluteOrPercentSize,
+    /// When enabled, cache hit will double check by reading from the snapshot.
+    pub value_cache_double_check: bool,
 
     /// the capacity of table meta cache.
     pub columnar_meta_cache_capacity: AbsoluteOrPercentSize,
@@ -173,6 +175,7 @@ impl Default for Config {
             dfs_load_concurrency_per_request: 16,
             fd_cache_capacity: DEFAULT_FD_CACHE_CAPCITY,
             value_cache_capacity: 0.into(),
+            value_cache_double_check: false,
             columnar_meta_cache_capacity: AbsoluteOrPercentSize::Percent(0.2),
             checksum_type: ChecksumType::Crc32,
             block_cache_type: BlockCacheType::Quick,

@@ -115,6 +115,7 @@ impl Engine {
         let value_cache = if !config.value_cache_capacity.is_zero() {
             Some(ValueCache::new(
                 config.value_cache_capacity.as_memory_size(),
+                config.value_cache_double_check,
             ))
         } else {
             None

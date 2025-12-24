@@ -21,6 +21,13 @@ use crate::{
 #[derive(Clone)]
 pub struct ValueCache {
     inner: Arc<quick_cache::sync::Cache<ValueCacheKey, ValueCacheValue, Weighter>>,
+    double_check: bool,
+}
+
+impl ValueCache {
+    pub fn is_double_check(&self) -> bool {
+        self.double_check
+    }
 }
 
 impl Debug for ValueCache {
@@ -40,14 +47,17 @@ impl quick_cache::Weighter<ValueCacheKey, ValueCacheValue> for Weighter {
 }
 
 impl ValueCache {
-    pub fn new(capacity: u64) -> Self {
+    pub fn new(capacity: u64, double_check: bool) -> Self {
         let estimated_items_capacity = (capacity / 128) as usize;
         let inner = Arc::new(quick_cache::sync::Cache::with_weighter(
             estimated_items_capacity,
             capacity,
             Weighter,
         ));
-        ValueCache { inner }
+        ValueCache {
+            inner,
+            double_check,
+        }
     }
 
     pub fn get(
