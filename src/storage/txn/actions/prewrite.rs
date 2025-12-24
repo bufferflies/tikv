@@ -362,85 +362,112 @@ impl<'a> PrewriteMutation<'a> {
         Ok(LockStatus::Locked(min_commit_ts))
     }
 
+    /// Check if the current transaction has been rolled back.
+    fn check_self_rollback(&self, write: &Write, commit_ts: TimeStamp) -> Result<()> {
+        if commit_ts == self.txn_props.start_ts
+            && (write.write_type == WriteType::Rollback || write.has_overlapped_rollback)
+        {
+            MVCC_CONFLICT_COUNTER.rolled_back.inc();
+            self.write_conflict_error(write, commit_ts, WriteConflictReason::SelfRolledBack)?;
+        }
+        Ok(())
+    }
+
+    /// Check for write conflicts in optimistic transactions.
+    fn check_optimistic_conflict(&self, write: &Write, commit_ts: TimeStamp) -> Result<()> {
+        if commit_ts > self.txn_props.start_ts {
+            MVCC_CONFLICT_COUNTER.prewrite_write_conflict.inc();
+            self.write_conflict_error(write, commit_ts, WriteConflictReason::Optimistic)?;
+        }
+        Ok(())
+    }
+
+    /// Check for write conflicts in pessimistic transactions.
+    /// Returns true if the write should be skipped (for newer rollback records).
+    fn check_pessimistic_conflict(
+        &self,
+        write: &Write,
+        commit_ts: TimeStamp,
+        for_update_ts: TimeStamp,
+    ) -> Result<bool> {
+        // Perform constraint check if needed (same as optimistic)
+        if let DoConstraintCheck = self.pessimistic_action {
+            if commit_ts > self.txn_props.start_ts {
+                MVCC_CONFLICT_COUNTER.prewrite_write_conflict.inc();
+                self.write_conflict_error(
+                    write,
+                    commit_ts,
+                    WriteConflictReason::LazyUniquenessCheck,
+                )?;
+            }
+        }
+
+        if commit_ts > for_update_ts {
+            // Don't treat newer Rollback records as write conflicts. They can cause
+            // false positive errors because they can be written even if the pessimistic
+            // lock of the corresponding row key exists.
+            // Rollback records are only used to prevent retried prewrite from
+            // succeeding. Even if the Rollback record of the current transaction is
+            // collapsed by a newer record, it is safe to prewrite this non-pessimistic
+            // key because either the primary key is rolled back or it's protected
+            // because it's written by CheckSecondaryLocks.
+            if write.write_type == WriteType::Rollback {
+                return Ok(true); // Skip this rollback record
+            }
+
+            warn!("conflicting write was found, pessimistic lock must be lost for the corresponding row key";
+                "key" => %self.key,
+                "start_ts" => self.txn_props.start_ts,
+                "for_update_ts" => for_update_ts,
+                "conflicting start_ts" => write.start_ts,
+                "conflicting commit_ts" => commit_ts);
+            return Err(ErrorInner::PessimisticLockNotFound {
+                start_ts: self.txn_props.start_ts,
+                key: self.key.clone().into_raw()?,
+            }
+            .into());
+        }
+        Ok(false)
+    }
+
     fn check_for_newer_version<S: Snapshot>(
         &mut self,
         reader: &mut SnapshotReader<S>,
     ) -> Result<Option<(Write, TimeStamp)>> {
         let mut seek_ts = TimeStamp::max();
         while let Some((commit_ts, write)) = reader.seek_write(&self.key, seek_ts)? {
-            // If there's a write record whose commit_ts equals to our start ts, the current
-            // transaction is ok to continue, unless the record means that the current
-            // transaction has been rolled back.
-            if commit_ts == self.txn_props.start_ts
-                && (write.write_type == WriteType::Rollback || write.has_overlapped_rollback)
-            {
-                MVCC_CONFLICT_COUNTER.rolled_back.inc();
-                // TODO: Maybe we need to add a new error for the rolled back case.
-                self.write_conflict_error(&write, commit_ts, WriteConflictReason::SelfRolledBack)?;
-            }
+            // Check if the current transaction has been rolled back
+            self.check_self_rollback(&write, commit_ts)?;
+
+            // Update last_change_ts metadata on first iteration
             if seek_ts == TimeStamp::max() {
                 (self.last_change_ts, self.versions_to_last_change) =
                     write.next_last_change_info(commit_ts);
             }
+
+            // Check for conflicts based on transaction kind
             match self.txn_props.kind {
                 TransactionKind::Optimistic(_) => {
-                    if commit_ts > self.txn_props.start_ts {
-                        MVCC_CONFLICT_COUNTER.prewrite_write_conflict.inc();
-                        self.write_conflict_error(
-                            &write,
-                            commit_ts,
-                            WriteConflictReason::Optimistic,
-                        )?;
-                    }
+                    self.check_optimistic_conflict(&write, commit_ts)?;
                 }
                 // Note: PessimisticLockNotFound can happen on a non-pessimistically locked key,
                 // if it is a retrying prewrite request.
                 TransactionKind::Pessimistic(for_update_ts) => {
-                    if let DoConstraintCheck = self.pessimistic_action {
-                        // Do the same as optimistic transactions if constraint checks are needed.
-                        if commit_ts > self.txn_props.start_ts {
-                            MVCC_CONFLICT_COUNTER.prewrite_write_conflict.inc();
-                            self.write_conflict_error(
-                                &write,
-                                commit_ts,
-                                WriteConflictReason::LazyUniquenessCheck,
-                            )?;
-                        }
-                    }
-                    if commit_ts > for_update_ts {
-                        // Don't treat newer Rollback records as write conflicts. They can cause
-                        // false positive errors because they can be written even if the pessimistic
-                        // lock of the corresponding row key exists.
-                        // Rollback records are only used to prevent retried prewrite from
-                        // succeeding. Even if the Rollback record of the current transaction is
-                        // collapsed by a newer record, it is safe to prewrite this non-pessimistic
-                        // key because either the primary key is rolled back or it's protected
-                        // because it's written by CheckSecondaryLocks.
-                        if write.write_type == WriteType::Rollback {
-                            seek_ts = commit_ts.prev();
-                            continue;
-                        }
-
-                        warn!("conflicting write was found, pessimistic lock must be lost for the corresponding row key"; 
-                            "key" => %self.key, 
-                            "start_ts" => self.txn_props.start_ts, 
-                            "for_update_ts" => for_update_ts,
-                            "conflicting start_ts" => write.start_ts,
-                            "conflicting commit_ts" => commit_ts);
-                        return Err(ErrorInner::PessimisticLockNotFound {
-                            start_ts: self.txn_props.start_ts,
-                            key: self.key.clone().into_raw()?,
-                        }
-                        .into());
+                    let should_skip = self.check_pessimistic_conflict(&write, commit_ts, for_update_ts)?;
+                    if should_skip {
+                        seek_ts = commit_ts.prev();
+                        continue;
                     }
                 }
             }
+
             // Should check it when no lock exists, otherwise it can report error when there
             // is a lock belonging to a committed transaction which deletes the key.
             check_data_constraint(reader, self.should_not_exist, &write, commit_ts, &self.key)?;
 
             return Ok(Some((write, commit_ts)));
         }
+
         // If seek_ts is max and it goes here, there is no write record for this key.
         if seek_ts == TimeStamp::max() {
             // last_change_ts == 0 && versions_to_last_change > 0 means the key actually
