@@ -85,6 +85,8 @@ pub enum Error {
     AsyncWriterDisabled,
     #[error("max batch size exceeded")]
     MaxBatchSizeExceeded,
+    #[error("compact worker force stopped")]
+    CompactWorkerForceStop,
     #[error("Other error: {0}")]
     Other(String),
     #[error("dfs error: {0}")]

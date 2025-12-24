@@ -1,5 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+#[cfg(any(test, feature = "testexport"))]
+use std::sync::atomic::AtomicBool;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashSet},
@@ -161,6 +163,9 @@ pub struct RfEngineCore {
     pub(crate) compacted_epoch: Arc<AtomicU32>,
 
     _lock: fslock::LockFile, // hold lock to avoid release
+
+    #[cfg(any(test, feature = "testexport"))]
+    pub(crate) compact_force_stop: Arc<AtomicBool>,
 }
 
 impl Deref for RfEngineCore {
@@ -230,6 +235,8 @@ impl RfEngineCore {
             )?)
         };
         let dfs_worker_healthy = dfs_worker::Healthy::default();
+        #[cfg(any(test, feature = "testexport"))]
+        let compact_force_stop = Arc::new(AtomicBool::new(false));
         let mut en = Self {
             dir: dir.to_owned(),
             wal_sync_dir,
@@ -245,13 +252,17 @@ impl RfEngineCore {
             current_epoch_id: Arc::new(AtomicU32::new(0)),
             compacted_epoch: compacted_epoch.clone(),
             _lock: lock,
+            #[cfg(any(test, feature = "testexport"))]
+            compact_force_stop: compact_force_stop.clone(),
         };
-        let (async_epoch_id, async_offset) = en.load(&manifest)?;
+        let async_epoch_offset = en.load(&manifest)?;
         if cfg.disable_compaction {
             return Ok(en);
         }
         {
-            let async_wal_writer = if en.is_async_wal_enabled() {
+            let async_wal_writer = if let Some((async_epoch_id, async_offset)) = async_epoch_offset
+            {
+                debug_assert!(en.is_async_wal_enabled());
                 let mut async_wal_writer =
                     WalWriter::new(dir, cfg, compacted_epoch.clone(), WriterType::Async);
                 async_wal_writer.open_file(async_epoch_id, async_offset)?;
@@ -302,7 +313,6 @@ impl RfEngineCore {
             let mut service_worker = ServiceWorker::new(
                 dir.to_owned(),
                 cfg,
-                async_epoch_id,
                 async_wal_writer,
                 service_rx,
                 manifest,
@@ -310,6 +320,8 @@ impl RfEngineCore {
                 lightweight_backup_args,
                 dfs_worker_healthy,
                 compact_rate_limiter,
+                #[cfg(any(test, feature = "testexport"))]
+                compact_force_stop,
             );
             let join_handle = thread::spawn(move || service_worker.run());
             let mut guard = en.service_worker_handle.lock().unwrap();
@@ -365,6 +377,10 @@ impl RfEngineCore {
     }
 
     pub fn stop_worker(&self, force: bool) {
+        #[cfg(any(test, feature = "testexport"))]
+        if force {
+            self.compact_force_stop.store(true, Ordering::SeqCst);
+        }
         let mut handle = self.service_worker_handle.lock().unwrap();
         if let Some(h) = handle.take() {
             self.try_send_task(ServiceTask::Close { force });
@@ -1058,7 +1074,9 @@ mod tests {
     use super::*;
     use crate::{
         log_batch::RaftLogOp,
-        test_util::{init_logger, make_log_data, make_region_state, make_state_kv, new_raft_entry},
+        test_util::{
+            init_logger, make_log_data, make_region_state, make_state_kv, new_raft_entry, try_wait,
+        },
     };
 
     #[test]
@@ -1613,6 +1631,108 @@ mod tests {
         )
         .unwrap();
         assert!(wal_secondary_dir.exists());
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case::wal_sync(true)]
+    fn test_rfengine_compact_force_restart(#[case] with_wal_sync: bool) {
+        init_logger();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let wal_sync_dir = tmp_dir.path().join("wal_sync");
+        let mut cfg = Config::new(16 * 1024);
+        if with_wal_sync {
+            cfg.wal_sync_dir = wal_sync_dir.to_str().unwrap().to_owned();
+        }
+        let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
+
+        let peer_id = 1;
+        let region_id = 2;
+        let keyspace_id = 1;
+        let (key1, val1) = make_state_kv(b'a', 1);
+        let key1_vec = key1.clone().freeze().to_vec();
+        let val1_vec = val1.clone().freeze().to_vec();
+        let mut wb = WriteBatch::new();
+        wb.set_state(peer_id, region_id, keyspace_id, key1.chunk(), val1.chunk());
+        engine.write(wb).unwrap();
+
+        // Force stop before WAL rotate for stable interruption.
+        engine.compact_force_stop.store(true, Ordering::SeqCst);
+
+        let mut log_index = 1;
+        let entry_size = (cfg.target_file_size.0 as usize / 2).max(1024);
+        let start_epoch = engine.writer.lock().unwrap().get_epoch_id();
+        while engine.writer.lock().unwrap().get_epoch_id() == start_epoch {
+            let mut wb = WriteBatch::new();
+            wb.append_raft_log(
+                peer_id,
+                region_id,
+                keyspace_id,
+                &make_log_data(log_index, entry_size),
+            );
+            engine.write(wb).unwrap();
+            log_index += 1;
+        }
+
+        let (key2, val2) = make_state_kv(b'b', 2);
+        let key2_vec = key2.clone().freeze().to_vec();
+        let val2_vec = val2.clone().freeze().to_vec();
+        let mut wb = WriteBatch::new();
+        wb.set_state(peer_id, region_id, keyspace_id, key2.chunk(), val2.chunk());
+        engine.write(wb).unwrap();
+
+        engine.stop_worker(true);
+        drop(engine);
+
+        let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
+        let epoch_after_restart = engine.writer.lock().unwrap().get_epoch_id();
+        assert_eq!(epoch_after_restart, start_epoch + 1);
+
+        while engine.writer.lock().unwrap().get_epoch_id() == epoch_after_restart {
+            let mut wb = WriteBatch::new();
+            wb.append_raft_log(
+                peer_id,
+                region_id,
+                keyspace_id,
+                &make_log_data(log_index, entry_size),
+            );
+            engine.write(wb).unwrap();
+            log_index += 1;
+        }
+
+        let (key3, val3) = make_state_kv(b'c', 3);
+        let key3_vec = key3.clone().freeze().to_vec();
+        let val3_vec = val3.clone().freeze().to_vec();
+        let mut wb = WriteBatch::new();
+        wb.set_state(peer_id, region_id, keyspace_id, key3.chunk(), val3.chunk());
+        engine.write(wb).unwrap();
+
+        assert!(
+            try_wait(
+                || engine.compacted_epoch.load(Ordering::SeqCst) >= epoch_after_restart,
+                10
+            ),
+            "compact epoch {} not finished",
+            epoch_after_restart
+        );
+
+        engine.stop_worker(false);
+        drop(engine);
+
+        let engine = RfEngine::open(tmp_dir.path(), &cfg, None, None).unwrap();
+        assert_eq!(
+            val1_vec.as_slice(),
+            engine.get_state(peer_id, &key1_vec).unwrap().as_ref()
+        );
+        assert_eq!(
+            val2_vec.as_slice(),
+            engine.get_state(peer_id, &key2_vec).unwrap().as_ref()
+        );
+        assert_eq!(
+            val3_vec.as_slice(),
+            engine.get_state(peer_id, &key3_vec).unwrap().as_ref()
+        );
+        engine.stop_worker(true);
     }
 
     fn wait_for_rlogs_truncated(en: &RfEngine, peer_id: u64, seconds: usize) {

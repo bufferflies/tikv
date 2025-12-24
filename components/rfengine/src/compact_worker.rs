@@ -1,5 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+#[cfg(any(test, feature = "testexport"))]
+use std::sync::atomic::AtomicBool;
 use std::{
     borrow::Cow,
     collections::{HashMap, VecDeque},
@@ -32,6 +34,26 @@ use tikv_util::{
     mpsc::{Receiver, SendError, Sender},
     time::Instant,
 };
+
+macro_rules! try_force_stop {
+    ($worker:expr) => {{
+        #[cfg(any(test, feature = "testexport"))]
+        if $worker.force_stop.load(Ordering::SeqCst) {
+            info!("compact worker force stop");
+            return;
+        }
+    }};
+}
+
+macro_rules! try_force_stop_err {
+    ($worker:expr) => {{
+        #[cfg(any(test, feature = "testexport"))]
+        if $worker.force_stop.load(Ordering::SeqCst) {
+            info!("compact worker force stop");
+            return Err(Error::CompactWorkerForceStop);
+        }
+    }};
+}
 
 use crate::{
     manifest::Manifest,
@@ -83,6 +105,9 @@ pub(crate) struct CompactWorker {
     // Size limit (bytes) for splitting rlog files during WAL
     // compaction.
     rlog_file_size: u32,
+
+    #[cfg(any(test, feature = "testexport"))]
+    force_stop: Arc<AtomicBool>,
 }
 
 impl CompactWorker {
@@ -95,6 +120,7 @@ impl CompactWorker {
         compacted_epoch: Arc<AtomicU32>,
         lightweight_backup: Option<&(LightweightBackupConfig, Arc<S3Fs>)>,
         rate_limiter: Option<Arc<IoRateLimiter>>,
+        #[cfg(any(test, feature = "testexport"))] force_stop: Arc<AtomicBool>,
     ) -> Self {
         let (rlog_cache, compress_type) = if let Some((config, _)) = lightweight_backup {
             (
@@ -124,11 +150,14 @@ impl CompactWorker {
             sync_concurrency,
             files_to_sync: vec![],
             rlog_file_size,
+            #[cfg(any(test, feature = "testexport"))]
+            force_stop,
         }
     }
 
     pub(crate) fn run(&mut self) {
         while let Ok(task) = self.task_rx.recv() {
+            try_force_stop!(self);
             match task {
                 CompactTask::UpdateTruncatedIndexes {
                     truncated_idxes: truncated,
@@ -156,6 +185,7 @@ impl CompactWorker {
             }
             match self.compact(epoch_id, delayed_epoches) {
                 Ok(_) => break,
+                Err(Error::CompactWorkerForceStop) => return,
                 Err(err) => {
                     error!(
                         "{}: failed to compact epoch {} retry_times: {}, {:?}",
@@ -191,11 +221,12 @@ impl CompactWorker {
     }
 
     fn handle_rotate(&mut self, epoch_id: u32) {
+        try_force_stop!(self);
         let engine_id = self.manifest.get_engine_id();
         let delay_epoches = self.delay_compaction_epoches;
         let compact_epoch = epoch_id.saturating_sub(delay_epoches);
         if compact_epoch <= self.manifest.epoch_id {
-            // Do not compact an smaller epoch.
+            // Do not compact at smaller epoch.
             info!(
                 "{}: skip duplicated epoch compaction at epoch {}",
                 engine_id, compact_epoch
@@ -207,6 +238,9 @@ impl CompactWorker {
             engine_id, epoch_id, compact_epoch
         );
         if let Err(err) = self.compact(compact_epoch, delay_epoches) {
+            if let Error::CompactWorkerForceStop = err {
+                return;
+            }
             error!(
                 "{}: failed to compact epoch {} {:?}",
                 engine_id, compact_epoch, err
@@ -217,6 +251,7 @@ impl CompactWorker {
     }
 
     fn compact(&mut self, epoch_id: u32, delayed_epoches: u32) -> Result<()> {
+        try_force_stop_err!(self);
         let timer = Instant::now_coarse();
         let mut batch = WriteBatch::default();
         let mut it = WalIterator::new(&self.dir, epoch_id, self.epoch_rotate_len)?;
@@ -231,6 +266,7 @@ impl CompactWorker {
         let mut generated_files = 0;
         let mut cached_files = 0;
         for (_, mut peer_batch) in batch.peers {
+            try_force_stop_err!(self);
             let mut peer_meta_pb = rfenginepb::PeerMeta::default();
             peer_meta_pb.set_peer_id(peer_batch.peer_id);
             peer_meta_pb.set_region_id(peer_batch.meta.region_id);
@@ -271,6 +307,7 @@ impl CompactWorker {
         self.sync_files();
         let _ = file_system::sync_dir(self.dir.as_path());
 
+        try_force_stop_err!(self);
         self.manifest.handle_compaction(change_set)?;
 
         let engine_id = self.manifest.get_engine_id();
@@ -928,6 +965,7 @@ mod tests {
             AtomicU32::new(0).into(),
             None,
             None,
+            Arc::new(AtomicBool::new(false)),
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 80, RANDOM_STR_MAX_LEN / 2)
@@ -1079,6 +1117,7 @@ mod tests {
             AtomicU32::new(0).into(),
             None,
             None,
+            Arc::new(AtomicBool::new(false)),
         );
         worker.rlog_cache = if with_cache {
             RlogCache::new(RANDOM_STR_MAX_LEN * 100 * 5, RANDOM_STR_MAX_LEN * 100 / 2)
@@ -1229,6 +1268,7 @@ mod tests {
             AtomicU32::new(0).into(),
             None,
             None,
+            Arc::new(AtomicBool::new(false)),
         );
 
         let mut peer_batch = PeerBatch::new(1, 1000, 1);

@@ -1,5 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
+#[cfg(any(test, feature = "testexport"))]
+use std::sync::atomic::AtomicBool;
 use std::{
     fmt, fs,
     io::{Read, Seek, SeekFrom},
@@ -111,7 +113,6 @@ impl ServiceWorker {
     pub(crate) fn new(
         dir: PathBuf,
         cfg: &RfEngineConfig,
-        epoch_id: u32,
         async_wal_writer: Option<WalWriter>,
         rx: Receiver<ServiceTask>,
         manifest: Manifest,
@@ -119,8 +120,10 @@ impl ServiceWorker {
         lightweight_backup: Option<(LightweightBackupConfig, Arc<S3Fs>)>,
         healthy: Healthy,
         compact_rate_limiter: Option<Arc<IoRateLimiter>>,
+        #[cfg(any(test, feature = "testexport"))] compact_force_stop: Arc<AtomicBool>,
     ) -> Self {
         let engine_id = manifest.engine_id.clone();
+        let epoch_id = manifest.epoch_id + 1;
         let (compact_worker_tx, compact_rx) = tikv_util::mpsc::unbounded();
         let (dfs_worker_tx, dfs_worker_rx) = tikv_util::mpsc::unbounded();
         let mut compact_worker = CompactWorker::new(
@@ -132,6 +135,8 @@ impl ServiceWorker {
             compacted_epoch.clone(),
             lightweight_backup.as_ref(),
             compact_rate_limiter,
+            #[cfg(any(test, feature = "testexport"))]
+            compact_force_stop,
         );
         let handle = std::thread::Builder::new()
             .name("compact-wal-worker".to_string())
@@ -368,14 +373,22 @@ impl ServiceWorker {
     }
 
     fn handle_rotate(&mut self, epoch_id: u32) {
-        self.epoch_id.store(epoch_id + 1, Ordering::SeqCst);
+        let prev_region_id = self.epoch_id.swap(epoch_id + 1, Ordering::SeqCst);
+        assert_eq!(prev_region_id, epoch_id); // panic on unexpected to avoid data corruption.
         if let Some(writer) = self.async_wal_writer.as_mut() {
-            debug_assert_eq!(writer.epoch_id, epoch_id);
-            let file_off = writer.file_off;
-            writer.rotate().unwrap();
-            if let Some(dfs_worker_handle) = &self.dfs_worker_handle {
-                // Send rotate task to object storage worker.
-                dfs_worker_handle.try_send(ObjectStorageTask::Rotate { epoch_id, file_off });
+            assert!(
+                writer.epoch_id >= epoch_id,
+                "invalid rotate epoch {}, async writer epoch {}",
+                epoch_id,
+                writer.epoch_id,
+            );
+            if writer.epoch_id == epoch_id {
+                let file_off = writer.file_off;
+                writer.rotate().unwrap();
+                if let Some(dfs_worker_handle) = &self.dfs_worker_handle {
+                    // Send rotate task to object storage worker.
+                    dfs_worker_handle.try_send(ObjectStorageTask::Rotate { epoch_id, file_off });
+                }
             }
         }
         self.compact_worker_handle
