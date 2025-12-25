@@ -273,3 +273,7 @@ message VectorIndexDef {
 }
 
 message ClearColumnar { uint64 restore_version = 1; }
+
+message MetaPackHeader {
+  uint32 version = 1;
+}

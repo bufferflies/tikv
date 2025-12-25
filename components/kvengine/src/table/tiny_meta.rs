@@ -2,25 +2,42 @@
 
 use std::{
     convert::{TryFrom, TryInto},
-    fmt, ops,
+    fmt, fs,
+    fs::{File, OpenOptions},
+    io::{BufWriter, Read, Seek, SeekFrom, Write},
+    ops,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes};
+use collections::{HashMap, HashSet};
+use kvenginepb as pb;
 use log_wrappers::Value as LogValue;
+use protobuf::Message;
 use tikv_util::{
     box_try,
     codec::number::{U32_SIZE, U64_SIZE, U8_SIZE},
+    config::ReadableSize,
+    mpsc::{paired_callback, Receiver, Sender},
+    sys::thread::StdThreadBuildWrapper,
+    time::Instant,
 };
 
 use crate::{
     dfs::FileType,
+    error::Result as KvResult,
+    metrics::{META_PACKER_METAS_COUNT, META_PACK_ACTION_COUNTER_VEC},
     table::{
         sstable,
         sstable::{validate_checksum, SsTable},
         Error, Result,
     },
+    IoContext,
 };
+
+const FORCE_COMPACT_WRITTEN_BYTES: u64 = 100 * 1024 * 1024; // 100MB
 
 bitflags! {
     #[derive(Default)]
@@ -325,15 +342,600 @@ impl SstTinyMeta {
     }
 }
 
+const META_PACK_V1: u32 = 1;
+
+struct MetaPackHeader {
+    // Use protobuf for easy future extension.
+    inner: pb::MetaPackHeader,
+}
+
+impl Default for MetaPackHeader {
+    fn default() -> Self {
+        MetaPackHeader {
+            inner: pb::MetaPackHeader {
+                version: META_PACK_V1,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+impl MetaPackHeader {
+    fn marshal(&self) -> Vec<u8> {
+        let header_len = self.inner.compute_size();
+        let cap = U32_SIZE + header_len as usize;
+        let mut buf = Vec::with_capacity(cap);
+        buf.put_u32_le(header_len);
+        self.inner.write_to_vec(&mut buf).unwrap();
+        debug_assert_eq!(buf.len(), cap);
+        buf
+    }
+
+    fn unmarshal(buf: &mut &[u8]) -> Result<Self> {
+        if buf.remaining() < U32_SIZE {
+            return Err(Error::CorruptedMetaPack(format!(
+                "header length mismatch: {} < {}",
+                buf.remaining(),
+                U32_SIZE
+            )));
+        }
+
+        let header_len = buf.get_u32_le() as usize;
+        if buf.remaining() < header_len {
+            return Err(Error::CorruptedMetaPack(format!(
+                "header data length mismatch: {} < {}",
+                buf.remaining(),
+                header_len
+            )));
+        }
+
+        let mut pb_header = pb::MetaPackHeader::new();
+        pb_header
+            .merge_from_bytes(&buf[..header_len])
+            .map_err(|e| Error::CorruptedMetaPack(format!("failed to parse header: {}", e)))?;
+        if pb_header.version != META_PACK_V1 {
+            return Err(Error::CorruptedMetaPack(format!(
+                "unsupported meta pack version: {}",
+                pb_header.version
+            )));
+        }
+        buf.advance(header_len);
+
+        Ok(MetaPackHeader { inner: pb_header })
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct MetaPackReader {
+    core: Arc<ReaderCore>,
+}
+
+impl ops::Deref for MetaPackReader {
+    type Target = ReaderCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl MetaPackReader {
+    pub fn open(path: &Path, writable: bool) -> KvResult<Self> {
+        let (core, _) = ReaderCore::open_core(path, writable)?;
+        Ok(MetaPackReader {
+            core: Arc::new(core),
+        })
+    }
+}
+
+#[derive(Default)]
+pub struct ReaderCore {
+    metas: HashMap<u64 /* file_id */, TinyMeta>,
+}
+
+impl ReaderCore {
+    fn open_core(path: &Path, writable: bool) -> KvResult<(Self, u64 /* pack_size */)> {
+        let start_time = Instant::now_coarse();
+
+        let mut metas = HashMap::default();
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(writable)
+            .create(writable)
+            .open(path)
+            .ctx(format!("meta_reader.open.{}", path.display()))?;
+
+        let mut buf = vec![];
+        f.read_to_end(&mut buf).ctx("meta_reader.read")?;
+        let mut slice: &[u8] = &buf;
+        let pack_size = slice.remaining();
+
+        if let Err(err) = MetaPackHeader::unmarshal(&mut slice) {
+            if pack_size != 0 {
+                warn!("TinyMetaReader: unmarshal header error: {:?}", err;
+                    "pack_size" => pack_size);
+                if writable {
+                    f.set_len(0).ctx("meta_reader.truncate")?;
+                    f.seek(SeekFrom::Start(0)).ctx("meta_reader.seek_header")?;
+                }
+            }
+
+            if writable {
+                let header = MetaPackHeader::default();
+                let header_bytes = header.marshal();
+                f.write_all(&header_bytes).ctx("meta_reader.write_header")?;
+            }
+            return Ok((ReaderCore::default(), pack_size as u64));
+        }
+
+        while slice.has_remaining() {
+            let last_remaining = slice.remaining();
+            let meta = match TinyMeta::unmarshal(&mut slice) {
+                Ok(meta) => meta,
+                Err(err) => {
+                    // The last entry may be incomplete due to crash during writing.
+                    let read_len = pack_size - last_remaining;
+                    warn!(
+                        "meta_reader.unmarshal error: {:?}, truncate len: {}",
+                        err, read_len
+                    );
+                    if writable {
+                        f.set_len(read_len as u64)
+                            .ctx("meta_reader.truncate_incomplete")?;
+                    }
+                    break;
+                }
+            };
+            metas.insert(meta.file_id, meta);
+        }
+
+        info!("TinyMetaReader: load pack";
+            "metas" => metas.len(), "pack_size" => pack_size,
+            "takes" => ?start_time.saturating_elapsed());
+
+        Ok((ReaderCore { metas }, pack_size as u64))
+    }
+
+    pub fn get(&self, file_id: u64) -> Option<TinyMeta> {
+        self.metas.get(&file_id).cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.metas.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.metas.is_empty()
+    }
+}
+
+pub enum MetaPackTask {
+    Pack(TinyMeta),
+    Stop(Box<dyn FnOnce(Result<()>) + Send>),
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct MetaPackConfig {
+    /// Whether to enable tables meta pack.
+    ///
+    /// When enabled, tables' tiny meta (footer + properties + ...) will be
+    /// packed into a single file to reduce the IOPS and increase the speed
+    /// for kvengine startup.
+    pub enabled: bool,
+
+    /// Maximum number of pending tasks in the channel.
+    pub max_pending: usize,
+
+    /// Try to compact after append `trigger_compact_threshold` bytes
+    /// of meta data.
+    pub try_compact_threshold: ReadableSize,
+
+    /// The ratio of `all_files_in_pack / all_files_in_kvengine` when trigger a
+    /// compaction.
+    pub compact_ratio: f64,
+}
+
+impl Default for MetaPackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_pending: 1_000_000, // 100MB as each meta is about 100 bytes.
+            try_compact_threshold: ReadableSize::mb(1),
+            compact_ratio: 4.0,
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct CompactKeeper(Arc<CompactKeeperCore>);
+
+#[derive(Default)]
+pub struct CompactKeeperCore {
+    counter: Arc<()>,
+}
+
+pub struct CompactPauseGuard(Arc<()>);
+
+impl CompactKeeperCore {
+    pub fn pause(&self) -> CompactPauseGuard {
+        CompactPauseGuard(self.counter.clone())
+    }
+
+    pub fn is_paused(&self) -> bool {
+        Arc::strong_count(&self.counter) > 1
+    }
+}
+
+impl ops::Deref for CompactKeeper {
+    type Target = CompactKeeperCore;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+pub struct MetaPacker {
+    config: MetaPackConfig,
+    path: PathBuf,
+
+    worker_tx: Sender<MetaPackTask>,
+    worker_rx: Option<Receiver<MetaPackTask>>,
+
+    reader: Option<MetaPackReader>,
+    init_metas_count: usize,
+
+    compact_keeper: CompactKeeper,
+}
+
+impl MetaPacker {
+    pub fn stop(&self) {
+        let (cb, rx) = paired_callback();
+        if self.worker_tx.send(MetaPackTask::Stop(cb)).is_ok() {
+            match rx.recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    error!("MetaPacker stop error: {:?}", err);
+                    debug_assert!(false);
+                }
+                Err(err) => {
+                    warn!("MetaPacker stop callback recv error: {:?}", err);
+                }
+            }
+        }
+    }
+
+    pub fn compact_keeper(&self) -> CompactKeeper {
+        self.compact_keeper.clone()
+    }
+}
+
+#[derive(Clone)]
+pub struct MetaPackScheduler {
+    tx: Sender<MetaPackTask>,
+}
+
+impl MetaPackScheduler {
+    pub fn try_pack(&self, meta: TinyMeta) {
+        if let Err(err) = self.tx.try_send(MetaPackTask::Pack(meta))
+            && !err.is_disconnected()
+        {
+            warn!("MetaPacker pack request dropped: {:?}", err);
+        }
+    }
+}
+
+impl MetaPacker {
+    pub fn new(path: PathBuf, config: MetaPackConfig) -> KvResult<Self> {
+        let reader = MetaPackReader::open(&path, true)?;
+        let init_metas_count = reader.len();
+        let (tx, rx) = tikv_util::mpsc::bounded(config.max_pending);
+        Ok(MetaPacker {
+            config,
+            path,
+            worker_tx: tx,
+            worker_rx: Some(rx),
+            reader: Some(reader),
+            init_metas_count,
+            compact_keeper: CompactKeeper::default(),
+        })
+    }
+
+    pub fn take_reader(&mut self) -> Option<MetaPackReader> {
+        self.reader.take()
+    }
+
+    pub fn get_scheduler(&self) -> MetaPackScheduler {
+        MetaPackScheduler {
+            tx: self.worker_tx.clone(),
+        }
+    }
+
+    pub fn start_worker(&mut self, kv: crate::Engine) -> KvResult<()> {
+        if self.worker_rx.is_none() {
+            // The worker has already started.
+            return Ok(());
+        }
+
+        let f = OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .ctx(format!("meta_worker.open.{}", self.path.display()))?;
+        let writer = BufWriter::new(f);
+
+        let mut worker = MetaPackWorker {
+            config: self.config.clone(),
+            path: self.path.clone(),
+            rx: self.worker_rx.take().unwrap(),
+            kv,
+            compact_keeper: self.compact_keeper.clone(),
+            writer: Some(writer),
+            metas_count: self.init_metas_count,
+            written_bytes_after_try_compact: 0,
+        };
+        std::thread::Builder::new()
+            .name("meta-packer".to_string())
+            .spawn_wrapper(move || {
+                worker.run();
+            })
+            .unwrap();
+        Ok(())
+    }
+}
+
+struct MetaPackWorker {
+    config: MetaPackConfig,
+    path: PathBuf,
+    rx: Receiver<MetaPackTask>,
+    kv: crate::Engine,
+    compact_keeper: CompactKeeper,
+
+    writer: Option<BufWriter<File>>,
+
+    metas_count: usize,
+    written_bytes_after_try_compact: u64,
+}
+
+#[derive(Default)]
+struct ExistedFiles {
+    sst_files: HashSet<u64>,
+    sst_ia_files: HashSet<u64>,
+    blacklist: HashSet<u64>,
+}
+
+impl ExistedFiles {
+    fn len(&self) -> usize {
+        // Ignore the overlapped files (IaAutoFiles only, which should be rare).
+        self.sst_files.len() + self.sst_ia_files.len() + self.blacklist.len()
+    }
+
+    fn contains(&self, tiny_meta: &TinyMeta) -> bool {
+        let file_id = tiny_meta.file_id;
+        if self.blacklist.contains(&file_id) {
+            return true;
+        }
+        if tiny_meta.segment_offsets.is_some() {
+            self.sst_ia_files.contains(&file_id)
+        } else {
+            self.sst_files.contains(&file_id)
+        }
+    }
+}
+
+impl MetaPackWorker {
+    fn run(&mut self) {
+        self.refresh_metrics();
+
+        while let Ok(task) = self.rx.recv() {
+            match task {
+                MetaPackTask::Pack(meta) => {
+                    if let Err(err) = self.handle_pack(meta) {
+                        error!("MetaPacker pack error: {:?}", err);
+                        continue;
+                    }
+
+                    self.try_compact();
+                }
+                MetaPackTask::Stop(cb) => {
+                    let res = self.handle_stop();
+                    cb(res);
+                    return;
+                }
+            };
+        }
+    }
+
+    fn handle_pack(&mut self, meta: TinyMeta) -> KvResult<()> {
+        if let Some(writer) = self.writer.as_mut() {
+            let data = box_try!(meta.marshal());
+            writer.write_all(&data).ctx("handle_pack.write")?;
+
+            self.written_bytes_after_try_compact += data.len() as u64;
+            self.metas_count += 1;
+            self.refresh_metrics();
+            META_PACK_ACTION_COUNTER_VEC.pack.inc();
+        }
+        Ok(())
+    }
+
+    fn handle_stop(&mut self) -> Result<()> {
+        if let Some(mut writer) = self.writer.take() {
+            box_try!(writer.flush());
+            box_try!(writer.get_ref().sync_data());
+
+            info!("MetaPacker stopped");
+        }
+        Ok(())
+    }
+
+    fn precheck_compact(&self) -> bool {
+        Self::precheck_compact_impl(
+            self.written_bytes_after_try_compact,
+            &self.config,
+            &self.compact_keeper,
+        )
+    }
+
+    fn precheck_compact_impl(
+        written_bytes_after_try_compact: u64,
+        config: &MetaPackConfig,
+        compact_keeper: &CompactKeeper,
+    ) -> bool {
+        written_bytes_after_try_compact >= FORCE_COMPACT_WRITTEN_BYTES
+            || (written_bytes_after_try_compact >= config.try_compact_threshold.0
+                && !compact_keeper.is_paused())
+    }
+
+    fn try_compact(&mut self) {
+        if !self.precheck_compact() {
+            return;
+        }
+        self.written_bytes_after_try_compact = 0;
+
+        let exist_files = self.collect_exist_files();
+        if (self.metas_count as f64) < (exist_files.len() as f64) * self.config.compact_ratio {
+            return;
+        }
+
+        if let Err(err) = self.compact(exist_files) {
+            warn!("MetaPacker compact error: {:?}", err);
+        }
+    }
+
+    fn compact(&mut self, exist_files: ExistedFiles) -> KvResult<()> {
+        let start_time = Instant::now_coarse();
+
+        if let Some(writer) = self.writer.as_mut() {
+            writer.flush().ctx("compact.writer_flush")?;
+        } else {
+            // Stopped.
+            return Ok(());
+        }
+
+        let (reader, origin_pack_size) = box_try!(ReaderCore::open_core(&self.path, false));
+        let origin_metas_count = reader.metas.len();
+
+        let compact_path = self.path.with_extension("compact");
+        let mut compact_writer = {
+            let f = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&compact_path)
+                .ctx(format!("compact.open_compact.{}", self.path.display()))?;
+            BufWriter::new(f)
+        };
+
+        let mut new_metas_count = 0usize;
+        let mut new_pack_size = 0u64;
+        let mut drop_metas_count = 0usize;
+
+        let header = MetaPackHeader::default();
+        let header_bytes = header.marshal();
+        new_pack_size += header_bytes.len() as u64;
+        compact_writer
+            .write_all(&header_bytes)
+            .ctx("compact.write_header")?;
+
+        for tiny_meta in reader.metas.values() {
+            if exist_files.contains(tiny_meta) {
+                match tiny_meta.marshal() {
+                    Ok(data) => {
+                        compact_writer.write_all(&data).ctx("compact.write")?;
+
+                        new_metas_count += 1;
+                        new_pack_size += data.len() as u64;
+                    }
+                    Err(err) => {
+                        warn!("MetaPacker: compact: marshal failed: {:?}", err;
+                            "file" => tiny_meta.file_id);
+                        debug_assert!(false);
+                    }
+                };
+            } else {
+                drop_metas_count += 1;
+            }
+        }
+
+        compact_writer.flush().ctx("compact.flush")?;
+        compact_writer
+            .get_ref()
+            .sync_data()
+            .ctx("compact.sync_data")?;
+
+        fs::rename(compact_path, &self.path).ctx("compact.rename")?;
+        if let Some(parent) = self.path.parent() {
+            file_system::sync_dir(parent).ctx("compact.sync_dir")?;
+        }
+
+        let f = OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .ctx(format!("meta_worker.open.{}", self.path.display()))?;
+        let writer = BufWriter::new(f);
+        self.writer = Some(writer);
+        self.metas_count = new_metas_count;
+
+        self.refresh_metrics();
+        META_PACK_ACTION_COUNTER_VEC.compact.inc();
+
+        info!("MetaPacker compacted";
+            "exist_files" => exist_files.len(),
+            "origin_metas" => origin_metas_count,
+            "new_metas" => new_metas_count,
+            "origin_pack_size" => origin_pack_size,
+            "new_pack_size" => new_pack_size,
+            "drop_metas" => drop_metas_count,
+            "takes" => ?start_time.saturating_elapsed());
+        Ok(())
+    }
+
+    fn collect_exist_files(&self) -> ExistedFiles {
+        let mut exist_files = ExistedFiles::default();
+
+        let blacklist = self.kv.get_files_in_blacklist();
+        exist_files.blacklist.extend(blacklist.as_ref());
+
+        let shard_id_vers = self.kv.get_all_shard_id_vers();
+        for id_ver in shard_id_vers {
+            let Some(shard) = self.kv.get_shard(id_ver.id) else {
+                continue;
+            };
+            let (local_files, ia_files) = shard.get_local_sst_files();
+            exist_files.sst_files.extend(local_files);
+            exist_files.sst_ia_files.extend(ia_files);
+            // TODO: Handle other file types.
+        }
+
+        exist_files
+    }
+
+    fn refresh_metrics(&self) {
+        META_PACKER_METAS_COUNT.set(self.metas_count as i64);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{ops::Deref, sync::Arc};
+
     use bytes::Bytes;
     use rand::prelude::*;
+    use schema::schema::{StorageClass, StorageClassSpec};
+    use tempfile::TempDir;
 
     use super::*;
-    use crate::table::{
-        sstable::builder::{Footer, FOOTER_SIZE, MAGIC_NUMBER, TABLE_FORMAT_V1},
-        ChecksumType, InnerKey, Value, NO_COMPRESSION,
+    use crate::{
+        ia::{ia_file::IaFile, manager::IaManager, util::IaManagerOptionsBuilder},
+        table::{
+            file::InMemFile,
+            sstable::{
+                builder::{Footer, FOOTER_SIZE, MAGIC_NUMBER, TABLE_FORMAT_V1},
+                BlockCache, SsTable,
+            },
+            ChecksumType, InnerKey, Value, NO_COMPRESSION,
+        },
+        ShardCf, ShardCfBuilder, ShardDataBuilder, STORAGE_CLASS_KEY,
     };
 
     #[test]
@@ -508,6 +1110,401 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_meta_pack() {
+        let (test_engine, _applier_tx) = crate::tests::new_test_engine();
+
+        let tmp_dir = TempDir::new().unwrap();
+        let pack_path = tmp_dir.path().join("meta.pack");
+
+        let config = pack_config();
+        let mut packer = MetaPacker::new(pack_path.clone(), config.clone()).unwrap();
+
+        let initial_reader = packer.take_reader().unwrap();
+        assert!(packer.take_reader().is_none());
+        assert!(initial_reader.is_empty());
+
+        packer.start_worker(test_engine.deref().clone()).unwrap();
+        packer.start_worker(test_engine.deref().clone()).unwrap(); // no-op (already started)
+        let scheduler = packer.get_scheduler();
+
+        let mut expected = HashMap::default();
+        for file_id in 1..=20u64 {
+            let meta = make_tiny_meta(file_id, 50);
+            expected.insert(file_id, meta.clone());
+            scheduler.try_pack(meta);
+        }
+
+        packer.stop();
+
+        let mut restarted = MetaPacker::new(pack_path.clone(), config).unwrap();
+        let reader = restarted.take_reader().unwrap();
+        assert_eq!(reader.len(), expected.len());
+
+        for (file_id, expected_meta) in expected {
+            let got = reader.get(file_id).expect("meta should exist");
+            assert_eq!(got.file_id, expected_meta.file_id);
+            assert_eq!(
+                got.footer_and_properties,
+                expected_meta.footer_and_properties
+            );
+            assert_eq!(got.segment_offsets, expected_meta.segment_offsets);
+
+            let sst_meta = SstTinyMeta::try_from(got).expect("sst meta should be valid");
+            let (_footer, _props) = sst_meta
+                .get_footer_and_properties()
+                .expect("checksum should be valid");
+        }
+    }
+
+    #[test]
+    fn test_meta_pack_truncates_incomplete() {
+        let (test_engine, _applier_tx) = crate::tests::new_test_engine();
+
+        let tmp_dir = TempDir::new().unwrap();
+        let pack_path = tmp_dir.path().join("meta.pack");
+
+        let config = pack_config();
+        let mut packer = MetaPacker::new(pack_path.clone(), config.clone()).unwrap();
+        packer.start_worker(test_engine.deref().clone()).unwrap();
+        let scheduler = packer.get_scheduler();
+
+        let mut expected = HashMap::default();
+        for file_id in 1..=10u64 {
+            let meta = make_tiny_meta(file_id, 40);
+            expected.insert(file_id, meta.clone());
+            scheduler.try_pack(meta);
+        }
+        packer.stop();
+
+        let clean_size = fs::metadata(&pack_path).unwrap().len();
+
+        let incomplete_file_id = 999u64;
+        let incomplete = make_tiny_meta(incomplete_file_id, 10).marshal().unwrap();
+        assert!(incomplete.len() > 5);
+
+        {
+            let mut f = OpenOptions::new().append(true).open(&pack_path).unwrap();
+            f.write_all(&incomplete[..5]).unwrap();
+            f.sync_data().unwrap();
+        }
+
+        let corrupted_size = fs::metadata(&pack_path).unwrap().len();
+        assert!(corrupted_size > clean_size);
+
+        let mut restarted = MetaPacker::new(pack_path.clone(), config).unwrap();
+        let reader = restarted.take_reader().unwrap();
+
+        let truncated_size = fs::metadata(&pack_path).unwrap().len();
+        assert_eq!(truncated_size, clean_size);
+        assert!(reader.get(incomplete_file_id).is_none());
+
+        assert_eq!(reader.len(), expected.len());
+        for (file_id, expected_meta) in expected {
+            let got = reader.get(file_id).expect("meta should exist");
+            assert_eq!(
+                got.footer_and_properties,
+                expected_meta.footer_and_properties
+            );
+            assert_eq!(got.segment_offsets, expected_meta.segment_offsets);
+            SstTinyMeta::try_from(got).expect("sst meta should be valid");
+        }
+    }
+
+    #[test]
+    fn test_meta_pack_recovers_corrupted_header() {
+        let (test_engine, _applier_tx) = crate::tests::new_test_engine();
+
+        let tmp_dir = TempDir::new().unwrap();
+        let pack_path = tmp_dir.path().join("meta.pack");
+
+        fs::write(&pack_path, vec![0xABu8; 128]).unwrap();
+        assert!(fs::metadata(&pack_path).unwrap().len() > 0);
+
+        let config = pack_config();
+        let header_len = MetaPackHeader::default().marshal().len() as u64;
+
+        let mut packer = MetaPacker::new(pack_path.clone(), config.clone()).unwrap();
+        assert_eq!(fs::metadata(&pack_path).unwrap().len(), header_len);
+
+        let reader_after_repair = MetaPackReader::open(&pack_path, false).unwrap();
+        assert!(reader_after_repair.is_empty());
+
+        packer.start_worker(test_engine.deref().clone()).unwrap();
+        let scheduler = packer.get_scheduler();
+
+        let mut expected = HashMap::default();
+        for file_id in 1..=10u64 {
+            let meta = make_tiny_meta(file_id, 20);
+            expected.insert(file_id, meta.clone());
+            scheduler.try_pack(meta);
+        }
+        packer.stop();
+
+        let mut restarted = MetaPacker::new(pack_path, config).unwrap();
+        let reader = restarted.take_reader().unwrap();
+        assert_eq!(reader.len(), expected.len());
+
+        for (file_id, expected_meta) in expected {
+            let got = reader.get(file_id).expect("meta should exist");
+            assert_eq!(
+                got.footer_and_properties,
+                expected_meta.footer_and_properties
+            );
+            assert_eq!(got.segment_offsets, expected_meta.segment_offsets);
+            SstTinyMeta::try_from(got).expect("sst meta should be valid");
+        }
+    }
+
+    #[test]
+    fn test_meta_pack_compact() {
+        ::test_util::init_log_for_test();
+        let (test_engine, _applier_tx) = crate::tests::new_test_engine();
+
+        let shard = test_engine.get_shard(1).unwrap();
+        let (meta1, data1, _) = make_tiny_meta_ext(1, 30, false);
+        let (meta2, data2, _) = make_tiny_meta_ext(2, 30, false);
+        let (meta3, data3, _) = make_tiny_meta_ext(3, 30, false);
+        let t1 = make_sstable_from_data(1, data1);
+        let t2 = make_sstable_from_data(2, data2);
+        let t3 = make_sstable_from_data(3, data3);
+        let mut cf_builder = ShardCfBuilder::new(0);
+        cf_builder.add_table(t1.clone(), 1);
+        cf_builder.add_table(t2.clone(), 1);
+        cf_builder.add_table(t3.clone(), 1);
+        let mut builder = ShardDataBuilder::new(shard.get_data());
+        builder.set_cfs([cf_builder.build(), ShardCf::new(1), ShardCf::new(2)]);
+        shard.set_data(builder.build());
+
+        let tmp_dir = TempDir::new().unwrap();
+        let pack_path = tmp_dir.path().join("meta.pack");
+
+        let mut metas = Vec::new();
+        let mut keep = HashMap::default();
+        for file_id in 1..=20u64 {
+            let meta = match file_id {
+                1 => meta1.clone(),
+                2 => meta2.clone(),
+                3 => meta3.clone(),
+                _ => make_tiny_meta_ext(file_id, 30, false).0,
+            };
+            if file_id <= 3 {
+                keep.insert(file_id, meta.clone());
+            }
+            metas.push(meta);
+        }
+
+        let total_bytes: usize = metas.iter().map(|m| m.marshal().unwrap().len()).sum();
+
+        let config = MetaPackConfig {
+            enabled: true,
+            max_pending: 1024,
+            try_compact_threshold: ReadableSize(total_bytes as u64),
+            compact_ratio: 4.0,
+        };
+
+        let mut packer = MetaPacker::new(pack_path.clone(), config.clone()).unwrap();
+        packer.start_worker(test_engine.deref().clone()).unwrap();
+        let scheduler = packer.get_scheduler();
+
+        for meta in metas {
+            scheduler.try_pack(meta);
+        }
+        packer.stop();
+
+        let header_len = MetaPackHeader::default().marshal().len() as u64;
+        let kept_bytes: u64 = keep
+            .values()
+            .map(|m| m.marshal().unwrap().len() as u64)
+            .sum();
+        let expected_pack_size = header_len + kept_bytes;
+        assert_eq!(fs::metadata(&pack_path).unwrap().len(), expected_pack_size);
+
+        let mut restarted = MetaPacker::new(pack_path.clone(), config).unwrap();
+        let reader = restarted.take_reader().unwrap();
+        assert_eq!(reader.len(), keep.len());
+        for (file_id, expected_meta) in keep {
+            let got = reader.get(file_id).expect("meta should exist");
+            assert_eq!(
+                got.footer_and_properties,
+                expected_meta.footer_and_properties
+            );
+            assert_eq!(got.segment_offsets, expected_meta.segment_offsets);
+            let sst_meta = SstTinyMeta::try_from(got).unwrap();
+            sst_meta.get_footer_and_properties().unwrap();
+        }
+        for file_id in 4..=20u64 {
+            assert!(reader.get(file_id).is_none());
+        }
+
+        // Transit to IA
+        {
+            let sc_spec: StorageClassSpec = StorageClass::Ia.into();
+            shard.set_property(STORAGE_CLASS_KEY, &sc_spec.marshal());
+
+            let ia_rt = tokio::runtime::Builder::new_multi_thread()
+                .thread_name("ia-mgr")
+                .enable_all()
+                .worker_threads(1)
+                .build()
+                .unwrap();
+            let options = IaManagerOptionsBuilder::default().build().unwrap();
+            let mgr = IaManager::new(options, test_engine.fs.clone(), None, ia_rt.into()).unwrap();
+
+            let (ia_meta1, ia_data1, _) = make_tiny_meta_ext(1, 30, true);
+            let (ia_meta21, ia_data21, _) = make_tiny_meta_ext(21, 30, true);
+            let ia_t1 = convert_local_sst_to_ia(&make_sstable_from_data(1, ia_data1), mgr.clone());
+            let ia_t21 = convert_local_sst_to_ia(&make_sstable_from_data(21, ia_data21), mgr);
+
+            let mut ia_cf_builder = ShardCfBuilder::new(0);
+            ia_cf_builder.add_table(ia_t1, 1);
+            ia_cf_builder.add_table(ia_t21, 1);
+            let mut builder = ShardDataBuilder::new(shard.get_data());
+            builder.set_cfs([ia_cf_builder.build(), ShardCf::new(1), ShardCf::new(2)]);
+            shard.set_data(builder.build());
+
+            let mut ia_metas = Vec::new();
+            let mut ia_keep = HashMap::default();
+            for meta in [ia_meta1, ia_meta21] {
+                ia_keep.insert(meta.file_id, meta.clone());
+                ia_metas.push(meta);
+            }
+
+            let ia_total_bytes: usize = ia_metas.iter().map(|m| m.marshal().unwrap().len()).sum();
+            let ia_config = MetaPackConfig {
+                enabled: true,
+                max_pending: 1024,
+                try_compact_threshold: ReadableSize(ia_total_bytes as u64),
+                compact_ratio: 1.0,
+            };
+
+            let mut packer = MetaPacker::new(pack_path.clone(), ia_config.clone()).unwrap();
+            packer.start_worker(test_engine.deref().clone()).unwrap();
+            let scheduler = packer.get_scheduler();
+
+            for meta in ia_metas {
+                scheduler.try_pack(meta);
+            }
+            packer.stop();
+
+            let mut restarted = MetaPacker::new(pack_path, ia_config).unwrap();
+            let reader = restarted.take_reader().unwrap();
+            assert_eq!(reader.len(), ia_keep.len());
+            for (file_id, expected_meta) in ia_keep {
+                let got = reader.get(file_id).expect("meta should exist");
+                assert_eq!(
+                    got.footer_and_properties,
+                    expected_meta.footer_and_properties
+                );
+                assert_eq!(got.segment_offsets, expected_meta.segment_offsets);
+            }
+            for file_id in 2..=20u64 {
+                assert!(reader.get(file_id).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn test_precheck_compact_impl_compact_keeper_pause() {
+        let threshold = ReadableSize::kb(1).0;
+        let config = MetaPackConfig {
+            enabled: true,
+            max_pending: 1,
+            try_compact_threshold: ReadableSize(threshold),
+            compact_ratio: 1.0,
+        };
+        let keeper = CompactKeeper::default();
+
+        let cases = vec![
+            ("below threshold", threshold - 1, false, false),
+            ("at threshold unpaused", threshold, false, true),
+            ("at threshold paused", threshold, true, false),
+            (
+                "force compact paused",
+                FORCE_COMPACT_WRITTEN_BYTES,
+                true,
+                true,
+            ),
+        ];
+
+        for (name, written_bytes, paused, expected) in cases {
+            let _pause_guard = paused.then(|| keeper.pause());
+            assert_eq!(
+                MetaPackWorker::precheck_compact_impl(written_bytes, &config, &keeper),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_meta_pack_compact_pause() {
+        ::test_util::init_log_for_test();
+        let (test_engine, _applier_tx) = crate::tests::new_test_engine();
+
+        let tmp_dir = TempDir::new().unwrap();
+        let pack_path = tmp_dir.path().join("meta.pack");
+
+        let meta1 = make_tiny_meta(1, 10);
+        let meta2 = make_tiny_meta(2, 10);
+        let threshold_bytes = std::cmp::min(
+            meta1.marshal().unwrap().len(),
+            meta2.marshal().unwrap().len(),
+        );
+
+        let config = MetaPackConfig {
+            enabled: true,
+            max_pending: 1024,
+            try_compact_threshold: ReadableSize(threshold_bytes as u64),
+            compact_ratio: 1.0,
+        };
+
+        {
+            let mut packer = MetaPacker::new(pack_path.clone(), config.clone()).unwrap();
+            let _pause_guard = packer.compact_keeper().pause();
+            packer.start_worker(test_engine.deref().clone()).unwrap();
+            let scheduler = packer.get_scheduler();
+
+            // Should trigger compact but be paused.
+            scheduler.try_pack(meta1);
+            packer.stop();
+
+            let reader_before = MetaPackReader::open(&pack_path, false).unwrap();
+            assert_eq!(reader_before.len(), 1);
+            assert!(reader_before.get(1).is_some());
+        }
+
+        {
+            let mut packer = MetaPacker::new(pack_path.clone(), config.clone()).unwrap();
+            let pause_guard = packer.compact_keeper().pause();
+            packer.start_worker(test_engine.deref().clone()).unwrap();
+            let scheduler = packer.get_scheduler();
+
+            drop(pause_guard);
+            // Should trigger compact.
+            scheduler.try_pack(meta2);
+            packer.stop();
+        }
+
+        let mut restarted = MetaPacker::new(pack_path, config).unwrap();
+        let reader = restarted.take_reader().unwrap();
+        assert!(reader.is_empty());
+    }
+
+    fn pack_config() -> MetaPackConfig {
+        MetaPackConfig {
+            enabled: true,
+            max_pending: 1024,
+            try_compact_threshold: ReadableSize::gb(1),
+            compact_ratio: 1024.0,
+        }
+    }
+
+    fn make_sstable_from_data(file_id: u64, data: Bytes) -> SsTable {
+        let file = InMemFile::new(file_id, data);
+        SsTable::new(Arc::new(file), BlockCache::None, None).unwrap()
+    }
+
     fn make_sstable_data(
         file_id: u64,
         n: usize,
@@ -586,6 +1583,19 @@ mod tests {
             table_data,
             meta_off,
         )
+    }
+
+    fn convert_local_sst_to_ia(t: &SsTable, mgr: IaManager) -> SsTable {
+        let meta_data = t
+            .file()
+            .read(
+                t.meta_offset() as u64,
+                t.size() as usize - t.meta_offset() as usize,
+            )
+            .unwrap();
+        let meta_file = InMemFile::new(t.id(), meta_data);
+        let ia_file = IaFile::open_for_sst(t.id(), Arc::new(meta_file), mgr).unwrap();
+        SsTable::new(Arc::new(ia_file), BlockCache::None, None).unwrap()
     }
 
     // Helper function to create a TinyMeta with invalid SST footer data

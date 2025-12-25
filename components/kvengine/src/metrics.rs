@@ -189,3 +189,30 @@ pub(crate) fn elapsed_secs(t: Instant) -> f64 {
     let nanos = f64::from(d.subsec_nanos());
     d.as_secs() as f64 + (nanos / 1_000_000_000.0)
 }
+
+make_static_metric! {
+    pub label_enum MetaPackActionMetric {
+        pack,
+        compact,
+    }
+
+    pub struct MetaPackActionCounterVec: IntCounter {
+        "metric" => MetaPackActionMetric,
+    }
+}
+
+lazy_static! {
+    pub static ref META_PACK_ACTION_COUNTER_VEC: MetaPackActionCounterVec =
+        register_static_int_counter_vec!(
+            MetaPackActionCounterVec,
+            "kv_engine_meta_packer_action_counter",
+            "Total number of meta pack operations",
+            &["metric"]
+        )
+        .unwrap();
+    pub static ref META_PACKER_METAS_COUNT: IntGauge = register_int_gauge!(
+        "kv_engine_meta_packer_metas_count",
+        "Number of metas in meta packer",
+    )
+    .unwrap();
+}

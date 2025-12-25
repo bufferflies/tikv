@@ -66,7 +66,7 @@ const TABLE_KEY_PREFIX: &str = "t_";
 
 /// Wrap `Engine` to make sure that it will be closed after the test, and not
 /// interfere with other tests.
-struct TestEngine {
+pub(crate) struct TestEngine {
     engine: Engine,
     key_builder: KeyBuilder,
 }
@@ -101,11 +101,11 @@ impl TestEngine {
     }
 }
 
-fn new_test_engine() -> (TestEngine, mpsc::Sender<ApplyTask>) {
+pub(crate) fn new_test_engine() -> (TestEngine, mpsc::Sender<ApplyTask>) {
     new_test_engine_opt(false, DEF_BLOCK_SIZE, "")
 }
 
-fn new_test_engine_opt(
+pub(crate) fn new_test_engine_opt(
     enable_inner_key_off: bool,
     block_size: usize,
     key_prefix: &str,
@@ -1385,7 +1385,7 @@ impl Applier {
     }
 }
 
-struct ApplyTask {
+pub(crate) struct ApplyTask {
     wb: Option<WriteBatch>,
     cs: Option<pb::ChangeSet>,
     result_tx: mpsc::Sender<Result<u64 /* write_sequence */>>,
