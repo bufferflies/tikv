@@ -18,7 +18,6 @@ use std::{
     usize,
 };
 
-use causal_ts::Config as CausalTsConfig;
 use engine_rocks::{
     config::{self as rocks_config, BlobRunMode, CompressionType, LogLevel as RocksLogLevel},
     raw::{
@@ -2622,9 +2621,6 @@ pub struct TikvConfig {
 
     #[online_config(submodule)]
     pub resource_control: ResourceControlConfig,
-
-    #[online_config(skip)]
-    pub causal_ts: CausalTsConfig,
 }
 
 impl Default for TikvConfig {
@@ -2672,7 +2668,6 @@ impl Default for TikvConfig {
             dfs: DFSConfig::default(),
             overload: OverloadConfig::default(),
             resource_control: ResourceControlConfig::default(),
-            causal_ts: CausalTsConfig::default(),
         }
     }
 }
@@ -2810,7 +2805,6 @@ impl TikvConfig {
         self.resolved_ts.validate()?;
         self.resource_metering.validate()?;
         self.quota.validate()?;
-        self.causal_ts.validate()?;
         self.kvengine.validate()?;
 
         if self.storage.flow_control.enable {

@@ -13,7 +13,6 @@ cloud-azure = ["encryption_export/cloud-azure"]
 [dependencies]
 api_version = { workspace = true }
 backtrace = "0.3"
-causal_ts = { workspace = true, features = ["testexport"] }
 collections = { workspace = true }
 concurrency_manager = { workspace = true }
 crossbeam = "0.8"

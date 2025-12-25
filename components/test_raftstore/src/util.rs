@@ -2,7 +2,6 @@
 
 use std::{
     path::Path,
-    str::FromStr,
     sync::{mpsc, Arc},
     thread,
     time::Duration,
@@ -610,16 +609,6 @@ pub fn configure_for_encryption<T: Simulator>(cluster: &mut Cluster<T>) {
             path: master_key_file.to_str().unwrap().to_owned(),
         },
     }
-}
-
-pub fn configure_for_causal_ts<T: Simulator>(
-    cluster: &mut Cluster<T>,
-    renew_interval: &str,
-    renew_batch_min_size: u32,
-) {
-    let cfg = &mut cluster.cfg.causal_ts;
-    cfg.renew_interval = ReadableDuration::from_str(renew_interval).unwrap();
-    cfg.renew_batch_min_size = renew_batch_min_size;
 }
 
 pub fn new_mutation(op: Op, k: &[u8], v: &[u8]) -> Mutation {

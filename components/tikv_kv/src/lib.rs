@@ -328,8 +328,6 @@ pub struct SnapContext<'a> {
     // `key_ranges` is used in replica read. It will send to
     // the leader via raft "read index" to check memory locks.
     pub key_ranges: Vec<KeyRange>,
-    // Marks that this read is a FlashbackToVersionReadPhase.
-    pub for_flashback: bool,
     // extra_region_override overrides some context fields in the `pb_ctx` for the secondary
     // regions.
     // The "extra region" means the regions that are not the source region

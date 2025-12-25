@@ -5,7 +5,6 @@ use std::{
     usize,
 };
 
-use causal_ts::CausalTsProviderImpl;
 use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
 use grpcio::Service;
@@ -74,7 +73,6 @@ pub struct ServerCluster {
     pub health_services: HashMap<u64, HealthService>,
     pub security_mgr: Arc<SecurityManager>,
     pub txn_extra_schedulers: HashMap<u64, Arc<dyn TxnExtraScheduler>>,
-    pub causal_ts_providers: HashMap<u64, Arc<CausalTsProviderImpl>>,
 }
 
 impl ServerCluster {
@@ -87,10 +85,6 @@ impl ServerCluster {
     }
 
     pub fn get_concurrency_manager(&self, _node_id: u64) -> ConcurrencyManager {
-        unimplemented!()
-    }
-
-    pub fn get_causal_ts_provider(&self, _node_id: u64) -> Option<Arc<CausalTsProviderImpl>> {
         unimplemented!()
     }
 }

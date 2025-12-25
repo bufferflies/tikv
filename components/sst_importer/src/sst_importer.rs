@@ -48,7 +48,7 @@ use crate::{
     import_file::{ImportDir, ImportFile},
     import_mode::ImportModeSwitcher,
     metrics::*,
-    sst_writer::{RawSstWriter, TxnSstWriter},
+    sst_writer::TxnSstWriter,
     util, Config, Error, Result,
 };
 
@@ -1161,22 +1161,6 @@ impl SstImporter {
             write_path,
             default_meta,
             write_meta,
-            self.key_manager.clone(),
-            self.api_version,
-        ))
-    }
-
-    pub fn new_raw_writer(&self, mut meta: SstMeta) -> Result<RawSstWriter> {
-        meta.set_cf_name(CF_DEFAULT.to_owned());
-        let default_path = self.dir.join(&meta)?;
-        let default = RocksSstWriterBuilder::new()
-            .set_cf(CF_DEFAULT)
-            .build(default_path.temp.to_str().unwrap())
-            .unwrap();
-        Ok(RawSstWriter::new(
-            default,
-            default_path,
-            meta,
             self.key_manager.clone(),
             self.api_version,
         ))

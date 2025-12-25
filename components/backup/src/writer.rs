@@ -14,12 +14,11 @@ use kvproto::{
 };
 use tikv::{coprocessor::checksum_crc64_xor, storage::txn::TxnEntry};
 use tikv_util::{
-    self, box_err, error,
+    self, box_err,
     time::{Instant, Limiter},
 };
-use txn_types::KvPair;
 
-use crate::{backup_file_name, metrics::*, utils::KeyValueCodec, Error, Result};
+use crate::{backup_file_name, metrics::*, Error, Result};
 
 #[derive(Debug, Clone, Copy)]
 /// CfNameWrap wraps the CfName type.
@@ -82,15 +81,6 @@ impl Writer {
                 .map_err(|err| Error::Other(box_err!("Decode error: {:?}", err)))?;
             self.total_bytes += (k.len() + v.len()) as u64;
             self.checksum = checksum_crc64_xor(self.checksum, self.digest.clone(), &k, &v);
-        }
-        Ok(())
-    }
-
-    fn update_raw_with(&mut self, key: &[u8], value: &[u8], need_checksum: bool) -> Result<()> {
-        self.total_kvs += 1;
-        self.total_bytes += (key.len() + value.len()) as u64;
-        if need_checksum {
-            self.checksum = checksum_crc64_xor(self.checksum, self.digest.clone(), key, value);
         }
         Ok(())
     }
@@ -324,91 +314,6 @@ impl BackupWriter {
 
     pub fn need_flush_keys(&self) -> bool {
         self.default.total_bytes + self.write.total_bytes > 0
-    }
-}
-
-/// A writer writes Raw kv into SST files.
-pub struct BackupRawKvWriter {
-    name: String,
-    cf: CfName,
-    writer: Writer,
-    limiter: Limiter,
-    cipher: CipherInfo,
-    codec: KeyValueCodec,
-}
-
-impl BackupRawKvWriter {
-    /// Create a new BackupRawKvWriter.
-    pub fn new(
-        name: &str,
-        cf: CfNameWrap,
-        limiter: Limiter,
-        compression_type: Option<SstCompressionType>,
-        compression_level: i32,
-        cipher: CipherInfo,
-        codec: KeyValueCodec,
-    ) -> Result<BackupRawKvWriter> {
-        let writer = RocksSstWriterBuilder::new()
-            .set_in_memory(true)
-            .set_cf(cf.into())
-            .set_compression_type(compression_type)
-            .set_compression_level(compression_level)
-            .build(name)?;
-        Ok(BackupRawKvWriter {
-            name: name.to_owned(),
-            cf: cf.into(),
-            writer: Writer::new(writer),
-            limiter,
-            cipher,
-            codec,
-        })
-    }
-
-    /// Write Kv_pair to buffered SST files.
-    pub fn write<I>(&mut self, kv_pairs: I, need_checksum: bool) -> Result<()>
-    where
-        I: Iterator<Item = Result<KvPair>>,
-    {
-        for kv_pair in kv_pairs {
-            let (k, v) = match kv_pair {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("write raw kv"; "error" => ?e);
-                    return Err(Error::Other("occur an error when written raw kv".into()));
-                }
-            };
-
-            self.writer.write(&k, &v)?;
-            self.writer.update_raw_with(
-                &self.codec.decode_dst_encoded_key(&k)?,
-                self.codec.decode_dst_encoded_value(&v)?,
-                need_checksum,
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Save buffered SST files to the given external storage.
-    pub async fn save(self, storage: &dyn ExternalStorage) -> Result<Vec<File>> {
-        let start = Instant::now();
-        let mut files = Vec::with_capacity(1);
-        if !self.writer.is_empty() {
-            let file = self
-                .writer
-                .save_and_build_file(
-                    &self.name,
-                    self.cf.into(),
-                    self.limiter.clone(),
-                    storage,
-                    &self.cipher,
-                )
-                .await?;
-            files.push(file);
-        }
-        BACKUP_RANGE_HISTOGRAM_VEC
-            .with_label_values(&["save_raw"])
-            .observe(start.saturating_elapsed().as_secs_f64());
-        Ok(files)
     }
 }
 

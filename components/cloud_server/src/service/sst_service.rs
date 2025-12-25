@@ -17,7 +17,7 @@ use grpcio::{
 use kvproto::{
     encryptionpb::EncryptionMethod,
     errorpb,
-    import_sstpb::{RawWriteRequest_oneof_chunk as RawChunk, WriteRequest_oneof_chunk as Chunk, *},
+    import_sstpb::{WriteRequest_oneof_chunk as Chunk, *},
     kvrpcpb::Context,
     raft_cmdpb::*,
 };
@@ -663,14 +663,6 @@ where
     }
 
     impl_write!(write, WriteRequest, WriteResponse, Chunk, new_txn_writer);
-
-    impl_write!(
-        raw_write,
-        RawWriteRequest,
-        RawWriteResponse,
-        RawChunk,
-        new_raw_writer
-    );
 }
 
 // add error statistics from pb error response

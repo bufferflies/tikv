@@ -178,7 +178,6 @@ arrow = "13.0"
 byteorder = "1.2"
 # See https://bheisler.github.io/criterion.rs/book/user_guide/known_limitations.html for the usage
 # of `real_blackbox` feature.
-causal_ts = { workspace = true }
 codec = { workspace = true }
 concurrency_manager = { workspace = true }
 criterion = "0.3"

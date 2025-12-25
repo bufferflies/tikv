@@ -27,10 +27,8 @@ pub const MAX_QUEUE_SIZE_PER_WORKER: usize = 16;
 
 pub struct ReqBatcher {
     gets: Vec<GetRequest>,
-    raw_gets: Vec<RawGetRequest>,
     get_ids: Vec<u64>,
     get_trackers: Vec<TrackerToken>,
-    raw_get_ids: Vec<u64>,
     begin_instant: Instant,
     batch_size: usize,
 }
@@ -40,21 +38,14 @@ impl ReqBatcher {
         let begin_instant = Instant::now_coarse();
         ReqBatcher {
             gets: vec![],
-            raw_gets: vec![],
             get_ids: vec![],
             get_trackers: vec![],
-            raw_get_ids: vec![],
             begin_instant,
             batch_size: std::cmp::min(batch_size, MAX_BATCH_GET_REQUEST_COUNT),
         }
     }
 
     pub fn can_batch_get(&self, req: &GetRequest) -> bool {
-        req.get_context().get_priority() == CommandPri::Normal
-    }
-
-    #[allow(unused)]
-    pub fn can_batch_raw_get(&self, req: &RawGetRequest) -> bool {
         req.get_context().get_priority() == CommandPri::Normal
     }
 
@@ -69,12 +60,6 @@ impl ReqBatcher {
         self.get_trackers.push(tracker);
     }
 
-    #[allow(unused)]
-    pub fn add_raw_get_request(&mut self, req: RawGetRequest, id: u64) {
-        self.raw_gets.push(req);
-        self.raw_get_ids.push(id);
-    }
-
     pub fn maybe_commit<E: Engine, L: LockManager, F: KvFormat>(
         &mut self,
         storage: &Storage<E, L, F>,
@@ -85,12 +70,6 @@ impl ReqBatcher {
             let ids = std::mem::take(&mut self.get_ids);
             let trackers = std::mem::take(&mut self.get_trackers);
             future_batch_get_command(storage, ids, gets, trackers, tx.clone(), self.begin_instant);
-        }
-
-        if self.raw_gets.len() >= self.batch_size {
-            let gets = std::mem::take(&mut self.raw_gets);
-            let ids = std::mem::take(&mut self.raw_get_ids);
-            future_batch_raw_get_command(storage, ids, gets, tx.clone(), self.begin_instant);
         }
     }
 
@@ -105,15 +84,6 @@ impl ReqBatcher {
                 self.get_ids,
                 self.gets,
                 self.get_trackers,
-                tx.clone(),
-                self.begin_instant,
-            );
-        }
-        if !self.raw_gets.is_empty() {
-            future_batch_raw_get_command(
-                storage,
-                self.raw_get_ids,
-                self.raw_gets,
                 tx.clone(),
                 self.begin_instant,
             );
@@ -264,52 +234,6 @@ fn future_batch_get_command<E: Engine, L: LockManager, F: KvFormat>(
                 let measure = GrpcRequestDuration::new(
                     begin_instant,
                     GrpcTypeKind::kv_batch_get_command,
-                    source,
-                );
-                let task = MeasuredSingleResponse::new(id, res, measure);
-                if tx.send_with(task, WakePolicy::Immediately).is_err() {
-                    error!("KvService response batch commands fail");
-                }
-            }
-        }
-    };
-    poll_future_notify(f);
-}
-
-fn future_batch_raw_get_command<E: Engine, L: LockManager, F: KvFormat>(
-    storage: &Storage<E, L, F>,
-    requests: Vec<u64>,
-    gets: Vec<RawGetRequest>,
-    tx: Sender<MeasuredSingleResponse>,
-    begin_instant: tikv_util::time::Instant,
-) {
-    REQUEST_BATCH_SIZE_HISTOGRAM_VEC
-        .raw_get
-        .observe(gets.len() as f64);
-    let id_sources: Vec<_> = requests
-        .iter()
-        .zip(gets.iter())
-        .map(|(id, req)| (*id, req.get_context().get_request_source().to_string()))
-        .collect();
-    let res = storage.raw_batch_get_command(
-        gets,
-        requests,
-        GetCommandResponseConsumer { tx: tx.clone() },
-    );
-    let f = async move {
-        // This error can only cause by readpool busy.
-        let res = res.await;
-        if let Some(e) = extract_region_error(&res) {
-            let mut resp = RawGetResponse::default();
-            resp.set_region_error(e);
-            for (id, source) in id_sources {
-                let res = batch_commands_response::Response {
-                    cmd: Some(batch_commands_response::response::Cmd::RawGet(resp.clone())),
-                    ..Default::default()
-                };
-                let measure = GrpcRequestDuration::new(
-                    begin_instant,
-                    GrpcTypeKind::raw_batch_get_command,
                     source,
                 );
                 let task = MeasuredSingleResponse::new(id, res, measure);

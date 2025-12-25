@@ -6,14 +6,10 @@
 mod macros;
 pub(crate) mod acquire_pessimistic_lock;
 pub(crate) mod acquire_pessimistic_lock_resumed;
-pub(crate) mod atomic_store;
 pub(crate) mod check_secondary_locks;
 pub(crate) mod check_txn_status;
 pub(crate) mod cleanup;
 pub(crate) mod commit;
-pub(crate) mod compare_and_swap;
-pub(crate) mod flashback_to_version;
-pub(crate) mod flashback_to_version_read_phase;
 pub(crate) mod mvcc_by_key;
 pub(crate) mod mvcc_by_start_ts;
 pub(crate) mod pause;
@@ -37,19 +33,12 @@ use std::{
 
 pub use acquire_pessimistic_lock::AcquirePessimisticLock;
 pub use acquire_pessimistic_lock_resumed::AcquirePessimisticLockResumed;
-pub use atomic_store::RawAtomicStore;
 pub use check_secondary_locks::CheckSecondaryLocks;
 pub use check_txn_status::CheckTxnStatus;
 pub use cleanup::Cleanup;
 use collections::HashMap;
 pub use commit::Commit;
-pub use compare_and_swap::RawCompareAndSwap;
 use concurrency_manager::{ConcurrencyManager, KeyHandleGuard};
-pub use flashback_to_version::FlashbackToVersion;
-pub use flashback_to_version_read_phase::{
-    new_flashback_rollback_lock_cmd, new_flashback_write_cmd, FlashbackToVersionReadPhase,
-    FlashbackToVersionState,
-};
 use kvproto::kvrpcpb::*;
 pub use mvcc_by_key::MvccByKey;
 pub use mvcc_by_start_ts::MvccByStartTs;
@@ -109,10 +98,6 @@ pub enum Command {
     Pause(Pause),
     MvccByKey(MvccByKey),
     MvccByStartTs(MvccByStartTs),
-    RawCompareAndSwap(RawCompareAndSwap),
-    RawAtomicStore(RawAtomicStore),
-    FlashbackToVersionReadPhase(FlashbackToVersionReadPhase),
-    FlashbackToVersion(FlashbackToVersion),
     TxnFile(TxnFileCommand),
 }
 
@@ -415,31 +400,6 @@ impl From<MvccGetByStartTsRequest> for TypedCommand<Option<(Key, MvccInfo)>> {
     }
 }
 
-impl From<PrepareFlashbackToVersionRequest> for TypedCommand<()> {
-    fn from(mut req: PrepareFlashbackToVersionRequest) -> Self {
-        new_flashback_rollback_lock_cmd(
-            req.get_start_ts().into(),
-            req.get_version().into(),
-            Key::from_raw(req.get_start_key()),
-            Key::from_raw(req.get_end_key()),
-            req.take_context(),
-        )
-    }
-}
-
-impl From<FlashbackToVersionRequest> for TypedCommand<()> {
-    fn from(mut req: FlashbackToVersionRequest) -> Self {
-        new_flashback_write_cmd(
-            req.get_start_ts().into(),
-            req.get_commit_ts().into(),
-            req.get_version().into(),
-            Key::from_raw(req.get_start_key()),
-            Key::from_raw(req.get_end_key()),
-            req.take_context(),
-        )
-    }
-}
-
 /// Represents for a scheduler command, when should the response sent to the
 /// client. For most cases, the response should be sent after the result being
 /// successfully applied to the storage (if needed). But in some special cases,
@@ -626,7 +586,6 @@ pub struct WriteContext<'a, L: LockManager> {
     pub extra_op: ExtraOp,
     pub statistics: &'a mut Statistics,
     pub async_apply_prewrite: bool,
-    pub raw_ext: Option<RawExt>, // use for apiv2
 }
 
 pub struct ReaderWithStats<'a, S: Snapshot> {
@@ -683,10 +642,6 @@ impl Command {
             Command::Pause(t) => t,
             Command::MvccByKey(t) => t,
             Command::MvccByStartTs(t) => t,
-            Command::RawCompareAndSwap(t) => t,
-            Command::RawAtomicStore(t) => t,
-            Command::FlashbackToVersionReadPhase(t) => t,
-            Command::FlashbackToVersion(t) => t,
             Command::TxnFile(t) => t,
         }
     }
@@ -711,10 +666,6 @@ impl Command {
             Command::Pause(t) => t,
             Command::MvccByKey(t) => t,
             Command::MvccByStartTs(t) => t,
-            Command::RawCompareAndSwap(t) => t,
-            Command::RawAtomicStore(t) => t,
-            Command::FlashbackToVersionReadPhase(t) => t,
-            Command::FlashbackToVersion(t) => t,
             Command::TxnFile(t) => t,
         }
     }
@@ -730,7 +681,6 @@ impl Command {
             Command::MvccByKey(t) => t.process_read(snapshot, statistics).await,
             Command::MvccByStartTs(t) => t.process_read(snapshot, statistics).await,
             Command::PessimisticRollbackReadPhase(t) => t.process_read(snapshot, statistics).await,
-            Command::FlashbackToVersionReadPhase(t) => t.process_read(snapshot, statistics).await,
             _ => panic!("unsupported read command"),
         }
     }
@@ -756,9 +706,6 @@ impl Command {
             Command::CheckTxnStatus(t) => t.process_write(snapshot, context).await,
             Command::CheckSecondaryLocks(t) => t.process_write(snapshot, context).await,
             Command::Pause(t) => t.process_write(snapshot, context).await,
-            Command::RawCompareAndSwap(t) => t.process_write(snapshot, context).await,
-            Command::RawAtomicStore(t) => t.process_write(snapshot, context).await,
-            Command::FlashbackToVersion(t) => t.process_write(snapshot, context).await,
             Command::TxnFile(t) => t.process_write(snapshot, context).await,
             _ => panic!("unsupported write command"),
         }
@@ -883,10 +830,6 @@ macro_rules! command_process_write {
 
 #[cfg(test)]
 pub mod test_util {
-    use std::sync::Arc;
-
-    use causal_ts::CausalTsProviderImpl;
-    use kvproto::kvrpcpb::ApiVersion;
     use txn_types::Mutation;
 
     use super::*;
@@ -911,7 +854,6 @@ pub mod test_util {
             extra_op: ExtraOp::Noop,
             statistics,
             async_apply_prewrite: false,
-            raw_ext: None,
         };
         let ret = cmd.cmd.process_write(snap, context)?;
         let res = match ret.pr {
@@ -1051,7 +993,6 @@ pub mod test_util {
             extra_op: ExtraOp::Noop,
             statistics,
             async_apply_prewrite: false,
-            raw_ext: None,
         };
 
         let ret = cmd.cmd.process_write(snap, context)?;
@@ -1076,22 +1017,11 @@ pub mod test_util {
             extra_op: ExtraOp::Noop,
             statistics,
             async_apply_prewrite: false,
-            raw_ext: None,
         };
 
         let ret = cmd.cmd.process_write(snap, context)?;
         let ctx = Context::default();
         engine.write(&ctx, ret.to_be_write).unwrap();
         Ok(())
-    }
-
-    pub fn gen_ts_provider(api_version: ApiVersion) -> Option<Arc<CausalTsProviderImpl>> {
-        if api_version == ApiVersion::V2 {
-            let test_provider: causal_ts::CausalTsProviderImpl =
-                causal_ts::tests::TestProvider::default().into();
-            Some(Arc::new(test_provider))
-        } else {
-            None
-        }
     }
 }

@@ -1,7 +1,6 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use criterion::{black_box, BatchSize, Bencher, Criterion};
-use engine_traits::CF_DEFAULT;
 use kvproto::kvrpcpb::Context;
 use test_storage::SyncTestStorageBuilderApiV1;
 use test_util::KvGenerator;
@@ -9,30 +8,6 @@ use tikv::storage::kv::Engine;
 use txn_types::{Key, Mutation};
 
 use super::{BenchConfig, EngineFactory, DEFAULT_ITERATIONS};
-
-fn storage_raw_get<E: Engine, F: EngineFactory<E>>(b: &mut Bencher<'_>, config: &BenchConfig<F>) {
-    let engine = config.engine_factory.build();
-    let store = SyncTestStorageBuilderApiV1::from_engine(engine)
-        .build(0)
-        .unwrap();
-    b.iter_batched(
-        || {
-            let kvs = KvGenerator::new(config.key_length, config.value_length)
-                .generate(DEFAULT_ITERATIONS);
-            let data: Vec<(Context, Vec<u8>)> = kvs
-                .iter()
-                .map(|(k, _)| (Context::default(), k.clone()))
-                .collect();
-            (data, &store)
-        },
-        |(data, store)| {
-            for (context, key) in data {
-                black_box(store.raw_get(context, CF_DEFAULT.to_owned(), key).unwrap());
-            }
-        },
-        BatchSize::SmallInput,
-    );
-}
 
 fn storage_prewrite<E: Engine, F: EngineFactory<E>>(b: &mut Bencher<'_>, config: &BenchConfig<F>) {
     let engine = config.engine_factory.build();
@@ -109,11 +84,6 @@ pub fn bench_storage<E: Engine, F: EngineFactory<E>>(
             storage_prewrite,
         );
         group.bench_with_input(format!("async_commit/{:?}", config), config, storage_commit);
-        group.bench_with_input(
-            format!("async_raw_get/{:?}", config),
-            config,
-            storage_raw_get,
-        );
     }
     group.finish();
 }

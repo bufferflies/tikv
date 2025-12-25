@@ -274,7 +274,6 @@ mod tests {
                     extra_op: Default::default(),
                     statistics: &mut Default::default(),
                     async_apply_prewrite: false,
-                    raw_ext: None,
                 },
             )
             .unwrap();

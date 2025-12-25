@@ -17,7 +17,6 @@ failpoints = ["tikv/failpoints"]
 [dependencies]
 api_version = { workspace = true }
 bitflags = "1.0"
-causal_ts = { workspace = true }
 collections = { workspace = true }
 concurrency_manager = { workspace = true }
 crossbeam = "0.8"

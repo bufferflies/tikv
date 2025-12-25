@@ -64,7 +64,6 @@ pub fn create_raft_storage<R: FlowStatsReporter, F: KvFormat>(
         resource_tag_factory,
         quota_limiter,
         feature_gate,
-        None,
         region_info_accessor,
     )?;
     Ok(store)
