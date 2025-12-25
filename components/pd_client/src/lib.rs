@@ -473,6 +473,7 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         _leader: metapb::Peer,
         _region_stat: RegionStat,
         _replication_status: Option<RegionReplicationStatus>,
+        _bucket_meta: Option<metapb.BucketMeta>,
     ) -> PdFuture<()> {
         unimplemented!();
     }

@@ -26,7 +26,7 @@ use kvengine::{
 };
 use kvproto::{
     metapb,
-    metapb::Region,
+    metapb::{Region,BucketMeta as pbBucketMeta},
     pdpb,
     pdpb::{Peers, SyncRegionResponse},
     raft_cmdpb::{
@@ -36,7 +36,7 @@ use kvproto::{
     raft_serverpb::RaftMessage,
     replication_modepb::RegionReplicationStatus,
 };
-use pd_client::{merge_bucket_stats, metrics::*, BucketStat, PdClient, RegionStat};
+use pd_client::{merge_bucket_stats, metrics::*, BucketStat, PdClient, RegionStat, BucketMeta};
 use prometheus::local::LocalHistogram;
 use raft::{eraftpb::ConfChangeType, StateRole};
 use raftstore::store::{util, util::ConfChangeKind, ReadStats, TxnExt, WriteStats};
@@ -612,6 +612,7 @@ impl PdRunner {
         region_stat: RegionStat,
         replication_status: Option<RegionReplicationStatus>,
         skip_storage_size_metric: bool,
+        bucket_meta: Option<pbBucketMeta>,
     ) {
         self.store_stat
             .region_bytes_written
@@ -721,6 +722,7 @@ impl PdRunner {
             peer,
             region_stat,
             replication_status,
+            pbBucketMeta,
         );
         let f = async move {
             if let Err(e) = resp.await {
@@ -1583,6 +1585,14 @@ impl Runnable for PdRunner {
                     } else {
                         false
                     };
+                let mut bucket_meta=None;
+                if let Some(bucket_stat) = hb_task.bucket_stat {
+                    let mut meta = pbBucketMeta::new();
+                    meta.set_version(bucket_stat.meta.version);
+                    meta.set_keys(bucket_stat.meta.keys.clone().into());
+                    bucket_meta=Some(meta);
+                    self.handle_report_region_buckets(bucket_stat);
+                }
                 self.handle_heartbeat(
                     hb_task.term,
                     hb_task.region,
@@ -1605,10 +1615,9 @@ impl Runnable for PdRunner {
                     },
                     hb_task.replication_status,
                     skip_storage_size_metric,
+                    bucket_meta,
                 );
-                if let Some(bucket_stat) = hb_task.bucket_stat {
-                    self.handle_report_region_buckets(bucket_stat);
-                }
+                
             }
             PdTask::StoreHeartbeat {
                 stats,

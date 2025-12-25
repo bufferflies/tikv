@@ -27,10 +27,10 @@ use futures::{
 };
 use keys::{self, data_key, enc_end_key, enc_start_key};
 use kvproto::{
-    metapb::{self, PeerRole},
+    metapb::{self, PeerRole,BucketMeta},
     pdpb::{
         self, ChangePeer, ChangePeerV2, CheckPolicy, Merge, RegionHeartbeatResponse, SplitRegion,
-        TransferLeader,
+        TransferLeader
     },
     replication_modepb::{
         DrAutoSyncState, RegionReplicationStatus, ReplicationMode, ReplicationStatus,
@@ -826,6 +826,7 @@ impl PdCluster {
         leader: metapb::Peer,
         region_stat: RegionStat,
         replication_status: Option<RegionReplicationStatus>,
+        bucket_meta: Option<BucketMeta>,
     ) -> Result<pdpb::RegionHeartbeatResponse> {
         for peer in region.get_peers() {
             self.down_peers.remove(&peer.get_id());
@@ -850,6 +851,10 @@ impl PdCluster {
         if let Some(status) = replication_status {
             self.region_replication_status.insert(region.id, status);
         }
+        if let Some(meta) = bucket_meta {
+            self.buckets.insert(region.id, BucketStat::from(meta));
+        }
+        
         fail_point!("test_raftstore::pd::region_heartbeat");
 
         self.handle_heartbeat(region, leader)
@@ -1688,6 +1693,7 @@ impl PdClient for TestPdClient {
         leader: metapb::Peer,
         region_stat: RegionStat,
         replication_status: Option<RegionReplicationStatus>,
+        bucket_meta: Option<pdpbBucketMeta>,
     ) -> PdFuture<()> {
         if let Err(e) = self.check_bootstrap() {
             return Box::pin(err(e));
@@ -1698,6 +1704,7 @@ impl PdClient for TestPdClient {
             leader.clone(),
             region_stat,
             replication_status,
+            bucket_meta,
         );
         match resp {
             Ok(resp) => {
