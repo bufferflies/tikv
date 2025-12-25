@@ -458,6 +458,76 @@ async fn test_read_iterator_all_versions() {
 }
 
 #[test]
+fn test_new_delta_write_iterator_filters_mixed_tables() {
+    ::test_util::init_log_for_test();
+    let (engine, _) = new_test_engine();
+    let shard = engine.get_shard(1).unwrap();
+
+    let since_ts = 150;
+
+    let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
+    let mut write_cf_builder = ShardCfBuilder::new(WRITE_CF);
+    write_cf_builder.add_table(new_table(&engine, 11, 0, 5, 120, false, &mut saved_vals), 1);
+    write_cf_builder.add_table(
+        new_table(&engine, 12, 5, 10, 200, false, &mut saved_vals),
+        1,
+    );
+    write_cf_builder.add_table(
+        new_table(&engine, 13, 10, 15, 250, false, &mut saved_vals),
+        1,
+    );
+    write_cf_builder.add_table(
+        new_table_ext(
+            &engine,
+            14,
+            15,
+            20,
+            |i| if i < 18 { 140 } else { 160 },
+            false,
+            &mut saved_vals,
+        ),
+        1,
+    );
+    write_cf_builder.add_table(
+        new_table(&engine, 15, 20, 25, 210, false, &mut saved_vals),
+        1,
+    );
+    write_cf_builder.add_table(
+        new_table(&engine, 16, 20, 30, 150, false, &mut saved_vals),
+        2,
+    );
+
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_cfs([write_cf_builder.build(), ShardCf::new(1), ShardCf::new(2)]);
+    shard.set_data(builder.build());
+
+    let snap = SnapAccess::new(&shard);
+    let mut iter = snap.new_delta_write_iterator(since_ts);
+    iter.rewind();
+
+    let mut expected = 5;
+    while iter.valid() {
+        let expected_key = engine.key_builder.i_to_inner_key(expected);
+        assert_eq!(iter.key(), expected_key.as_ref());
+        let expected_version = if expected < 10 {
+            200
+        } else if expected < 15 {
+            250
+        } else if expected < 18 {
+            140 // caller should filter out this
+        } else if expected < 20 {
+            160
+        } else {
+            210
+        };
+        assert_eq!(iter.value().version, expected_version);
+        expected += 1;
+        iter.next();
+    }
+    assert_eq!(expected, 25);
+}
+
+#[test]
 fn test_lock_cf_repeatable_read() {
     let enable_inner_key_off = true;
 
@@ -1467,15 +1537,18 @@ fn i_to_key(i: i32, min_blob_size: u32) -> String {
 }
 
 #[maybe_async::both]
-async fn new_table(
+async fn new_table_ext<F>(
     engine: &TestEngine,
     id: u64,
     begin: usize,
     end: usize,
-    version: u64,
+    version: F,
     del: bool,
     saved_vals: &mut Vec<Rc<Vec<u8>>>,
-) -> SsTable {
+) -> SsTable
+where
+    F: Fn(usize) -> u64,
+{
     let block_size = engine.opts.table_builder_options.block_size;
     let comp_tp = engine.opts.table_builder_options.compression_tps[0];
     let comp_lvl = engine.opts.table_builder_options.compression_lvl;
@@ -1489,6 +1562,7 @@ async fn new_table(
         None,
     );
     for i in begin..end {
+        let version = version(i);
         let key = engine.key_builder.i_to_inner_key(i);
         let val = if del {
             table::Value::new_with_meta_version(BIT_DELETE, version, 0, &[])
@@ -1510,6 +1584,19 @@ async fn new_table(
         .unwrap();
     let file = InMemFile::new(id, data).await;
     SsTable::new(Arc::new(file), BlockCache::None, None).unwrap()
+}
+
+#[maybe_async::both]
+async fn new_table(
+    engine: &TestEngine,
+    id: u64,
+    begin: usize,
+    end: usize,
+    version: u64,
+    del: bool,
+    saved_vals: &mut Vec<Rc<Vec<u8>>>,
+) -> SsTable {
+    new_table_ext(engine, id, begin, end, move |_| version, del, saved_vals).await
 }
 
 fn dfs_create_table(

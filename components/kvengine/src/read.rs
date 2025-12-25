@@ -746,6 +746,11 @@ impl SnapAccessCore {
         table::new_merge_iterator(iters, reversed)
     }
 
+    /// Create a delta iterator of WRITE_CF that iterates over all entries with
+    /// ts > since_ts.
+    ///
+    /// NOTE: The iterator will still contain entries with ts <= since_ts.
+    /// Callers need to filter them out.
     #[maybe_async::both]
     pub async fn new_delta_write_iterator(&self, since_ts: u64) -> Box<dyn table::Iterator> {
         self.check_sync(WRITE_CF).await;
@@ -770,14 +775,25 @@ impl SnapAccessCore {
 
         let scf = self.data.get_cf(WRITE_CF);
         for lh in scf.levels.as_slice() {
-            if lh.tables.len() == 0 || lh.max_ts < since_ts {
+            if lh.tables.len() == 0 || lh.max_ts <= since_ts {
                 continue;
             }
             if lh.tables.len() == 1 {
                 iters.push(lh.tables[0].new_iterator(false, true));
                 continue;
             }
-            iters.push(Box::new(ConcatIterator::new(lh.clone(), false, true)));
+            let tables = lh
+                .tables
+                .iter()
+                .filter(|x| x.max_ts > since_ts)
+                .cloned()
+                .collect::<Vec<_>>();
+            debug_assert!(!tables.is_empty()); // Should not be empty.
+            if !tables.is_empty() {
+                iters.push(Box::new(ConcatIterator::new_with_tables(
+                    tables, false, true,
+                )));
+            }
         }
         Box::new(AsyncMergeIterator::new(iters, false, false))
     }
