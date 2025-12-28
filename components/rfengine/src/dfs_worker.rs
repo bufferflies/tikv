@@ -440,8 +440,8 @@ impl ObjectStorageWorker {
 
     fn set_unhealthy(&mut self, failed_epoch: u32) {
         let next_snap_epoch = Manifest::next_snapshot_epoch(failed_epoch);
-        if self.skip_sync_before_epoch < next_snap_epoch {
-            self.skip_sync_before_epoch = next_snap_epoch;
+        if self.skip_sync_before_epoch < next_snap_epoch + 1 {
+            self.skip_sync_before_epoch = next_snap_epoch + 1;
         }
         self.healthy.set_unhealthy();
     }
