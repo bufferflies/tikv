@@ -40,6 +40,7 @@ use crate::{
         get_local_dir,
         schema_file::SchemaFile,
         sstable::{SsTable, SsTableCore, SsTableProperty, PROP_KEY_MAX_TS},
+        tiny_meta::TypedTinyMeta,
         vector_index::VectorIndexFile,
         BoundedDataSet,
     },
@@ -304,11 +305,11 @@ impl EngineCore {
             let mut table_meta_file = None;
             let file: Option<Arc<dyn File>> = match &prepare_type {
                 FilePrepareType::Local => self
-                    .open_local_file(id, fm.file_type)
+                    .open_local_file(id, fm.file_type, None) // TODO: support tiny meta.
                     .ok()
                     .map(|f| Arc::new(f) as _),
                 FilePrepareType::Ia => self
-                    .try_open_local_ia_file(tag, id, fm, use_direct_io)?
+                    .try_open_local_ia_file(tag, id, fm, use_direct_io, &TypedTinyMeta::None)? // TODO: support tiny meta.
                     .map(|f| Arc::new(f) as _),
                 FilePrepareType::AutoIa(spec) => {
                     let (ia_auto_f, table_meta_f) = self.try_open_local_auto_ia_file(
@@ -318,6 +319,7 @@ impl EngineCore {
                         use_direct_io,
                         current_ts.unwrap(),
                         spec,
+                        &TypedTinyMeta::None, // TODO: support tiny meta.
                     )?;
                     table_meta_file = table_meta_f;
                     ia_auto_f.map(|f| Arc::new(f) as _)
@@ -664,9 +666,14 @@ impl EngineCore {
         }
     }
 
-    pub(crate) fn open_local_file(&self, id: u64, file_type: FileType) -> Result<LocalFile> {
+    pub(crate) fn open_local_file(
+        &self,
+        id: u64,
+        file_type: FileType,
+        file_size: Option<u64>,
+    ) -> Result<LocalFile> {
         let path = self.local_file_path(id, file_type);
-        self.open_local_file_with_file_path(id, Some(self.fd_cache.clone()), path)
+        self.open_local_file_with_file_path(id, Some(self.fd_cache.clone()), path, file_size)
     }
 
     fn open_local_file_with_file_path(
@@ -674,11 +681,13 @@ impl EngineCore {
         id: u64,
         fd_cache: Option<FdCache>,
         file_path: PathBuf,
+        file_size_opt: Option<u64>,
     ) -> Result<LocalFile> {
         let _guard = self.lock_file(id);
-        Ok(LocalFile::open(
+        Ok(LocalFile::open_ext(
             id,
             file_path,
+            file_size_opt,
             fd_cache,
             self.loaded.load(Relaxed),
         )?)
@@ -690,6 +699,7 @@ impl EngineCore {
         id: u64,
         fm: &FileMeta,
         use_direct_io: bool,
+        tiny_meta: &TypedTinyMeta,
     ) -> Result<Option<IaFile>> {
         let IaCtx::Enabled(ia_mgr, data_dirs) = self.ia_ctx.clone() else {
             return Ok(None);
@@ -700,9 +710,10 @@ impl EngineCore {
             id,
             ia_mgr.get_meta_fd_cache(),
             meta_file_path.clone(),
+            tiny_meta.meta_size(),
         );
         if table_meta_file.is_err()
-            && let Ok(local_file) = self.open_local_file(id, fm.file_type)
+            && let Ok(local_file) = self.open_local_file(id, fm.file_type, tiny_meta.file_size())
         {
             let table_meta_off = fm.table_meta_off as u64;
             // Read table meta from local sst file.
@@ -714,11 +725,13 @@ impl EngineCore {
                 .map_err(Into::into)
                 .and_then(|data| validate_table_meta_off(tag, id, fm, data))
             {
+                let data_len = data.len() as u64;
                 self.write_local_file_with_file_path(id, data, use_direct_io, &meta_file_path)?;
                 table_meta_file = self.open_local_file_with_file_path(
                     id,
                     ia_mgr.get_meta_fd_cache(),
                     meta_file_path,
+                    Some(data_len),
                 );
             };
         }
@@ -749,15 +762,15 @@ impl EngineCore {
         permit: DfsLoadLimiterPermit,
         use_direct_io: bool,
     ) -> Result<LocalFile> {
-        let data_len = data.len();
+        let data_len = data.len() as u64;
         self.write_local_file(id, data, use_direct_io, fm.file_type)?;
         drop(permit);
 
         ENGINE_LEVEL_WRITE_VEC
             .with_label_values(&[&fm.get_level().to_string()])
-            .inc_by(data_len as u64);
+            .inc_by(data_len);
 
-        let file = self.open_local_file(id, fm.file_type)?;
+        let file = self.open_local_file(id, fm.file_type, Some(data_len))?;
         Ok(file)
     }
 
@@ -789,7 +802,7 @@ impl EngineCore {
             unreachable!("ia_ctx should be enabled");
         };
 
-        let data_len = table_meta_data.len();
+        let data_len = table_meta_data.len() as u64;
         let data_dir = get_local_dir(data_dirs, id);
         let meta_file_path = table_meta_file_local_path(id, fm.file_type, data_dir.deref());
         self.write_local_file_with_file_path(id, table_meta_data, use_direct_io, &meta_file_path)?;
@@ -797,10 +810,14 @@ impl EngineCore {
 
         ENGINE_LEVEL_WRITE_VEC
             .with_label_values(&[&fm.get_level().to_string()])
-            .inc_by(data_len as u64);
+            .inc_by(data_len);
 
-        let meta_file =
-            self.open_local_file_with_file_path(id, ia_mgr.get_meta_fd_cache(), meta_file_path)?;
+        let meta_file = self.open_local_file_with_file_path(
+            id,
+            ia_mgr.get_meta_fd_cache(),
+            meta_file_path,
+            Some(data_len),
+        )?;
         let table_meta_file = Arc::new(meta_file);
         Ok(IaFile::open(id, fm, table_meta_file, ia_mgr.clone())?)
     }
@@ -813,12 +830,13 @@ impl EngineCore {
         use_direct_io: bool,
         current_ts: u64,
         spec: &StorageClassSpec,
+        tiny_meta: &TypedTinyMeta,
     ) -> Result<(
         Option<IaAutoFile>,
         Option<Arc<dyn File>>, // table_meta_file
     )> {
         debug_assert_eq!(fm.file_type, FileType::Sst);
-        let ia_file = self.try_open_local_ia_file(tag, id, fm, use_direct_io)?;
+        let ia_file = self.try_open_local_ia_file(tag, id, fm, use_direct_io, tiny_meta)?;
         let Some(ia_file) = ia_file else {
             return Ok((None, None));
         };
@@ -832,7 +850,8 @@ impl EngineCore {
         Ok(if target_sc.is_ia() {
             let auto_ia_file = IaAutoFile::new(ia_file, None, max_ts, spec.clone());
             (Some(auto_ia_file), None)
-        } else if let Ok(local_file) = self.open_local_file(id, fm.file_type) {
+        } else if let Ok(local_file) = self.open_local_file(id, fm.file_type, tiny_meta.file_size())
+        {
             let auto_ia_file =
                 IaAutoFile::new(ia_file, Some(Arc::new(local_file)), max_ts, spec.clone());
             (Some(auto_ia_file), None)

@@ -155,9 +155,14 @@ pub struct LocalFile {
 }
 
 impl LocalFile {
-    pub fn open(
+    pub fn open(id: u64, path: PathBuf) -> table::Result<LocalFile> {
+        Self::open_ext(id, path, None, None, false)
+    }
+
+    pub fn open_ext(
         id: u64,
         path: PathBuf,
+        size_opt: Option<u64>,
         fd_cache_opt: Option<FdCache>,
         set_mtime: bool,
     ) -> table::Result<LocalFile> {
@@ -175,10 +180,15 @@ impl LocalFile {
             filetime::set_file_mtime(path.as_path(), filetime::FileTime::now())
                 .table_ctx(id, "local.open.set_file_mtime")?;
         }
-        let meta = std::fs::metadata(path.as_path()).table_ctx(id, "local.open.metadata")?;
+        let size = match size_opt {
+            Some(s) => s,
+            None => std::fs::metadata(path.as_path())
+                .table_ctx(id, "local.open.metadata")?
+                .size(),
+        };
         let local_file = LocalFile {
             id,
-            size: meta.size(),
+            size,
             path,
             mmap: Mutex::new(None),
             fd_cache,

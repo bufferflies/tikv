@@ -1589,7 +1589,7 @@ impl SchemaManagerCore {
             });
         let meta_file_path = config.dir.join(META_FILE_NAME);
         let meta_file = if meta_file_path.exists() {
-            MetaFile::open(LocalFile::open(0, meta_file_path, None, false).unwrap()).unwrap()
+            MetaFile::open(LocalFile::open(0, meta_file_path).unwrap()).unwrap()
         } else {
             MetaFile::new()
         };
@@ -2099,7 +2099,7 @@ mod tests {
         let data = meta.write();
         write_meta_file_to_local(&dir, Bytes::from(data)).unwrap();
         let meta_file_path = dir.as_ref().join(META_FILE_NAME);
-        let meta_file = LocalFile::open(0, meta_file_path, None, false).unwrap();
+        let meta_file = LocalFile::open(0, meta_file_path).unwrap();
         let read_meta = MetaFile::open(meta_file).unwrap();
         for i in 1..100 {
             let (file_id, schema_version) = read_meta.get_latest_file(i).unwrap();

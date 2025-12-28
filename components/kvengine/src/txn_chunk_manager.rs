@@ -344,7 +344,7 @@ impl TxnChunkManagerCore {
         path: PathBuf,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<TxnChunk> {
-        let file = LocalFile::open(txn_chunk_id, path, self.fd_cache.clone(), false)?;
+        let file = LocalFile::open_ext(txn_chunk_id, path, None, self.fd_cache.clone(), false)?;
         let txn_chunk = TxnChunk::new(Arc::new(file), self.cache.clone(), encryption_key)?;
         Ok(txn_chunk)
     }
