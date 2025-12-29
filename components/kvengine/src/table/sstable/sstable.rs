@@ -24,6 +24,7 @@ use crate::{
     table::{
         file::{File, TtlCache},
         table::{Iterator, Result},
+        tiny_meta::SstTinyMeta,
         *,
     },
     IoContext, WRITE_CF,
@@ -68,8 +69,18 @@ impl SsTable {
         cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
+        let mut ctx = NewSsTableCtx::default();
+        Self::new_with_ctx(file, cache, encryption_key, &mut ctx)
+    }
+
+    pub fn new_with_ctx(
+        file: Arc<dyn File>,
+        cache: BlockCache,
+        encryption_key: Option<EncryptionKey>,
+        ctx: &mut NewSsTableCtx,
+    ) -> Result<Self> {
         let size = file.size();
-        let core = SsTableCore::new(file, 0, size, cache, encryption_key)?;
+        let core = SsTableCore::new(file, 0, size, cache, encryption_key, ctx)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -83,7 +94,8 @@ impl SsTable {
         cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
     ) -> Result<Self> {
-        let core = SsTableCore::new(file, start, end, cache, encryption_key)?;
+        let mut ctx = NewSsTableCtx::default();
+        let core = SsTableCore::new(file, start, end, cache, encryption_key, &mut ctx)?;
         Ok(Self {
             core: Arc::new(core),
         })
@@ -298,29 +310,28 @@ impl SsTableCore {
         end_off: u64,
         cache: BlockCache,
         encryption_key: Option<EncryptionKey>,
+        ctx: &mut NewSsTableCtx,
     ) -> Result<Self> {
         let size = end_off - start_off;
-        let mut footer = Footer::default();
-        let footer_data = if end_off == file.size() {
-            file.read_footer(FOOTER_SIZE)?
-        } else {
-            if size < FOOTER_SIZE as u64 {
-                return Err(table::Error::InvalidFileSize);
+
+        let (footer, props_data) = match ctx.take_footer_and_properties() {
+            Some(x) => x,
+            None => {
+                let (footer, props_data) = Self::read_footer_and_properties_from_file(
+                    file.as_ref(),
+                    start_off,
+                    end_off,
+                    encryption_key.as_ref(),
+                )?;
+                if end_off == file.size() {
+                    // Handle normal SST (not L0) only by now.
+                    ctx.put_footer_and_properties(footer, props_data.clone());
+                }
+                (footer, props_data)
             }
-            // It's a L0 sst, and must be sync.
-            file.read(end_off - FOOTER_SIZE as u64, FOOTER_SIZE)?
         };
-        footer.unmarshal(footer_data.chunk());
-        if footer.magic != MAGIC_NUMBER && footer.magic != MAGIC_NUMBER_SPLIT_L0 {
-            return Err(table::Error::InvalidMagicNumber);
-        }
-        let props_data = file.read_table_meta(
-            start_off + footer.properties_offset as u64,
-            footer.properties_len(size as usize),
-        )?;
-        let mut prop_slice = props_data.chunk();
-        validate_checksum_with_fix(prop_slice, &footer, file.as_ref(), encryption_key.as_ref())?;
-        prop_slice = &prop_slice[4..];
+
+        let mut prop_slice = &props_data.chunk()[4..]; // Trim checksum.
         let mut smallest_buf = Bytes::new();
         let mut biggest_buf = Bytes::new();
         let mut max_ts = 0;
@@ -382,6 +393,38 @@ impl SsTableCore {
             snap_version,
         };
         Ok(core)
+    }
+
+    fn read_footer_and_properties_from_file(
+        file: &dyn File,
+        start_off: u64,
+        end_off: u64,
+        encryption_key: Option<&EncryptionKey>,
+    ) -> Result<(Footer, Bytes)> {
+        let size = end_off - start_off;
+
+        let mut footer = Footer::default();
+        let footer_data = if end_off == file.size() {
+            file.read_footer(FOOTER_SIZE)?
+        } else {
+            if size < FOOTER_SIZE as u64 {
+                return Err(table::Error::InvalidFileSize);
+            }
+            // It's a L0 sst, and must be sync.
+            file.read(end_off - FOOTER_SIZE as u64, FOOTER_SIZE)?
+        };
+        footer.unmarshal(footer_data.chunk());
+        if footer.magic != MAGIC_NUMBER && footer.magic != MAGIC_NUMBER_SPLIT_L0 {
+            return Err(table::Error::InvalidMagicNumber);
+        }
+        let props_data = file.read_table_meta(
+            start_off + footer.properties_offset as u64,
+            footer.properties_len(size as usize),
+        )?;
+        let prop_slice = props_data.chunk();
+        validate_checksum_with_fix(prop_slice, &footer, file, encryption_key)?;
+
+        Ok((footer, props_data))
     }
 
     // Support max_ts only.
@@ -1142,6 +1185,27 @@ pub fn id_to_filename(id: u64) -> String {
 
 pub fn new_filename(id: u64, dir: &Path) -> PathBuf {
     dir.join(id_to_filename(id))
+}
+
+#[derive(Default)]
+pub struct NewSsTableCtx {
+    // Input
+    pub(crate) tiny_meta: Option<SstTinyMeta>,
+
+    // Output
+    pub(crate) footer_and_properties_data: Option<(Footer, Bytes)>,
+}
+
+impl NewSsTableCtx {
+    pub fn take_footer_and_properties(&mut self) -> Option<(Footer, Bytes)> {
+        self.tiny_meta
+            .take()
+            .and_then(|x| x.get_footer_and_properties().ok())
+    }
+
+    pub fn put_footer_and_properties(&mut self, footer: Footer, props_data: Bytes) {
+        self.footer_and_properties_data = Some((footer, props_data));
+    }
 }
 
 #[cfg(test)]
