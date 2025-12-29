@@ -352,7 +352,8 @@ async fn handle_sleep(_ctx: Arc<Context>) -> hyper::Result<hyper::Response<hyper
     http_response!(http::StatusCode::OK, "OK")
 }
 
-const DEFAULT_COP_TIMEOUT: Duration = Duration::from_secs(20);
+/// Ref: https://docs.pingcap.com/tidb/stable/tidb-configuration-file/#copr-req-timeout-new-in-v750
+const DEFAULT_COP_TIMEOUT: Duration = Duration::from_secs(60);
 
 async fn handle_remote_coprocessor(
     ctx: Arc<Context>,
@@ -486,10 +487,19 @@ async fn handle_remote_coprocessor_internal(
 
     let snap = RegionSnapshot::from_snapshot(snap_access, None);
     let process_start = Instant::now_coarse();
+    let before_duration = process_start.saturating_duration_since(start_ts);
+    // Calculate the remaining duration of the request timeout for cop processing
+    let remaining_duration = match timeout.checked_sub(before_duration) {
+        Some(dur) => dur,
+        None => {
+            info!("before process timeout"; "tag" => tag);
+            return http_response!(http::StatusCode::REQUEST_TIMEOUT, "before process timeout");
+        }
+    };
     let result = tikv::coprocessor::parse_request_and_handle_remote_cop(
         cop_req,
         None,
-        Duration::from_secs(60),
+        remaining_duration,
         ctx.config.cop_max_resp_size.0,
         ctx.quota_limiter.clone(),
         snap,
