@@ -138,6 +138,7 @@ pub fn execute_check_table(config: CheckTableConfig, params: CheckTableParams) {
         None,
         true,
         None,
+        None,
     )
     .unwrap();
     let check_table_ts = if config.timestamp > 0 {

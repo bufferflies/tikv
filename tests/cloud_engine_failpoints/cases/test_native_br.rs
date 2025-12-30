@@ -212,6 +212,7 @@ fn test_backup_on_scaling_up() {
             reporter.clone(),
             object_cache.clone(),
             limiter.clone(),
+            None,
         )
         .expect("restore");
         info!("restore keyspace result for backup {}: {:?}", bk_name, res);
@@ -309,6 +310,7 @@ fn test_restore_on_disk_full() {
                 reporter,
                 object_cache,
                 limiter,
+                None,
             )
         });
 
@@ -676,6 +678,7 @@ fn test_backup_pessimistic_lock() {
         reporter.clone(),
         object_cache,
         limiter,
+        None,
     )
     .expect("restore");
     info!(
@@ -856,6 +859,7 @@ fn test_check_backup_ts(#[case] write_method: TxnWriteMethod) {
         reporter.clone(),
         object_cache,
         limiter,
+        None,
     )
     .expect("restore");
     info!("restore: {:?}", res);
@@ -1038,6 +1042,7 @@ fn test_check_backup_ts_with_async_commit() {
         reporter.clone(),
         object_cache,
         limiter,
+        None,
     )
     .expect("restore");
     info!("restore: {:?}", res);

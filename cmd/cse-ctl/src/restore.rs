@@ -255,6 +255,7 @@ fn execute_restore_keyspace_impl(
         reporter,
         None,
         limiter,
+        None,
     )
 }
 

@@ -42,6 +42,7 @@ protobuf = "2.8"
 quick_cache = "0.6.14"
 rand = "0.8"
 replication_worker = { workspace = true }
+rfengine = { workspace = true }
 rfenginepb = { path = "../../components/rfenginepb" }
 rfstore = { path = "../../components/rfstore" }
 schema = { workspace = true }

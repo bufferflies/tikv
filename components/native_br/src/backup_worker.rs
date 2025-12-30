@@ -38,6 +38,7 @@ const MIN_BATCH_INTERVAL: Duration = Duration::from_secs(1);
 pub struct InstantBackupResult {
     pub backup_file: IncrementalBackupFile,
     pub backup_ts: u64,
+    pub safe_ts: u64,
 }
 
 type InstantBackupCallback = Box<dyn FnOnce(SharedResult<Arc<InstantBackupResult>>) + Send>;
@@ -342,6 +343,7 @@ impl BackupRunner {
             Ok((backup_path, backup_meta)) => {
                 info!("backup succeeded"; "path" => ?backup_path, "meta" => %backup_meta);
                 self.last_backup_ts = backup_ts;
+                let safe_ts = backup_meta.safe_ts;
                 if self.periodic_backup_enabled() {
                     self.last_backup_meta = Some(backup_meta);
                     self.try_update_service_safe_point(backup_ts);
@@ -350,9 +352,11 @@ impl BackupRunner {
                 NATIVE_BR_BACKUP_SUCCESS.inc();
                 NATIVE_BR_BACKUP_BATCH_SIZE.observe(batch.reqs.len() as f64);
                 let backup_file = IncrementalBackupFile::try_from_full_path(&backup_path).unwrap();
+
                 let backup_result = Arc::new(InstantBackupResult {
                     backup_file,
                     backup_ts,
+                    safe_ts,
                 });
                 for req in batch.reqs {
                     req.cb(Ok(backup_result.clone()));

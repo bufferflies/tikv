@@ -1,9 +1,6 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::RwLock,
-};
+use std::{collections::HashMap, sync::RwLock};
 
 use bytes::Bytes;
 use kvproto::raft_serverpb;
@@ -291,15 +288,13 @@ impl RaftPeers {
         Some(region_state)
     }
 
-    /// clone_regions creates a new RaftPeers instance containing only the peers
-    /// whose region IDs are in the given `region_ids` set.
-    pub fn clone_regions(&self, region_ids: &HashSet<u64>) -> RaftPeers {
+    pub fn clone_keyspace(&self, keyspace_id: u32) -> RaftPeers {
         let new_peers = RaftPeers::default();
         let new_peers_guard = new_peers.peers.pin();
         let peers = self.peers.pin();
         for (&peer_id, peer_data) in peers.iter() {
             let peer_data = peer_data.read().unwrap();
-            if !region_ids.contains(&peer_data.region_id) {
+            if peer_data.keyspace_id != keyspace_id {
                 continue;
             }
             new_peers_guard.insert(peer_id, RwLock::new(peer_data.clone()));

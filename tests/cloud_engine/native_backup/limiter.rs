@@ -150,6 +150,7 @@ fn test_restore_keyspace_throughput_limit() {
             reporter.clone(),
             None,
             Some(limiter),
+            None,
         )
         .unwrap();
         NATIVE_BR_RESTORED_DATA_SIZE.get() - before

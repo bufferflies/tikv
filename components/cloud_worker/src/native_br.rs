@@ -31,8 +31,9 @@ use native_br::{
         restore_keyspace_with_cfg, ObjectCache, ReportRestoreStepTrait, RestoreStep,
         RestoredKeyspace,
     },
+    rfengine_cache::RfEngineCache,
 };
-use pd_client::PdClient;
+use pd_client::{pd_control::PdControl, PdClient};
 use serde::Deserialize;
 use tikv::storage::mvcc::TimeStamp;
 use tikv_util::{
@@ -753,6 +754,7 @@ pub(crate) struct BrContext {
     restore_concurrency: usize,
     object_cache: Option<ObjectCache>,
     limiter: Option<Arc<native_br::limiter::ThroughputLimiter>>,
+    rfengine_cache: Option<RfEngineCache>,
 }
 
 impl BrContext {
@@ -858,6 +860,10 @@ impl BrContext {
         restore_type: RestoreType,
         progress_reporter: Arc<RestoreProgressReporter>,
     ) -> Result<RestoredKeyspace> {
+        // We need to register rfengine cache first, so when the instant backup is done
+        // and we fill the cache, the registered keyspace id can be used to load
+        // related rfengines to the cache.
+        self.register_rfengine_cache(&config, keyspace_name, &restore_source)?;
         // Instant backup must be performed before every restore.
         // Otherwise the data from previous backup to now will be lost, and can not be
         // restored by PiTR.
@@ -891,9 +897,19 @@ impl BrContext {
                 get_truncate_ts(Some(utc_time), restore_type),
             ),
         };
-
+        let rfengien_cache_may_hit = match truncate_ts {
+            Some(ts) => instant_backup.safe_ts <= ts && ts <= instant_backup.backup_ts,
+            None => false,
+        };
+        let rfengine_cache = if rfengien_cache_may_hit {
+            self.fill_rfengine_cache(instant_backup.backup_file.name(), instant_backup.backup_ts);
+            self.rfengine_cache.clone()
+        } else {
+            None
+        };
+        let restore_config = config.to_restore_config();
         Ok(restore_keyspace_with_cfg(
-            config.to_restore_config(),
+            restore_config,
             keyspace_name,
             target_keyspace_name,
             backup_file.name(),
@@ -905,7 +921,49 @@ impl BrContext {
             progress_reporter,
             self.object_cache.clone(),
             self.limiter.clone(),
+            rfengine_cache,
         )?)
+    }
+
+    fn register_rfengine_cache(
+        &self,
+        config: &Config,
+        keyspace_name: &str,
+        restore_source: &RestoreSource,
+    ) -> Result<()> {
+        let Some(rfengine_cache) = self.rfengine_cache.as_ref() else {
+            return Ok(());
+        };
+        let utc_time = match restore_source {
+            RestoreSource::ExistFile(_, utc_time_opt) => {
+                let Some(utc_time) = utc_time_opt else {
+                    // Only fill cache for PiTR restore.
+                    return Ok(());
+                };
+                utc_time
+            }
+            RestoreSource::InstantBackup(utc_time) => utc_time,
+        };
+        let truncate_ts = TimeStamp::compose(utc_time.timestamp_millis() as u64, 0).into_inner();
+        let mut pd_control = PdControl::new(config.pd.clone(), self.pd_client.get_security_mgr())?;
+        pd_control.set_timeout(config.native_br.restore_timeout_pd_control.0);
+        let keyspace = self
+            .runtime
+            .block_on(pd_control.get_keyspace_by_name(keyspace_name))?;
+        assert_eq!(keyspace_name, keyspace.name);
+        rfengine_cache.register_keyspace(keyspace.id, truncate_ts);
+        Ok(())
+    }
+
+    fn fill_rfengine_cache(&self, backup_name: &str, backup_ts: u64) {
+        let Some(rfengine_cache) = self.rfengine_cache.as_ref() else {
+            return;
+        };
+        if let Err(err) =
+            rfengine_cache.fill_cache(backup_name, backup_ts, self.object_cache.clone())
+        {
+            warn!("fail to fill rfengine cache: {:?}", err; "backup_name" => backup_name);
+        }
     }
 
     fn restore_keyspace(
@@ -1102,6 +1160,8 @@ pub struct NativeBrConfig {
     /// Whether to tolerate unavailability of no more than one store when
     /// restore.
     pub restore_tolerate_err: bool,
+    /// Whether to use rfengine cache on restore.
+    pub retore_use_rfengine_cache: bool,
 
     pub restore_store_concurrency: usize,
     pub restore_concurrency_per_core: f64,
@@ -1127,7 +1187,7 @@ impl Default for NativeBrConfig {
             restore_coarse_split_regions_factor: 64,
             instant_backup_timeout: backup_worker::DEFAULT_TIMEOUT_INSTANT_BACKUP,
             backup_interval: ReadableDuration::ZERO,
-            backup_batch_interval: ReadableDuration::secs(5),
+            backup_batch_interval: ReadableDuration::secs(30),
             backup_delay: ReadableDuration::ZERO,
             backup_ts_wait_timeout: backup::BACKUP_TS_WAIT_TIMEOUT_DEFAULT,
             backup_ts_ttl: backup::BACKUP_TS_TTL_DEFAULT,
@@ -1135,6 +1195,7 @@ impl Default for NativeBrConfig {
             backup_skip_keyspace_meta: false,
             backup_tolerate_err: false,
             restore_tolerate_err: false,
+            retore_use_rfengine_cache: true,
             restore_store_concurrency: restore_keyspace::RESTORE_RFENGINE_CONCURRENCY,
             restore_concurrency_per_core: 1.0,
             restore_object_cache_capacity: 0.into(),
@@ -1207,6 +1268,17 @@ impl NativeBrManager {
         } else {
             None
         };
+        let rfengine_cache_dir = data_dir.join("rfengine_cache");
+        let rfengine_cache = if config.native_br.retore_use_rfengine_cache {
+            Some(RfEngineCache::new(
+                rfengine_cache_dir,
+                config.to_restore_config(),
+                s3fs.clone(),
+                pd_client.clone(),
+            ))
+        } else {
+            None
+        };
         let mut context = BrContext {
             pd_client,
             s3fs,
@@ -1218,6 +1290,7 @@ impl NativeBrManager {
             restore_concurrency,
             object_cache,
             limiter,
+            rfengine_cache,
         };
         if let Err(err) = context.init() {
             warn!("BR context init failed: {:?}", err);

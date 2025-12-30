@@ -574,6 +574,19 @@ impl RfEngineCore {
             }
         }
     }
+
+    pub fn clone_for_keyspace(
+        &self,
+        keyspace_id: u32,
+        target_dir: &Path,
+        cfg: &Config,
+    ) -> Result<RfEngine> {
+        let mut new_engine = Self::open(target_dir, cfg, None, None)?;
+        new_engine.peers = self.peers.clone_keyspace(keyspace_id);
+        Ok(RfEngine {
+            core: Arc::new(new_engine),
+        })
+    }
 }
 
 pub(crate) fn get_delayed_to_epoch_id(manifest: &ChangeSet) -> u32 {
@@ -591,7 +604,7 @@ fn decompress_snap_rlog_file(compression_type: u32, content: &[u8]) -> Result<Co
 }
 
 fn restore_all_raft_logs_with_snap_rlog_file(
-    keyspace_id: Option<u32>,
+    keyspace_ids: Option<&[u32]>,
     store_meta: &StoreBackupMeta,
     dir: &Path,
     rlog_data: &Bytes,
@@ -617,9 +630,11 @@ fn restore_all_raft_logs_with_snap_rlog_file(
         Ok(())
     };
 
-    if let Some(keyspace_id) = keyspace_id {
-        if let Some(keyspace_meta) = raft_meta.raft_logs.get(&keyspace_id) {
-            handle_keyspace(keyspace_meta)?;
+    if let Some(keyspace_ids) = keyspace_ids {
+        for keyspace_id in keyspace_ids {
+            if let Some(keyspace_meta) = raft_meta.raft_logs.get(keyspace_id) {
+                handle_keyspace(keyspace_meta)?;
+            }
         }
     } else {
         for (_, keyspace_meta) in raft_meta.raft_logs {
@@ -676,7 +691,7 @@ pub fn find_latest_snapshot(
 // to epoch of the backup.
 pub fn lightweight_restore(
     store_id: u64,
-    keyspace_id: Option<u32>,
+    keyspace_ids: Option<Vec<u32>>,
     dir: &Path,
     snap_epoch: u32,
     snap_meta: Bytes,
@@ -691,22 +706,27 @@ pub fn lightweight_restore(
     if snap_epoch > 0 {
         snap_store_meta.merge_from_bytes(snap_meta.chunk()).unwrap();
         assert_eq!(snap_epoch, snap_store_meta.get_manifest().epoch_id);
-        restore_all_raft_logs_with_snap_rlog_file(keyspace_id, &snap_store_meta, dir, &snap_rlog)?;
+        restore_all_raft_logs_with_snap_rlog_file(
+            keyspace_ids.as_deref(),
+            &snap_store_meta,
+            dir,
+            &snap_rlog,
+        )?;
     }
     let dur_restore_rlogs = start_time.saturating_elapsed();
 
-    info!("{} manifest file path: {:?}", store_id, manifest_path(dir); "keyspace" => ?keyspace_id);
+    info!("{} manifest file path: {:?}", store_id, manifest_path(dir); "keyspace" => ?keyspace_ids);
     let manifest_file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(manifest_path(dir))
         .ctx("open manifest")?;
-    if let Some(keyspace_id) = keyspace_id {
+    if let Some(keyspace_ids) = keyspace_ids {
         let before = snap_store_meta.get_manifest().peers.len();
-        filter_manifest_peers_for_keyspace(snap_store_meta.mut_manifest(), keyspace_id);
+        filter_manifest_peers_for_keyspace(snap_store_meta.mut_manifest(), &keyspace_ids);
         let after = snap_store_meta.get_manifest().peers.len();
-        info!("{} filter manifest peers: {} -> {}", store_id, before, after; "keyspace" => keyspace_id);
+        info!("{} filter manifest peers: {} -> {}", store_id, before, after; "keyspace" => ?keyspace_ids);
     }
     persist_change_set(&manifest_file, 0, snap_store_meta.get_manifest())
         .ctx("persist change set")?;
@@ -717,14 +737,15 @@ pub fn lightweight_restore(
     Ok(snap_store_meta.get_manifest().epoch_id)
 }
 
-fn filter_manifest_peers_for_keyspace(cs: &mut rfenginepb::ChangeSet, keyspace_id: u32) {
+fn filter_manifest_peers_for_keyspace(cs: &mut rfenginepb::ChangeSet, keyspace_ids: &[u32]) {
+    let keyspace_ids_set = keyspace_ids.iter().cloned().collect::<HashSet<u32>>();
     let peers = cs.take_peers();
     peers
         .into_iter()
         .filter(|peer| {
             peer.region_id == 0
                 || peer.peer_id == 0
-                || get_keyspace_id_from_peer(peer).is_some_and(|x| x == keyspace_id)
+                || get_keyspace_id_from_peer(peer).is_some_and(|x| keyspace_ids_set.contains(&x))
         })
         .for_each(|peer| cs.mut_peers().push(peer));
 }

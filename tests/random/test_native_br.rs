@@ -15,6 +15,7 @@ use native_br::{
     limiter::ThroughputLimiter,
     restore::{get_cluster_backup_meta, get_cluster_backup_meta_async, RestoreConfig},
     restore_keyspace::{self, ReportRestoreStepTrait, RestoreStep},
+    rfengine_cache::RfEngineCache,
 };
 use pd_client::PdClient;
 use rand::Rng;
@@ -44,13 +45,15 @@ pub(crate) fn do_restore_keyspace(
     keyspace: u32,
     target_keyspace: u32,
     backup_name: &str,
-    truncate_ts: Option<u64>,
+    truncate_ts: u64,
     reporter: Arc<dyn ReportRestoreStepTrait>,
     object_cache: Option<ObjectCache>,
     limiter: Option<Arc<ThroughputLimiter>>,
+    rfengine_cache: RfEngineCache,
 ) -> native_br::Result<restore_keyspace::RestoredKeyspace> {
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(S3Fs::new_from_config(dfs_config));
+    rfengine_cache.fill_cache(backup_name, truncate_ts, object_cache.clone())?;
     restore_keyspace::restore_keyspace(
         keyspace,
         target_keyspace,
@@ -60,10 +63,11 @@ pub(crate) fn do_restore_keyspace(
         config,
         pd_client,
         runtime,
-        truncate_ts,
+        Some(truncate_ts),
         reporter,
         object_cache,
         limiter,
+        Some(rfengine_cache),
     )
 }
 
@@ -187,6 +191,7 @@ pub(crate) fn spawn_restore_keyspace(
     object_cache: Option<ObjectCache>,
     limiter: Option<Arc<ThroughputLimiter>>,
     timeout: Duration,
+    rfengine_cache: RfEngineCache,
 ) -> JoinHandle<()> {
     let s3fs = s3fs.clone();
     std::thread::spawn(move || {
@@ -209,6 +214,7 @@ pub(crate) fn spawn_restore_keyspace(
                     continue;
                 }
             };
+            rfengine_cache.register_keyspace(backup.keyspace_id, backup.backup_ts);
 
             let source_keyspace = backup.keyspace_id;
             let branching = source_keyspace > 0 && rng.gen_bool(0.5);
@@ -272,10 +278,11 @@ pub(crate) fn spawn_restore_keyspace(
                     source_keyspace,
                     target_keyspace,
                     &backup_name,
-                    Some(backup.backup_ts),
+                    backup.backup_ts,
                     reporter.clone(),
                     object_cache.clone(),
                     limiter.clone(),
+                    rfengine_cache.clone(),
                 ) {
                     Ok(res) => Some(res),
                     Err(Error::BackupEmptyForKeyspace(_)) => {

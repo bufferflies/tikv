@@ -3,7 +3,7 @@
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Barrier,
     },
     time::Duration,
 };
@@ -24,8 +24,16 @@ use kvengine::{
 };
 use kvproto::metapb;
 use native_br::{
-    archive, backup, common::now, metrics::NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
-    restore::RestoreConfig, restore_keyspace, step,
+    archive, backup,
+    common::now,
+    metrics::{
+        NATIVE_BR_RFENGINE_CACHE_HIT, NATIVE_BR_RFENGINE_CACHE_MISS,
+        NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR,
+    },
+    restore::RestoreConfig,
+    restore_keyspace,
+    rfengine_cache::RfEngineCache,
+    step,
 };
 use pd_client::PdClient;
 use rand::prelude::*;
@@ -397,6 +405,7 @@ fn test_restore_keyspace_impl(
         reporter.clone(),
         object_cache.clone(),
         limiter.clone(),
+        None,
     )
     .unwrap();
     step!("restore done");
@@ -441,6 +450,7 @@ fn test_restore_keyspace_impl(
             reporter,
             object_cache,
             limiter,
+            None,
         )
         .unwrap();
         step!("restore (pitr on restored data) done");
@@ -819,6 +829,7 @@ fn test_restore_archived_keyspace_impl(
                 reporter.clone(),
                 object_cache.clone(),
                 limiter.clone(),
+                None,
             )
             .unwrap();
             step!("restore done. case: {}:{}:{}", case_idx, loop_idx, idx);
@@ -1025,6 +1036,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
             reporter.clone(),
             object_cache.clone(),
             limiter.clone(),
+            None,
         )
         .unwrap();
 
@@ -1070,6 +1082,7 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
             reporter,
             object_cache,
             limiter,
+            None,
         )
         .unwrap();
         // Verify restored data.
@@ -1078,6 +1091,175 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
             .unwrap();
         assert_eq!(verified_cnt, (100, 100));
     }
+
+    cluster.stop();
+    oss.shutdown();
+}
+
+#[test]
+fn test_restore_multiple_keyspaces_uses_rfengine_cache() {
+    const KEYSPACE_1: u32 = 1;
+    const KEYSPACE_2: u32 = 2;
+
+    test_util::init_log_for_test();
+    let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_rfengine_cache_");
+    let s3fs = Arc::new(S3Fs::new_from_config(dfs_config.clone()));
+    let reporter = Arc::new(DummyStepReporter::default());
+
+    let mut cluster = ServerCluster::new(alloc_node_id_vec(3), |_, conf: &mut TikvConfig| {
+        conf.dfs = dfs_config.clone();
+        conf.rfengine.lightweight_backup = true;
+    });
+    cluster.wait_region_replicated(&[], 3);
+    let mut client = cluster.new_client();
+    client.split_keyspaces(0..3);
+
+    // Import data for two keyspaces in multiple batches to generate SSTs instead of
+    // keeping everything in a single mem-table.
+    for keyspace_id in [KEYSPACE_1, KEYSPACE_2] {
+        for round in 0..10 {
+            let start = round * BASIC_DATA_COUNT;
+            let end = start + BASIC_DATA_COUNT;
+            client.put_kv(
+                start..end,
+                &gen_keyspace_key(keyspace_id),
+                i_to_val(BASIC_DATA_LEN),
+            );
+        }
+    }
+    let origin_ref_store = client.dump_ref_store();
+
+    // Perform backup.
+    let backup_name = generate_backup_name();
+    let backup_ts = client.get_ts().into_inner();
+    let backup_config = backup::BackupConfig {
+        dfs: dfs_config.clone(),
+        backup_delay: ReadableDuration::secs(1),
+        skip_keyspace_meta: true,
+        ..Default::default()
+    };
+    let (_, backup_meta) = backup::backup_cluster_with_ts(
+        backup_config,
+        backup_name.clone(),
+        cluster.get_pd_client().as_ref(),
+        backup_ts,
+        None,
+    )
+    .expect("backup_cluster_with_ts");
+
+    // Mutate data after backup so restore has real work.
+    for keyspace_id in [KEYSPACE_1, KEYSPACE_2] {
+        client.put_kv(
+            BASIC_DATA_COUNT..(BASIC_DATA_COUNT * 2),
+            &gen_keyspace_key(keyspace_id),
+            i_to_val(FINAL_DATA_LEN),
+        );
+    }
+
+    let restore_config = RestoreConfig::default_for_test();
+    let object_cache = cluster.create_object_cache_randomly();
+    let limiter_runtime = Runtime::new().unwrap();
+    let limiter = cluster.create_restore_limiter_randomly(limiter_runtime.handle().clone());
+
+    // Prepare rfengine cache before running concurrent restores.
+    let cache_dir = tempfile::tempdir().unwrap();
+    let rfengine_cache = RfEngineCache::new(
+        cache_dir.path().to_path_buf(),
+        restore_config.clone(),
+        s3fs.clone(),
+        cluster.get_pd_client(),
+    );
+    rfengine_cache.register_keyspace(KEYSPACE_1, backup_meta.get_backup_ts());
+    rfengine_cache.register_keyspace(KEYSPACE_2, backup_meta.get_backup_ts());
+    rfengine_cache
+        .fill_cache(
+            &backup_name,
+            backup_meta.get_backup_ts(),
+            object_cache.clone(),
+        )
+        .unwrap();
+
+    // Run restores concurrently and expect cache hits.
+    NATIVE_BR_RFENGINE_CACHE_HIT.reset();
+    NATIVE_BR_RFENGINE_CACHE_MISS.reset();
+    let store_count = backup_meta.get_stores().len() as u64;
+    let barrier = Arc::new(Barrier::new(2));
+
+    let backup_name_cloned = backup_name.clone();
+    let cache_for_ks1 = rfengine_cache.clone();
+    let reporter_ks1 = reporter.clone();
+    let s3fs_ks1 = s3fs.clone();
+    let object_cache_ks1 = object_cache.clone();
+    let limiter_ks1 = limiter.clone();
+    let pd_client_ks1 = cluster.get_pd_client();
+    let restore_config_ks1 = restore_config.clone();
+    let barrier_ks1 = barrier.clone();
+    let handle_ks1 = std::thread::spawn(move || {
+        let runtime = Runtime::new().unwrap();
+        barrier_ks1.wait();
+        restore_keyspace::restore_keyspace(
+            KEYSPACE_1,
+            KEYSPACE_1,
+            &backup_name_cloned,
+            None,
+            s3fs_ks1,
+            restore_config_ks1,
+            pd_client_ks1,
+            &runtime,
+            None,
+            reporter_ks1,
+            object_cache_ks1,
+            limiter_ks1,
+            Some(cache_for_ks1),
+        )
+        .unwrap();
+    });
+
+    let cache_for_ks2 = rfengine_cache.clone();
+    let reporter_ks2 = reporter.clone();
+    let s3fs_ks2 = s3fs.clone();
+    let object_cache_ks2 = object_cache.clone();
+    let limiter_ks2 = limiter.clone();
+    let pd_client_ks2 = cluster.get_pd_client();
+    let restore_config_ks2 = restore_config.clone();
+    let barrier_ks2 = barrier.clone();
+    let handle_ks2 = std::thread::spawn(move || {
+        let runtime = Runtime::new().unwrap();
+        barrier_ks2.wait();
+        restore_keyspace::restore_keyspace(
+            KEYSPACE_2,
+            KEYSPACE_2,
+            &backup_name,
+            None,
+            s3fs_ks2,
+            restore_config_ks2,
+            pd_client_ks2,
+            &runtime,
+            None,
+            reporter_ks2,
+            object_cache_ks2,
+            limiter_ks2,
+            Some(cache_for_ks2),
+        )
+        .unwrap();
+    });
+
+    handle_ks1.join().unwrap();
+    handle_ks2.join().unwrap();
+
+    // Verify restored data and cache effectiveness.
+    let verified_cnt = client
+        .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
+        .unwrap();
+    assert_eq!(verified_cnt, (BASIC_DATA_COUNT * 20, 0));
+    assert_eq!(NATIVE_BR_RFENGINE_CACHE_MISS.get(), 0);
+    let cache_hits = NATIVE_BR_RFENGINE_CACHE_HIT.get();
+    assert!(
+        cache_hits >= store_count * 2,
+        "expected at least {} cache hits, got {}",
+        store_count * 2,
+        cache_hits
+    );
 
     cluster.stop();
     oss.shutdown();
@@ -1153,6 +1335,7 @@ fn test_restore_keyspace_with_no_chunk() {
         reporter,
         object_cache,
         limiter,
+        None,
     )
     .unwrap();
 
@@ -1258,6 +1441,7 @@ fn test_restore_keyspace_with_slow_dfs() {
             reporter.clone(),
             object_cache.clone(),
             limiter.clone(),
+            None,
         )
         .unwrap();
 
@@ -1401,6 +1585,7 @@ fn test_restore_keyspace_with_schema() {
         reporter,
         object_cache,
         limiter,
+        None,
     )
     .unwrap();
 
@@ -1588,6 +1773,7 @@ fn test_restore_keyspace_with_failed_store(
         reporter.clone(),
         object_cache.clone(),
         limiter.clone(),
+        None,
     );
     assert_eq!(
         res.is_ok(),
@@ -1614,6 +1800,7 @@ fn test_restore_keyspace_with_failed_store(
         reporter,
         object_cache,
         limiter,
+        None,
     );
     assert_eq!(
         res_tolerated.is_err(),

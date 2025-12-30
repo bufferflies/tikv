@@ -8,6 +8,8 @@ pub enum Error {
     CheckError(String),
     #[error("pd error {0}")]
     PdError(#[from] pd_client::Error),
+    #[error("pd control error {0}")]
+    PdControlError(#[from] pd_client::pd_control::Error),
     #[error("serde_json error {0}")]
     SerdeJsonError(#[from] serde_json::Error),
     #[error("dfs error {0}")]
@@ -38,6 +40,8 @@ pub enum Error {
     FileCorrupted,
     #[error("k8s error {0}")]
     K8sError(String),
+    #[error("rfengine error {0}")]
+    RfEngineError(#[from] rfengine::Error),
     #[error("Other error {0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }

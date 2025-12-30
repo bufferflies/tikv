@@ -269,6 +269,7 @@ fn test_periodic_backup() {
         reporter,
         object_cache,
         limiter,
+        None,
     )
     .unwrap();
 
@@ -375,6 +376,7 @@ fn test_batch_backup() {
         reporter,
         object_cache,
         limiter,
+        None,
     )
     .unwrap();
 

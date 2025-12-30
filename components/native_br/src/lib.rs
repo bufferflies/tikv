@@ -14,6 +14,7 @@ pub mod lock;
 pub mod metrics;
 pub mod restore;
 pub mod restore_keyspace;
+pub mod rfengine_cache;
 mod tiflash;
 mod tikv;
 pub mod wal;

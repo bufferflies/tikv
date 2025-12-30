@@ -76,6 +76,7 @@ use crate::{
         NATIVE_BR_RESTORE_PENDING_DATA_SIZE,
     },
     restore::RestoreConfig,
+    rfengine_cache::RfEngineCache,
     step,
     tiflash::remove_tiflash_replica_of_keyspace,
 };
@@ -158,6 +159,7 @@ pub fn restore_keyspace_with_cfg(
     reporter: Arc<dyn ReportRestoreStepTrait>,
     object_cache: Option<ObjectCache>,
     limiter: Option<Arc<ThroughputLimiter>>,
+    rfengine_cache: Option<RfEngineCache>,
 ) -> Result<RestoredKeyspace> {
     let mut pd_control = PdControl::new(config.pd.clone(), pd_client.get_security_mgr())?;
     pd_control.set_timeout(config.timeout_pd_control.0);
@@ -204,6 +206,7 @@ pub fn restore_keyspace_with_cfg(
         reporter,
         object_cache,
         limiter,
+        rfengine_cache,
     )
 }
 
@@ -220,6 +223,7 @@ pub fn restore_keyspace(
     reporter: Arc<dyn ReportRestoreStepTrait>,
     object_cache: Option<ObjectCache>,
     limiter: Option<Arc<ThroughputLimiter>>,
+    rfengine_cache: Option<RfEngineCache>,
 ) -> Result<RestoredKeyspace> {
     let keyspace_tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
 
@@ -314,6 +318,7 @@ pub fn restore_keyspace(
         archive_reader,
         false,
         object_cache,
+        rfengine_cache,
     )?;
     step!(
         "Keyspace {} restore {} shards from backup",
@@ -692,6 +697,7 @@ impl BackupCluster {
         archive_reader: Option<ArchiveReader>,
         load_all_tables: bool, // `true` for "check_table" ONLY.
         object_cache: Option<ObjectCache>,
+        rfengine_cache: Option<RfEngineCache>,
     ) -> Result<BackupCluster> {
         let (keyspace_start, keyspace_end) = if archiving {
             (Vec::default(), GLOBAL_SHARD_END_KEY.to_vec())
@@ -742,7 +748,6 @@ impl BackupCluster {
         } else {
             restore_conf.tolerate_err
         };
-        let fetch_wal_timeout = restore_conf.timeout_fetch_wal.0;
 
         let is_error_can_tolerate = |err: &Error| -> bool {
             if matches!(
@@ -809,6 +814,7 @@ impl BackupCluster {
             };
             let restore_conf_cp = restore_conf.clone();
             let object_cache = object_cache.clone();
+            let rfengine_cache = rfengine_cache.clone();
             std::thread::spawn(move || {
                 let res = BackupCluster::setup_raft_engine(
                     &tag,
@@ -818,11 +824,12 @@ impl BackupCluster {
                     &store_config,
                     pd_client,
                     s3fs,
-                    fetch_wal_timeout,
                     archiving,
                     archive_store_meta,
                     &restore_conf_cp,
                     object_cache,
+                    rfengine_cache,
+                    truncate_ts,
                 );
                 if let Err(err) = &res {
                     warn!(
@@ -882,15 +889,14 @@ impl BackupCluster {
         &self.tag
     }
 
-    fn setup_raft_engine_for_lightweight(
+    pub(crate) fn setup_raft_engine_for_lightweight(
         tag: &str,
         store_id: u64,
-        keyspace_id: u32,
+        keyspace_ids: Vec<u32>,
         cluster_backup: &ClusterBackupMeta,
         conf: &TikvConfig,
         pd_client: Arc<dyn PdClient>,
         dfs: Arc<S3Fs>,
-        fetch_wal_timeout: Duration,
         archiving: bool,
         archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
         restore_conf: &RestoreConfig,
@@ -910,7 +916,7 @@ impl BackupCluster {
         };
         rfengine::lightweight_restore(
             store_id,
-            (!archiving).then_some(keyspace_id),
+            (!archiving).then_some(keyspace_ids),
             Path::new(&conf.raft_store.raftdb_path),
             rlog_files.snap_epoch,
             rlog_files.snap_meta,
@@ -947,7 +953,7 @@ impl BackupCluster {
             rf_engine: &rf_engine,
             complete_wal_chunks,
             full_restore: false,
-            fetch_wal_timeout,
+            fetch_wal_timeout: restore_conf.timeout_fetch_wal.0,
             cache_dir,
             wal_chunks_cache,
             from_archive: archive_store_meta.is_some(),
@@ -964,12 +970,25 @@ impl BackupCluster {
         conf: &TikvConfig,
         pd_client: Arc<dyn PdClient>,
         dfs: Arc<S3Fs>,
-        fetch_wal_timeout: Duration,
         archiving: bool,
         archive_store_meta: Option<(String, StoreMeta)>, // archive date, archive store meta
         restore_conf: &RestoreConfig,
         object_cache: Option<ObjectCache>,
+        rfengine_cache: Option<RfEngineCache>,
+        truncate_ts: u64,
     ) -> Result<RfEngine> {
+        if let (Some(cache), None) = (&rfengine_cache, &archive_store_meta) {
+            let raft_db_path = Path::new(&conf.raft_store.raftdb_path);
+            if let Some(cached_engine) =
+                cache.get_for_keyspace(store_id, keyspace_id, truncate_ts, raft_db_path)
+            {
+                info!(
+                    "Keyspace {} use cached raft engine for store {}",
+                    tag, store_id
+                );
+                return Ok(cached_engine);
+            }
+        }
         if !cluster_backup.is_lightweight {
             return Err(Error::BackupError(
                 "only support lightweight restore".to_string(),
@@ -978,12 +997,11 @@ impl BackupCluster {
         Self::setup_raft_engine_for_lightweight(
             tag,
             store_id,
-            keyspace_id,
+            vec![keyspace_id],
             cluster_backup,
             conf,
             pd_client,
             dfs,
-            fetch_wal_timeout,
             archiving,
             archive_store_meta,
             restore_conf,

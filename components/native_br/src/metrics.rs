@@ -40,4 +40,14 @@ lazy_static! {
         register_int_counter!("native_br_restored_data_size", "Restored data size",).unwrap();
     pub static ref NATIVE_BR_RESTORED_KV_SIZE: IntCounter =
         register_int_counter!("native_br_restored_kv_size", "Restored kv size",).unwrap();
+    pub static ref NATIVE_BR_RFENGINE_CACHE_HIT: IntCounter = register_int_counter!(
+        "native_br_rfengine_cache_hit",
+        "Number of rfengine cache hits during restore"
+    )
+    .unwrap();
+    pub static ref NATIVE_BR_RFENGINE_CACHE_MISS: IntCounter = register_int_counter!(
+        "native_br_rfengine_cache_miss",
+        "Number of rfengine cache misses during restore"
+    )
+    .unwrap();
 }

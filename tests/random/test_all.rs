@@ -18,7 +18,7 @@ use kvengine::{
 };
 use kvproto::pdpb::CheckPolicy;
 use load_data::task::LoadDataConfig;
-use native_br::{backup, backup_worker, restore::RestoreConfig};
+use native_br::{backup, backup_worker, restore::RestoreConfig, rfengine_cache::RfEngineCache};
 use pd_client::PdClient;
 use rand::prelude::*;
 use rfengine::RFENGINE_DFS_WORKER_BECOME_UNHEALTHY_COUNTER;
@@ -98,7 +98,7 @@ fn test_random_all_impl(use_builtin_dfs: bool) {
     info!("switches: {:?}", switches);
 
     // Prepare.
-    let (_temp_dir, oss, dfs_config) = if use_builtin_dfs {
+    let (temp_dir, oss, dfs_config) = if use_builtin_dfs {
         prepare_builtin_dfs("builtin_")
     } else {
         prepare_dfs("oss_")
@@ -178,6 +178,13 @@ fn test_random_all_impl(use_builtin_dfs: bool) {
         lower_memory: switches.restore_lower_memory,
         ..Default::default()
     };
+    let rfengine_cache_dir = temp_dir.path().join("rfengine_cache");
+    let rfengine_cache = RfEngineCache::new(
+        rfengine_cache_dir,
+        restore_config.clone(),
+        Arc::new(s3fs.clone()),
+        pd_client.clone(),
+    );
     if !use_builtin_dfs {
         let object_cache = cluster.create_object_cache_randomly();
         let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
@@ -192,6 +199,7 @@ fn test_random_all_impl(use_builtin_dfs: bool) {
                 object_cache.clone(),
                 limiter.clone(),
                 TIMEOUT,
+                rfengine_cache.clone(),
             ));
         }
         let load_data_task_timeout =
