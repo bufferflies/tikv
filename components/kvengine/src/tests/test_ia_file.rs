@@ -11,7 +11,8 @@ use crate::{
     next, next_async,
     table::{
         file::InMemFile,
-        sstable::{BlockCache, SsTable},
+        sstable::{BlockCache, NewSsTableCtx, SsTable},
+        tiny_meta::SstTinyMeta,
     },
     tests::{new_table, new_test_engine_opt},
     util::test_util::KeyBuilder,
@@ -115,10 +116,56 @@ pub(crate) fn open_ia_file_from_sst(t: &SsTable, mgr: IaManager) -> IaFile {
         )
         .unwrap();
     let meta_file = InMemFile::new(t.id(), meta_data);
-    IaFile::open_for_sst(t.id(), Arc::new(meta_file), mgr).unwrap()
+    IaFile::open_for_sst(t.id(), Arc::new(meta_file), mgr, None).unwrap()
 }
 
 pub(crate) fn convert_local_sst_to_ia(t: &SsTable, mgr: IaManager) -> SsTable {
     let ia_file = open_ia_file_from_sst(t, mgr);
     SsTable::new(Arc::new(ia_file), BlockCache::None, None).unwrap()
+}
+
+#[test]
+fn test_open_for_sst_with_tiny_meta_matches() {
+    init_log_for_test();
+
+    let file_id = 1;
+    let (engine, _) = new_test_engine_opt(true, 256, "");
+    let mut saved_vals: Vec<Rc<Vec<u8>>> = Vec::new();
+    let t = new_table(&engine, file_id, 0, 100, 1000, false, &mut saved_vals);
+
+    let ia_rt = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("ia-mgr")
+        .enable_all()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+    let options = IaManagerOptionsBuilder::default()
+        .segment_size(512)
+        .build()
+        .unwrap();
+    let mgr = IaManager::new(options, engine.fs.clone(), None, ia_rt.into()).unwrap();
+
+    let ia_file = Arc::new(open_ia_file_from_sst(&t, mgr.clone()));
+    let meta_file = ia_file.table_meta_file().clone();
+
+    let mut ctx = NewSsTableCtx::default();
+    let ia_table =
+        SsTable::new_with_ctx(ia_file.clone(), BlockCache::None, None, &mut ctx).unwrap();
+
+    let (footer, props_data) = ctx
+        .footer_and_properties_data
+        .expect("footer and props data");
+    let sst_tiny_meta = SstTinyMeta::from_sstable(&ia_table, footer, props_data.as_ref());
+    let segment_offsets = sst_tiny_meta
+        .segment_offsets
+        .as_ref()
+        .expect("segment offsets should be present");
+    assert!(!segment_offsets.is_empty());
+    let ia_with_tiny = IaFile::open_for_sst(t.id(), meta_file, mgr, Some(&sst_tiny_meta)).unwrap();
+
+    assert_eq!(ia_file.id, ia_with_tiny.id);
+    assert_eq!(ia_file.size, ia_with_tiny.size);
+    assert_eq!(ia_file.ftype, ia_with_tiny.ftype);
+    assert_eq!(ia_file.table_meta_off, ia_with_tiny.table_meta_off);
+    assert_eq!(ia_file.segment_offsets, ia_with_tiny.segment_offsets);
 }

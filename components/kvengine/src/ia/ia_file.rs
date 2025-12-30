@@ -24,7 +24,7 @@ use crate::{
         manager::{IaManager, ReadAt},
         types::{FileSegmentIdent, TABLE_META_LOCAL_FILE_SUFFIX},
     },
-    metrics::ENGINE_IA_SYNC_READ_COUNTER,
+    metrics::{ENGINE_IA_SYNC_READ_COUNTER, PREPARE_COUNTER_VEC},
     new_blob_filename, new_columnar_filename, new_sst_filename, new_vector_index_filename,
     table::{
         blobtable::{self, blobtable::BlobTable},
@@ -32,6 +32,7 @@ use crate::{
         file::{File, InMemFile, MmapData},
         search, sstable,
         sstable::{Index, SsTable},
+        tiny_meta::{SstTinyMeta, TypedTinyMeta},
         vector_index::VectorIndexFileFooter,
         Error, Result,
     },
@@ -68,8 +69,18 @@ impl IaFile {
         table_meta_file: Arc<dyn File>,
         mgr: IaManager,
     ) -> Result<Self> {
+        Self::open_with_tiny_meta(id, fm, table_meta_file, mgr, &TypedTinyMeta::default())
+    }
+
+    pub fn open_with_tiny_meta(
+        id: u64,
+        fm: &FileMeta,
+        table_meta_file: Arc<dyn File>,
+        mgr: IaManager,
+        tiny_meta: &TypedTinyMeta,
+    ) -> Result<Self> {
         match fm.file_type {
-            FileType::Sst => Self::open_for_sst(id, table_meta_file, mgr),
+            FileType::Sst => Self::open_for_sst(id, table_meta_file, mgr, tiny_meta.as_sst()),
             FileType::Columnar => Self::open_for_columnar(id, table_meta_file, mgr),
             FileType::VectorIndex => Self::open_for_vector(id, fm, table_meta_file, mgr),
             FileType::Blob => Self::open_for_blob(id, table_meta_file, mgr),
@@ -84,24 +95,30 @@ impl IaFile {
         id: u64,
         table_meta_file: Arc<dyn File>,
         mgr: IaManager,
+        tiny_meta_opt: Option<&SstTinyMeta>,
     ) -> Result<Self> {
-        let footer_data = table_meta_file.read_footer(SsTable::footer_size())?;
-        let mut footer = sstable::Footer::default();
-        footer.unmarshal(&footer_data);
-        if !footer.is_match() {
-            error!("{} open for sst: footer not match", id; "footer" => LogValue::value(&footer_data));
-            if let Some(path) = table_meta_file.path() {
-                if let Err(err) = std::fs::remove_file(path) {
-                    warn!("{} open for sst: remove interrupted meta file: failed", id; "err" => ?err);
+        let footer = match tiny_meta_opt {
+            Some(tiny_meta) => tiny_meta.footer,
+            None => {
+                let footer_data = table_meta_file.read_footer(SsTable::footer_size())?;
+                let mut footer = sstable::Footer::default();
+                footer.unmarshal(&footer_data);
+                if !footer.is_match() {
+                    error!("{} open for sst: footer not match", id; "footer" => LogValue::value(&footer_data));
+                    if let Some(path) = table_meta_file.path() {
+                        if let Err(err) = std::fs::remove_file(path) {
+                            warn!("{} open for sst: remove interrupted meta file: failed", id; "err" => ?err);
+                        }
+                    }
+                    return Err(Error::IaMgr(
+                        format!("{id} open for sst: footer not match",),
+                    ));
                 }
+                footer
             }
-            return Err(Error::IaMgr(
-                format!("{id} open for sst: footer not match",),
-            ));
-        }
+        };
 
         let meta_size = table_meta_file.size();
-        let segment_size = mgr.segment_size();
         let table_meta_off = footer.meta_offset() as u64;
         let mut f = Self {
             id,
@@ -109,45 +126,66 @@ impl IaFile {
             ftype: FileType::Sst,
             table_meta_off,
             segment_offsets: vec![],
-            table_meta_file: table_meta_file.clone(),
+            table_meta_file,
             mgr,
         };
 
-        // Generate segment offsets.
-        {
-            let mut builder = SegmentOffsetsBuilder::new(segment_size as u64);
-
-            let idx_data = f.read_table_meta(footer.index_offset as u64, footer.index_len())?;
-            sstable::validate_checksum_with_fix(
-                &idx_data,
-                &footer,
-                table_meta_file.as_ref(),
-                None,
-            )?;
-            let idx = sstable::Index::new(idx_data)?;
-            builder.push_from_sstable_idx(&idx);
-            builder.push_boundary(footer.data_len() as u64);
-
-            if footer.old_data_len() > 0 {
-                debug_assert!(footer.old_index_len() > 0);
-                let old_idx_data =
-                    f.read_table_meta(footer.old_index_offset as u64, footer.old_index_len())?;
-                sstable::validate_checksum_with_fix(
-                    &old_idx_data,
-                    &footer,
-                    table_meta_file.as_ref(),
-                    None,
-                )?;
-                let old_idx = sstable::Index::new(old_idx_data)?;
-                builder.push_from_sstable_idx(&old_idx);
-                builder.push_boundary((footer.data_len() + footer.old_data_len()) as u64);
+        match tiny_meta_opt.and_then(|tiny_meta| tiny_meta.segment_offsets.as_ref()) {
+            Some(segment_offsets) if segment_offsets.len() >= 2 => {
+                // Require at least two offsets to avoid out-of-bounds in align_to_segment.
+                PREPARE_COUNTER_VEC.tiny_meta_segment_offsets_hit.inc();
+                f.segment_offsets = segment_offsets.clone();
             }
-
-            f.segment_offsets = builder.finish();
+            Some(segment_offsets) => {
+                warn!(
+                    "{} open for sst: invalid tiny meta segment offsets: {:?}",
+                    id, segment_offsets
+                );
+                debug_assert!(false);
+                f.generate_segment_offsets_for_sst(&footer)?;
+            }
+            None => {
+                f.generate_segment_offsets_for_sst(&footer)?;
+            }
         }
 
         debug!("{} open for sst: {:?}", id, f);
         Ok(f)
+    }
+
+    fn generate_segment_offsets_for_sst(&mut self, footer: &sstable::Footer) -> Result<()> {
+        let segment_size = self.mgr.segment_size();
+        let mut builder = SegmentOffsetsBuilder::new(segment_size as u64);
+
+        let idx_data = self.read_table_meta(footer.index_offset as u64, footer.index_len())?;
+        sstable::validate_checksum_with_fix(
+            &idx_data,
+            footer,
+            self.table_meta_file.as_ref(),
+            None,
+        )?;
+        let idx = sstable::Index::new(idx_data)?;
+        builder.push_from_sstable_idx(&idx);
+        builder.push_boundary(footer.data_len() as u64);
+
+        if footer.old_data_len() > 0 {
+            debug_assert!(footer.old_index_len() > 0);
+            let old_idx_data =
+                self.read_table_meta(footer.old_index_offset as u64, footer.old_index_len())?;
+            sstable::validate_checksum_with_fix(
+                &old_idx_data,
+                footer,
+                self.table_meta_file.as_ref(),
+                None,
+            )?;
+            let old_idx = sstable::Index::new(old_idx_data)?;
+            builder.push_from_sstable_idx(&old_idx);
+            builder.push_boundary((footer.data_len() + footer.old_data_len()) as u64);
+        }
+
+        self.segment_offsets = builder.finish();
+        debug!("generate segment offsets: {:?}", self.segment_offsets; "file_id" => self.id);
+        Ok(())
     }
 
     fn open_for_columnar(id: u64, table_meta_file: Arc<dyn File>, mgr: IaManager) -> Result<Self> {

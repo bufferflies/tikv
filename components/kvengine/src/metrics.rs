@@ -191,6 +191,14 @@ pub(crate) fn elapsed_secs(t: Instant) -> f64 {
 }
 
 make_static_metric! {
+    pub label_enum PrepareMetric {
+        tiny_meta_segment_offsets_hit,
+    }
+
+    pub struct PrepareCounterVec: IntCounter {
+        "metric" => PrepareMetric,
+    }
+
     pub label_enum MetaPackActionMetric {
         pack,
         compact,
@@ -202,6 +210,13 @@ make_static_metric! {
 }
 
 lazy_static! {
+    pub static ref PREPARE_COUNTER_VEC: PrepareCounterVec = register_static_int_counter_vec!(
+        PrepareCounterVec,
+        "kv_engine_prepare_counter",
+        "Total number of prepare table file operations",
+        &["metric"]
+    )
+    .unwrap();
     pub static ref META_PACK_ACTION_COUNTER_VEC: MetaPackActionCounterVec =
         register_static_int_counter_vec!(
             MetaPackActionCounterVec,

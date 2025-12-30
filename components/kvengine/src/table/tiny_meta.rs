@@ -1594,7 +1594,7 @@ mod tests {
             )
             .unwrap();
         let meta_file = InMemFile::new(t.id(), meta_data);
-        let ia_file = IaFile::open_for_sst(t.id(), Arc::new(meta_file), mgr).unwrap();
+        let ia_file = IaFile::open_for_sst(t.id(), Arc::new(meta_file), mgr, None).unwrap();
         SsTable::new(Arc::new(ia_file), BlockCache::None, None).unwrap()
     }
 

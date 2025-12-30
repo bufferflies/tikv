@@ -736,7 +736,9 @@ impl EngineCore {
             };
         }
         if let Ok(table_meta_file) = table_meta_file {
-            if let Ok(ia_file) = IaFile::open(id, fm, Arc::new(table_meta_file), ia_mgr) {
+            if let Ok(ia_file) =
+                IaFile::open_with_tiny_meta(id, fm, Arc::new(table_meta_file), ia_mgr, tiny_meta)
+            {
                 return Ok(Some(ia_file));
             }
         }
