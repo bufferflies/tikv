@@ -6,7 +6,6 @@ use std::{
     ptr,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        mpsc::SyncSender,
         Arc, Mutex,
     },
     time::Duration,
@@ -22,7 +21,9 @@ use tikv_util::{
     sys::{cpu_time::ProcessStat, thread::ThreadBuildWrapper, SysQuota},
     time::Instant,
     worker::{Runnable, RunnableWithTimer, Scheduler, Worker},
-    yatp_pool::{self, FuturePool, PoolTicker, YatpPoolBuilder},
+    yatp_pool::{
+        self, FuturePool, PoolTicker, ScalableTokioHandle, ScalableTokioRuntime, YatpPoolBuilder,
+    },
 };
 use tracker::TrackedFuture;
 use yatp::{
@@ -56,14 +57,14 @@ pub enum ReadPool {
         pool: yatp::ThreadPool<TaskCell>,
         running_tasks: IntGauge,
         running_threads: IntGauge,
-        max_tasks: usize,
-        pool_size: usize,
+        max_tasks: Arc<AtomicUsize>,
+        pool_size: Arc<AtomicUsize>,
     },
     Tokio {
-        runtime: tokio::runtime::Runtime,
+        runtime: ScalableTokioRuntime,
         running_tasks: IntGauge,
-        max_tasks: usize,
-        pool_size: usize,
+        max_tasks: Arc<AtomicUsize>,
+        pool_size: Arc<AtomicUsize>,
         task_monitor: tokio_metrics::TaskMonitor,
         pool_name: String,
     },
@@ -91,8 +92,8 @@ impl ReadPool {
                 remote: pool.remote().clone(),
                 running_tasks: running_tasks.clone(),
                 running_threads: running_threads.clone(),
-                max_tasks: *max_tasks,
-                pool_size: *pool_size,
+                max_tasks: max_tasks.clone(),
+                pool_size: pool_size.clone(),
             },
             ReadPool::Tokio {
                 runtime,
@@ -102,10 +103,12 @@ impl ReadPool {
                 task_monitor,
                 pool_name,
             } => ReadPoolHandle::Tokio {
-                runtime: runtime.handle().clone(),
+                // here, the runtime must not be stop or dropped, so it safe
+                // to unwrap.
+                handle: runtime.handle().unwrap(),
                 running_tasks: running_tasks.clone(),
-                max_tasks: *max_tasks,
-                pool_size: *pool_size,
+                max_tasks: max_tasks.clone(),
+                pool_size: pool_size.clone(),
                 task_monitor: task_monitor.clone(),
                 pool_name: pool_name.clone(),
             },
@@ -113,8 +116,8 @@ impl ReadPool {
     }
 
     pub fn shutdown(self) {
-        if let ReadPool::Tokio { runtime, .. } = self {
-            runtime.shutdown_background();
+        if let ReadPool::Tokio { mut runtime, .. } = self {
+            runtime.shutdown();
         }
     }
 }
@@ -130,14 +133,14 @@ pub enum ReadPoolHandle {
         remote: Remote<TaskCell>,
         running_tasks: IntGauge,
         running_threads: IntGauge,
-        max_tasks: usize,
-        pool_size: usize,
+        max_tasks: Arc<AtomicUsize>,
+        pool_size: Arc<AtomicUsize>,
     },
     Tokio {
-        runtime: tokio::runtime::Handle,
+        handle: ScalableTokioHandle,
         running_tasks: IntGauge,
-        max_tasks: usize,
-        pool_size: usize,
+        max_tasks: Arc<AtomicUsize>,
+        pool_size: Arc<AtomicUsize>,
         task_monitor: tokio_metrics::TaskMonitor,
         pool_name: String,
     },
@@ -173,7 +176,9 @@ impl ReadPoolHandle {
                 // If several tasks are spawned at the same time while the running task number
                 // is close to the limit, they may all pass this check and the number of running
                 // tasks may exceed the limit.
-                if priority != CommandPri::High && running_tasks.get() as usize >= *max_tasks {
+                if priority != CommandPri::High
+                    && running_tasks.get() as usize >= max_tasks.load(Ordering::Relaxed)
+                {
                     return Err(ReadPoolError::UnifiedReadPoolFull);
                 }
 
@@ -194,7 +199,7 @@ impl ReadPoolHandle {
                 remote.spawn(task_cell);
             }
             ReadPoolHandle::Tokio {
-                runtime,
+                handle,
                 running_tasks,
                 max_tasks,
                 task_monitor,
@@ -205,7 +210,9 @@ impl ReadPoolHandle {
                 // If several tasks are spawned at the same time while the running task number
                 // is close to the limit, they may all pass this check and the number of running
                 // tasks may exceed the limit.
-                if priority != CommandPri::High && running_tasks.get() as usize >= *max_tasks {
+                if priority != CommandPri::High
+                    && running_tasks.get() as usize >= max_tasks.load(Ordering::Relaxed)
+                {
                     // TODO: uncomment it when scheduler leak issue is fixed.
                     // return Err(ReadPoolError::UnifiedReadPoolFull);
                 }
@@ -216,7 +223,7 @@ impl ReadPoolHandle {
                 });
                 // Instrument with tokio-metrics to track schedule wait time
                 let instrumented = task_monitor.instrument(tracked);
-                runtime.spawn(instrumented);
+                handle.spawn(instrumented);
             }
         }
         Ok(())
@@ -252,8 +259,8 @@ impl ReadPoolHandle {
             ReadPoolHandle::FuturePools {
                 read_pool_normal, ..
             } => read_pool_normal.get_pool_size(),
-            ReadPoolHandle::Yatp { pool_size, .. } => *pool_size,
-            ReadPoolHandle::Tokio { pool_size, .. } => *pool_size,
+            ReadPoolHandle::Yatp { pool_size, .. } => pool_size.load(Ordering::Relaxed),
+            ReadPoolHandle::Tokio { pool_size, .. } => pool_size.load(Ordering::Relaxed),
         }
     }
 
@@ -266,12 +273,12 @@ impl ReadPoolHandle {
                 running_tasks,
                 pool_size,
                 ..
-            } => running_tasks.get() as usize / *pool_size,
+            } => running_tasks.get() as usize / pool_size.load(Ordering::Relaxed),
             ReadPoolHandle::Tokio {
                 running_tasks,
                 pool_size,
                 ..
-            } => running_tasks.get() as usize / *pool_size,
+            } => running_tasks.get() as usize / pool_size.load(Ordering::Relaxed),
         }
     }
 
@@ -288,13 +295,28 @@ impl ReadPoolHandle {
                 ..
             } => {
                 remote.scale_workers(max_thread_count);
-                *max_tasks = max_tasks
-                    .saturating_div(*pool_size)
+                let max_task_count = max_tasks
+                    .load(Ordering::Relaxed)
+                    .saturating_div(pool_size.load(Ordering::Relaxed))
                     .saturating_mul(max_thread_count);
+                max_tasks.store(max_task_count, Ordering::Relaxed);
                 running_threads.set(max_thread_count as i64);
-                *pool_size = max_thread_count;
+                pool_size.store(max_thread_count, Ordering::Relaxed);
             }
-            ReadPoolHandle::Tokio { .. } => {}
+            ReadPoolHandle::Tokio {
+                handle,
+                max_tasks,
+                pool_size,
+                ..
+            } => {
+                handle.scale_pool_size(max_thread_count);
+                let max_task_count = max_tasks
+                    .load(Ordering::Relaxed)
+                    .saturating_div(pool_size.load(Ordering::Relaxed))
+                    .saturating_mul(max_thread_count);
+                max_tasks.store(max_task_count, Ordering::Relaxed);
+                pool_size.store(max_thread_count, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -361,16 +383,17 @@ pub fn build_yatp_read_pool<E: Engine, R: FlowStatsReporter>(
             destroy_tls_engine::<E>();
         })
         .build_multi_level_pool();
+    let max_tasks = config
+        .max_tasks_per_worker
+        .saturating_mul(config.max_thread_count);
     ReadPool::Yatp {
         pool,
         running_tasks: UNIFIED_READ_POOL_RUNNING_TASKS
             .with_label_values(&[&unified_read_pool_name]),
         running_threads: UNIFIED_READ_POOL_RUNNING_THREADS
             .with_label_values(&[&unified_read_pool_name]),
-        max_tasks: config
-            .max_tasks_per_worker
-            .saturating_mul(config.max_thread_count),
-        pool_size: config.max_thread_count,
+        max_tasks: Arc::new(AtomicUsize::new(max_tasks)),
+        pool_size: Arc::new(AtomicUsize::new(config.max_thread_count)),
     }
 }
 
@@ -384,13 +407,15 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
     let ticker = yatp_pool::TickerWrapper::new(ReporterTicker { reporter });
     let raftkv = Arc::new(Mutex::new(engine));
     let props = tikv_util::thread_group::current_properties();
+    let total_thread_count = std::cmp::max(SysQuota::cpu_cores_quota().ceil() as usize, 1);
+    assert!(total_thread_count >= config.max_thread_count);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_name_fn(move || {
             static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
             let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
             format!("{}-{}", thread_name_prefix, id)
         })
-        .worker_threads(config.max_thread_count)
+        .worker_threads(total_thread_count)
         .after_start_wrapper(move || {
             let engine = raftkv.lock().unwrap().clone();
             set_tls_engine(engine);
@@ -441,14 +466,17 @@ pub fn build_tokio_pool<E: Engine, R: FlowStatsReporter>(
         }
     });
 
+    let scalable_runtime =
+        ScalableTokioRuntime::new(runtime, total_thread_count, config.max_thread_count);
+    let max_tasks = config
+        .max_tasks_per_worker
+        .saturating_mul(config.max_thread_count);
     ReadPool::Tokio {
-        runtime,
+        runtime: scalable_runtime,
         running_tasks: UNIFIED_READ_POOL_RUNNING_TASKS
             .with_label_values(&[&unified_read_pool_name]),
-        max_tasks: config
-            .max_tasks_per_worker
-            .saturating_mul(config.max_thread_count),
-        pool_size: config.max_thread_count,
+        max_tasks: Arc::new(AtomicUsize::new(max_tasks)),
+        pool_size: Arc::new(AtomicUsize::new(config.max_thread_count)),
         task_monitor,
         pool_name: unified_read_pool_name,
     }
@@ -510,7 +538,6 @@ impl ReadPoolCpuTimeTracker {
 }
 struct ReadPoolConfigRunner {
     interval: Duration,
-    sender: SyncSender<usize>,
     handle: ReadPoolHandle,
     cpu_time_tracker: ReadPoolCpuTimeTracker,
     process_stats: ProcessStat,
@@ -532,7 +559,6 @@ impl Runnable for ReadPoolConfigRunner {
                     self.handle.scale_pool_size(s);
                     self.core_thread_count = s;
                     self.cur_thread_count = s;
-                    self.notify_pool_size_change(s);
                 }
             }
             Task::AutoAdjust(s) => {
@@ -611,15 +637,7 @@ impl ReadPoolConfigRunner {
 
         if new_thread_count != self.cur_thread_count {
             self.handle.scale_pool_size(new_thread_count);
-            self.notify_pool_size_change(new_thread_count);
             self.cur_thread_count = new_thread_count;
-        }
-    }
-
-    fn notify_pool_size_change(&self, new_thread_count: usize) {
-        // it's unlikely to send failed.
-        if let Err(e) = self.sender.try_send(new_thread_count) {
-            warn!("notify read pool thread count change failed"; "err" => ?e);
         }
     }
 }
@@ -645,7 +663,6 @@ pub struct ReadPoolConfigManager {
 impl ReadPoolConfigManager {
     pub fn new(
         handle: ReadPoolHandle,
-        sender: SyncSender<usize>,
         worker: &Worker,
         thread_count: usize,
         auto_adjust: bool,
@@ -656,7 +673,6 @@ impl ReadPoolConfigManager {
         );
         let runner = ReadPoolConfigRunner {
             interval: READ_POOL_THREAD_CHECK_DURATION,
-            sender,
             handle,
             cpu_time_tracker: ReadPoolCpuTimeTracker::new(&get_unified_read_pool_name()),
             process_stats: ProcessStat::cur_proc_stat().unwrap(),

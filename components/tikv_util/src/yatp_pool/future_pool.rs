@@ -85,6 +85,13 @@ impl FuturePool {
         self.inner.spawn(TrackedFuture::new(future))
     }
 
+    pub fn spawn_untracked<F>(&self, future: F) -> Result<(), Full>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.inner.spawn_untracked(future)
+    }
+
     /// Spawns a future in the pool and returns a handle to the result of the
     /// future.
     ///
@@ -169,6 +176,14 @@ impl PoolInner {
             metrics_handled_task_count.inc();
             metrics_running_task_count.dec();
         });
+        Ok(())
+    }
+
+    fn spawn_untracked<F>(&self, future: F) -> Result<(), Full>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.pool.spawn(future);
         Ok(())
     }
 
@@ -374,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_handle_result() {
-        let pool = Builder::new(DefaultTicker {})
+        let pool = Builder::new(DefaultTicker)
             .thread_count(1, 1, 1)
             .build_future_pool();
 
@@ -385,7 +400,7 @@ mod tests {
 
     #[test]
     fn test_running_task_count() {
-        let pool = Builder::new(DefaultTicker {})
+        let pool = Builder::new(DefaultTicker)
             .name_prefix("future_pool_for_running_task_test") // The name is important
             .thread_count(2, 2, 2)
             .build_future_pool();
@@ -437,7 +452,7 @@ mod tests {
     fn test_full() {
         let (tx, rx) = mpsc::channel();
 
-        let read_pool = Builder::new(DefaultTicker {})
+        let read_pool = Builder::new(DefaultTicker)
             .name_prefix("future_pool_test_full")
             .thread_count(2, 2, 2)
             .max_tasks(4)
@@ -495,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_scale_pool_size() {
-        let pool = Builder::new(DefaultTicker {})
+        let pool = Builder::new(DefaultTicker)
             .thread_count(1, 4, 8)
             .build_future_pool();
 

@@ -7,7 +7,7 @@ use std::{
     fmt::{self, Debug, Formatter},
     mem,
     ops::RangeBounds,
-    sync::{atomic::AtomicU64, Arc, Mutex},
+    sync::Arc,
     time::Duration,
     vec::Drain,
 };
@@ -75,7 +75,10 @@ use crate::{
     store::{
         apply::memtrace::ApplyMemoryTrace,
         cmd_resp::{bind_term, err_resp},
-        metrics::STORE_PROPOSE_SWITCH_MEM_TABLE_COUNTER,
+        metrics::{
+            APPLY_HANDLE_BATCH_COUNT_HISTOGRAM, APPLY_POLL_DURATION_HISTOGRAM,
+            STORE_PROPOSE_SWITCH_MEM_TABLE_COUNTER,
+        },
     },
     RaftRouter, RaftStoreRouter,
 };
@@ -240,14 +243,6 @@ impl ApplyMsgs {
             _ => None,
         }
     }
-}
-
-pub(crate) struct ApplyBatch {
-    pub(crate) applier: Arc<Mutex<Applier>>,
-    pub(crate) msgs: Vec<ApplyMsg>,
-    pub(crate) applying_cnt: Arc<AtomicU64>,
-    pub(crate) send_time: Instant,
-    pub(crate) estimated_size: usize,
 }
 
 /// The Applier of a Region which is responsible for handling committed
@@ -2695,6 +2690,10 @@ pub struct ApplyContext {
     wb: RefCell<WriteBatch>,
     pub(crate) apply_wait: LocalHistogram,
     pub(crate) apply_time: LocalHistogram,
+    pub(crate) fut_handle_batch_count: LocalHistogram,
+    pub(crate) future_exec_dur: LocalHistogram,
+    // a counter used for flushing local metrics.
+    pub(crate) handle_counter: u64,
     pub(crate) observer: Option<Box<dyn ApplyObserver>>,
     pub(crate) coprocessor_host: Option<CoprocessorHost<kvengine::Engine>>,
     pub(crate) cmd_batch: Vec<CmdBatch>,
@@ -2714,6 +2713,9 @@ impl ApplyContext {
             wb: RefCell::new(WriteBatch::default()),
             apply_wait: APPLY_TASK_WAIT_TIME_HISTOGRAM.local(),
             apply_time: APPLY_TIME_HISTOGRAM.local(),
+            fut_handle_batch_count: APPLY_HANDLE_BATCH_COUNT_HISTOGRAM.local(),
+            future_exec_dur: APPLY_POLL_DURATION_HISTOGRAM.local(),
+            handle_counter: 0,
             observer: None,
             coprocessor_host,
             cmd_batch: vec![],
@@ -2754,6 +2756,17 @@ impl ApplyContext {
             if let Err(err) = router.peer_sender.send((region_id, msg)) {
                 warn!("send apply result error {:?}", err);
             }
+        }
+    }
+
+    pub(crate) fn maybe_flush_metrics(&mut self) {
+        self.handle_counter += 1;
+        if self.handle_counter >= 128 {
+            self.handle_counter = 0;
+            self.apply_wait.flush();
+            self.apply_time.flush();
+            self.fut_handle_batch_count.flush();
+            self.future_exec_dur.flush();
         }
     }
 }

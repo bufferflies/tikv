@@ -16,10 +16,9 @@ use regex::Regex;
 use tikv_util::{
     config::{self, ReadableDuration, ReadableSize, VersionTrack},
     sys::SysQuota,
-    worker::Scheduler,
 };
 
-use super::{snap::Task as SnapTask, Result};
+use super::Result;
 use crate::server::metrics::{GRPC_COMPRESSION_TYPE_FOR_MSG, GRPC_COMPRESSION_TYPE_FOR_RAFT};
 pub use crate::storage::config::Config as StorageConfig;
 
@@ -167,8 +166,12 @@ pub struct Config {
     pub grpc_keepalive_timeout: ReadableDuration,
     // When the coprocessor response reached this value, we update paging_size to return early.
     pub cop_max_resp_size: ReadableSize,
+    // Deprecated for nextgen.
+    #[online_config(skip)]
     /// How many snapshots can be sent concurrently.
     pub concurrent_send_snap_limit: usize,
+    // Deprecated for nextgen.
+    #[online_config(skip)]
     /// How many snapshots can be recv concurrently.
     pub concurrent_recv_snap_limit: usize,
     #[online_config(skip)]
@@ -188,7 +191,9 @@ pub struct Config {
     #[serde(with = "perf_level_serde")]
     #[online_config(skip)]
     pub end_point_perf_level: PerfLevel,
+    // Deprecated for next-gen
     pub snap_max_write_bytes_per_sec: ReadableSize,
+    // Deprecated for next-gen
     pub snap_max_total_size: ReadableSize,
     #[online_config(skip)]
     pub stats_concurrency: usize,
@@ -468,9 +473,10 @@ impl Config {
 }
 
 pub struct ServerConfigManager {
-    tx: Scheduler<SnapTask>,
     config: Arc<VersionTrack<Config>>,
     grpc_mem_quota: ResourceQuota,
+    // for handling `cop_max_resp_size`
+    copr_config_manager: Box<dyn ConfigManager>,
 }
 
 unsafe impl Send for ServerConfigManager {}
@@ -478,14 +484,14 @@ unsafe impl Sync for ServerConfigManager {}
 
 impl ServerConfigManager {
     pub fn new(
-        tx: Scheduler<SnapTask>,
         config: Arc<VersionTrack<Config>>,
         grpc_mem_quota: ResourceQuota,
+        copr_config_manager: Box<dyn ConfigManager>,
     ) -> ServerConfigManager {
         ServerConfigManager {
-            tx,
             config,
             grpc_mem_quota,
+            copr_config_manager,
         }
     }
 }
@@ -503,8 +509,10 @@ impl ConfigManager for ServerConfigManager {
                     .clone()
                     .resize_memory(mem_quota.0 as usize);
             }
-            if let Err(e) = self.tx.schedule(SnapTask::RefreshConfigEvent) {
-                error!("server configuration manager schedule refresh snapshot work task failed"; "err"=> ?e);
+
+            // Dispatch coprocessor config.
+            if let Err(e) = self.copr_config_manager.dispatch(c.clone()) {
+                error!("server configuration manager fails to update coprocessor config"; "err"=> ?e);
             }
         }
         info!("server configuration changed"; "change" => ?c);

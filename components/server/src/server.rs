@@ -102,7 +102,6 @@ use tikv::{
     },
     storage::{
         self,
-        config_manager::StorageConfigManger,
         mvcc::MvccConsistencyCheckObserver,
         txn::flow_controller::{EngineFlowController, FlowController},
         Engine,
@@ -691,7 +690,6 @@ where
         )));
         let mut gc_worker = self.init_gc_worker();
         let mut ttl_checker = Box::new(LazyWorker::new("ttl-checker"));
-        let ttl_scheduler = ttl_checker.scheduler();
 
         let cfg_controller = self.cfg_controller.as_mut().unwrap();
 
@@ -820,17 +818,6 @@ where
             self.causal_ts_provider.clone(),
         )
         .unwrap_or_else(|e| fatal!("failed to create raft storage: {}", e));
-        cfg_controller.register(
-            tikv::config::Module::Storage,
-            Box::new(StorageConfigManger::new(
-                self.tablet_factory.as_ref().unwrap().clone(),
-                self.config.storage.block_cache.shared,
-                ttl_scheduler,
-                flow_controller,
-                storage.get_scheduler(),
-                storage.get_concurrency_manager(),
-            )),
-        );
 
         let (resolver, state) = resolve::new_resolver(
             self.pd_client.clone(),
@@ -877,20 +864,16 @@ where
             cop_read_pools.handle()
         };
 
-        let mut unified_read_pool_scale_receiver = None;
         if self.config.readpool.is_unified_pool_enabled() {
-            let (unified_read_pool_scale_notifier, rx) = mpsc::sync_channel(10);
             cfg_controller.register(
                 tikv::config::Module::Readpool,
                 Box::new(ReadPoolConfigManager::new(
                     unified_read_pool.as_ref().unwrap().handle(),
-                    unified_read_pool_scale_notifier,
                     &self.background_worker,
                     self.config.readpool.unified.max_thread_count,
                     self.config.readpool.unified.auto_adjust_pool_size,
                 )),
             );
-            unified_read_pool_scale_receiver = Some(rx);
         }
 
         // Register cdc.
@@ -958,21 +941,25 @@ where
             .unwrap_or_else(|e| fatal!("failed to bootstrap node id: {}", e));
 
         self.snap_mgr = Some(snap_mgr.clone());
+
+        let copr = coprocessor::Endpoint::new(
+            &server_config.value(),
+            cop_read_pool_handle,
+            self.concurrency_manager.clone(),
+            resource_tag_factory,
+            Arc::clone(&self.quota_limiter),
+            None,
+            self.security_mgr.clone(),
+        );
+        let copr_cfg_mgr = copr.config_manager();
+
         // Create server
         let server = Server::new(
             node.id(),
             &server_config,
             &self.security_mgr,
             storage,
-            coprocessor::Endpoint::new(
-                &server_config.value(),
-                cop_read_pool_handle,
-                self.concurrency_manager.clone(),
-                resource_tag_factory,
-                Arc::clone(&self.quota_limiter),
-                None,
-                self.security_mgr.clone(),
-            ),
+            copr,
             coprocessor_v2::Endpoint::new(&self.config.coprocessor_v2),
             self.resolver.clone().unwrap(),
             snap_mgr.clone(),
@@ -987,9 +974,9 @@ where
         cfg_controller.register(
             tikv::config::Module::Server,
             Box::new(ServerConfigManager::new(
-                server.get_snap_worker_scheduler(),
                 server_config.clone(),
                 server.get_grpc_mem_quota().clone(),
+                copr_cfg_mgr,
             )),
         );
 
@@ -1086,7 +1073,7 @@ where
             split_config_manager,
             self.config.server.grpc_concurrency,
             self.config.readpool.unified.max_thread_count,
-            unified_read_pool_scale_receiver,
+            None,
         );
 
         // `ConsistencyCheckObserver` must be registered before `Node::start`.

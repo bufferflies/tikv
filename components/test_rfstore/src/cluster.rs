@@ -28,8 +28,10 @@ use raft::eraftpb::ConfChangeType;
 use rfstore::{
     router::{RaftRouter, RaftStoreRouter},
     store::{
-        bootstrap_store, initial_region, load_apply_state, load_last_peer_state,
-        load_last_raft_state, load_raft_truncated_state, prepare_bootstrap_cluster,
+        bootstrap_store,
+        config_manager::RfstoreConfigManager,
+        initial_region, load_apply_state, load_last_peer_state, load_last_raft_state,
+        load_raft_truncated_state, prepare_bootstrap_cluster,
         state::{RaftApplyState, RaftState, RaftTruncatedState},
         transport::CasualRouter,
         Callback, CasualMessage, Engines, RaftBatchSystem, StoreMeta, StoreMsg, WriteResponse,
@@ -48,6 +50,7 @@ use test_raftstore::{
 };
 use tikv::config::TikvConfig;
 use tikv_util::{
+    config::VersionTrack,
     debug, error, safe_panic,
     store::new_peer,
     thread_group::GroupProperties,
@@ -79,6 +82,7 @@ pub trait Simulator {
         system: RaftBatchSystem,
     ) -> ServerResult<u64>;
     fn stop_node(&mut self, node_id: u64);
+    fn get_rfstore_config_manager(&mut self, node_id: u64) -> RfstoreConfigManager;
     fn get_node_ids(&self) -> HashSet<u64>;
     fn async_command_on_node(
         &self,
@@ -154,6 +158,7 @@ pub struct Cluster<T: Simulator> {
     pub engines: HashMap<u64, Engines>,
     pub engine_dirs: HashMap<u64, TempDir>,
     pub closed_engines: HashSet<u64>,
+    pub raft_cfg_mgrs: HashMap<u64, RfstoreConfigManager>,
     // key_managers_map: HashMap<u64, Option<Arc<DataKeyManager>>>,
     pub labels: HashMap<u64, HashMap<String, String>>,
     group_props: HashMap<u64, GroupProperties>,
@@ -170,7 +175,7 @@ impl<T: Simulator> Cluster<T> {
         sim: Arc<RwLock<T>>,
         pd_client: Arc<TestPdClient>,
     ) -> Cluster<T> {
-        let mut cfg = Config::new(TikvConfig::default(), true);
+        let mut cfg: Config = Config::new(TikvConfig::default(), true);
         let cfg_path = cfg.tikv.cfg_path;
         cfg.tikv = new_test_config(cfg.cfg_dir.as_ref().unwrap().path(), id, count, 1.0);
         cfg.tikv.cfg_path = cfg_path;
@@ -193,6 +198,7 @@ impl<T: Simulator> Cluster<T> {
             io_rate_limiter,
             engines: HashMap::default(),
             closed_engines: HashSet::default(),
+            raft_cfg_mgrs: HashMap::default(),
             engine_dirs: HashMap::default(),
             labels: HashMap::default(),
             group_props: HashMap::default(),
@@ -257,13 +263,26 @@ impl<T: Simulator> Cluster<T> {
             self.run_node(node_id)?;
         }
 
+        // copy coprocessor config to workaround borrow-checker.
+        let copr_cfg = self.cfg.coprocessor.clone();
+        self.cfg
+            .raft_store
+            .validate(
+                copr_cfg.region_split_size,
+                copr_cfg.region_split_keys,
+                copr_cfg.enable_region_bucket,
+                copr_cfg.region_bucket_size,
+            )
+            .unwrap();
+
         // Try start new nodes.
         for _ in 0..self.count - self.engines.len() {
             let (engines, dir) = self.create_engine();
             // let key_mgr = self.key_managers.last().unwrap().clone();
 
             // Initialize raftstore channels.
-            let system = RaftBatchSystem::new(&engines, &self.cfg.raft_store);
+            let conf = Arc::new(VersionTrack::new(self.cfg.raft_store.clone()));
+            let system = RaftBatchSystem::new(&engines, conf);
             let router = system.router();
 
             let store_meta = StoreMeta::new(PENDING_MSG_CAP);
@@ -338,8 +357,20 @@ impl<T: Simulator> Cluster<T> {
         let engines = self.engines[&node_id].clone();
         // let key_mgr = self.key_managers_map[&node_id].clone();
 
+        // copy coprocessor config to workaround borrow-checker.
+        let copr_cfg = self.cfg.coprocessor.clone();
+        self.cfg
+            .raft_store
+            .validate(
+                copr_cfg.region_split_size,
+                copr_cfg.region_split_keys,
+                copr_cfg.enable_region_bucket,
+                copr_cfg.region_bucket_size,
+            )
+            .unwrap();
         // Initialize raftstore channels.
-        let system = RaftBatchSystem::new(&engines, &self.cfg.raft_store);
+        let conf = Arc::new(VersionTrack::new(self.cfg.raft_store.clone()));
+        let system = RaftBatchSystem::new(&engines, conf);
         let router = system.router();
 
         let mut cfg = self.cfg.clone();
@@ -355,6 +386,8 @@ impl<T: Simulator> Cluster<T> {
         self.sim
             .wl()
             .run_node(node_id, cfg, engines, store_meta, router, system)?;
+        let raft_cfg_mgr = self.sim.wl().get_rfstore_config_manager(node_id);
+        self.raft_cfg_mgrs.insert(node_id, raft_cfg_mgr);
         debug!("node {} started", node_id);
         Ok(())
     }
@@ -371,6 +404,7 @@ impl<T: Simulator> Cluster<T> {
         // NOTE: we do not close engines here because some test cases need to read
         // from engines after node is stop, so we postpone this action at run_node.
         self.closed_engines.insert(node_id);
+        self.raft_cfg_mgrs.remove(&node_id);
     }
 
     pub fn get_engine(&self, node_id: u64) -> kvengine::Engine {
@@ -379,6 +413,13 @@ impl<T: Simulator> Cluster<T> {
 
     pub fn get_raft_engine(&self, node_id: u64) -> rfengine::RfEngine {
         self.engines[&node_id].raft.clone()
+    }
+
+    pub fn mut_rfstore_config_manager(
+        &mut self,
+        node_id: u64,
+    ) -> Option<&mut RfstoreConfigManager> {
+        self.raft_cfg_mgrs.get_mut(&node_id)
     }
 
     pub fn get_all_engines(&self, node_id: u64) -> Engines {

@@ -139,6 +139,18 @@ impl SchedulerPool {
             }
         }
     }
+
+    pub fn scale_pool_size(&self, new_size: usize) {
+        match self {
+            SchedulerPool::Separated(SchedPool::Tokio { handle, .. }) => {
+                handle.scale_pool_size(new_size)
+            }
+            SchedulerPool::Separated(SchedPool::Yatp { pool }) => pool.scale_pool_size(new_size),
+            SchedulerPool::Merged(_) => {
+                warn!("cannot scale merged scheduler pool size, ignored.");
+            }
+        }
+    }
 }
 
 /// Task is a running command.
@@ -461,6 +473,10 @@ impl<L: LockManager> SchedulerInner<L> {
         self.lock_mgr.dump_wait_for_entries(cb);
     }
 
+    fn scale_pool_size(&self, pool_size: usize) {
+        self.worker_pool.scale_pool_size(pool_size);
+    }
+
     /// Spawn a task in the background pool with monitoring
     fn spawn_background<F>(&self, f: F)
     where
@@ -580,6 +596,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
 
     pub fn dump_wait_for_entries(&self, cb: waiter_manager::Callback) {
         self.inner.dump_wait_for_entries(cb);
+    }
+
+    pub fn scale_pool_size(&self, pool_size: usize) {
+        self.inner.scale_pool_size(pool_size);
     }
 
     pub(in crate::storage) fn run_cmd(&self, cmd: Command, callback: StorageCallback) {

@@ -12,14 +12,17 @@ use crate::store::SplitCheckTask;
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
+    // Deprecated in next-gen.
     /// When it is true, it will try to split a region with table prefix if
     /// that region crosses tables.
     pub split_region_on_table: bool,
 
+    // Deprecated in next-gen.
     /// For once split check, there are several split_key produced for batch.
     /// batch_split_limit limits the number of produced split-key for one batch.
     pub batch_split_limit: u64,
 
+    // Deprecated in next-gen.
     /// When region [a,e) size meets region_max_size, it will be split into
     /// several regions [a,b), [b,c), [c,d), [d,e). And the size of [a,b),
     /// [b,c), [c,d) will be region_split_size (maybe a little larger).
@@ -27,6 +30,7 @@ pub struct Config {
     pub region_max_size: Option<ReadableSize>,
     pub region_split_size: ReadableSize,
 
+    // Deprecated in next-gen.
     /// When the number of keys in region [a,e) meets the region_max_keys,
     /// it will be split into two several regions [a,b), [b,c), [c,d), [d,e).
     /// And the number of keys in [a,b), [b,c), [c,d) will be region_split_keys.
@@ -48,10 +52,13 @@ pub struct Config {
     // enable subsplit ranges (aka bucket) within the region
     pub enable_region_bucket: bool,
     pub region_bucket_size: ReadableSize,
+    // Deprecated in next-gen.
     // region size threshold for using approximate size instead of scan
     pub region_size_threshold_for_approximate: ReadableSize,
+    // Deprecated in next-gen.
     #[online_config(skip)]
     pub prefer_approximate_bucket: bool,
+    // Deprecated in next-gen.
     // ratio of region_bucket_size. (0, 0.5)
     // The region_bucket_merge_size_ratio * region_bucket_size is threshold to merge with its left
     // neighbor bucket

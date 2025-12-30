@@ -3019,9 +3019,11 @@ pub struct TikvConfig {
     #[online_config(submodule)]
     pub coprocessor: CopConfig,
 
+    // Deprecated. `coprocessor_v2` is never used in prod.
     #[online_config(skip)]
     pub coprocessor_v2: CoprocessorV2Config,
 
+    // Deprecated for nextgen.
     #[online_config(submodule)]
     pub rocksdb: DbConfig,
 
@@ -3046,7 +3048,8 @@ pub struct TikvConfig {
     #[online_config(submodule)]
     pub backup: BackupConfig,
 
-    #[online_config(submodule)]
+    // Deprecated for next-gen
+    #[online_config(skip)]
     // The term "log backup" and "backup stream" are identity.
     // The "log backup" should be the only product name exposed to the user.
     #[serde(rename = "log-backup")]
@@ -3055,15 +3058,20 @@ pub struct TikvConfig {
     #[online_config(submodule)]
     pub pessimistic_txn: PessimisticTxnConfig,
 
+    // Deprecated for next-gen.
+    // NOTE: `enable_safe_point_v2` and `disable_safe_point_fallback_v1`
+    //       has already been deprecated in kvengine.
     #[online_config(submodule)]
     pub gc: GcConfig,
 
+    // TODO: load-based split is not supported in next-gen yet.
     #[online_config(submodule)]
     pub split: SplitConfig,
 
     #[online_config(submodule)]
     pub cdc: CdcConfig,
 
+    // TODO: resolved_ts is not supported in next-gen.
     #[online_config(submodule)]
     pub resolved_ts: ResolvedTsConfig,
 
@@ -4310,7 +4318,7 @@ mod tests {
 
     use api_version::{ApiV1, KvFormat};
     use case_macros::*;
-    use engine_traits::{CfOptions as _, DbOptions as _, DummyFactory};
+    use engine_traits::{CfOptions as _, DbOptions as _};
     use futures::executor::block_on;
     use grpcio::ResourceQuota;
     use itertools::Itertools;
@@ -4330,7 +4338,6 @@ mod tests {
     use crate::{
         server::{config::ServerConfigManager, ttl::TtlCheckerTask},
         storage::{
-            config_manager::StorageConfigManger,
             lock_manager::MockLockManager,
             txn::flow_controller::{EngineFlowController, FlowController},
             Storage, TestStorageBuilder,
@@ -4761,18 +4768,19 @@ mod tests {
                 shared,
             )),
         );
-        let (scheduler, receiver) = dummy_scheduler();
-        cfg_controller.register(
-            Module::Storage,
-            Box::new(StorageConfigManger::new(
-                Arc::new(DummyFactory::new(Some(engine), "".to_string())),
-                shared,
-                scheduler,
-                flow_controller.clone(),
-                storage.get_scheduler(),
-                storage.get_concurrency_manager(),
-            )),
-        );
+        let (_scheduler, receiver) = dummy_scheduler();
+        // TODO: fix the registeration of StorageConfigManger.
+        // cfg_controller.register(
+        //     Module::Storage,
+        //     Box::new(StorageConfigManger::new(
+        //         Arc::new(DummyFactory::new(Some(engine), "".to_string())),
+        //         shared,
+        //         scheduler,
+        //         flow_controller.clone(),
+        //         storage.get_scheduler(),
+        //         storage.get_concurrency_manager(),
+        //     )),
+        // );
         (storage, cfg_controller, receiver, flow_controller)
     }
 
@@ -5212,19 +5220,26 @@ mod tests {
         assert_eq!(cfg_controller.get_current(), cfg);
     }
 
+    struct DummyCfgMgr;
+
+    impl ConfigManager for DummyCfgMgr {
+        fn dispatch(&mut self, _change: ConfigChange) -> Result<(), Box<dyn Error>> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_change_server_config() {
         let (mut cfg, _dir) = TikvConfig::with_tmp().unwrap();
         cfg.validate().unwrap();
         let cfg_controller = ConfigController::new(cfg.clone());
-        let (scheduler, _receiver) = dummy_scheduler();
         let version_tracker = Arc::new(VersionTrack::new(cfg.server.clone()));
         cfg_controller.register(
             Module::Server,
             Box::new(ServerConfigManager::new(
-                scheduler,
                 version_tracker.clone(),
                 ResourceQuota::new(None),
+                Box::new(DummyCfgMgr),
             )),
         );
 

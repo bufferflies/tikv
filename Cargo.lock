@@ -1566,7 +1566,7 @@ dependencies = [
  "kvproto",
  "lazy_static",
  "log_wrappers",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "pd_client",
  "prometheus",
  "prometheus-static-metric",
@@ -2072,7 +2072,7 @@ dependencies = [
  "lazy_static",
  "mockall",
  "online_config",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "pd_client",
  "prometheus",
  "rand 0.8.5",
@@ -2634,7 +2634,7 @@ checksum = "c0834a35a3fce649144119e18da2a4d8ed12ef3862f47183fd46f625d072d96c"
 dependencies = [
  "cfg-if 1.0.0",
  "num_cpus",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
 ]
 
 [[package]]
@@ -2648,7 +2648,7 @@ dependencies = [
  "hashbrown 0.14.3",
  "lock_api",
  "once_cell",
- "parking_lot_core 0.9.10",
+ "parking_lot_core 0.9.12",
 ]
 
 [[package]]
@@ -3300,7 +3300,7 @@ dependencies = [
  "maligned",
  "online_config",
  "openssl",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "prometheus",
  "prometheus-static-metric",
  "rand 0.8.5",
@@ -4113,7 +4113,7 @@ dependencies = [
  "once_cell",
  "openssl",
  "openssl-sys",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "tokio",
  "tokio-openssl",
  "tower-layer",
@@ -4523,7 +4523,7 @@ dependencies = [
  "json-patch",
  "k8s-openapi",
  "kube-client",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "pin-project",
  "serde",
  "serde_json",
@@ -4891,11 +4891,10 @@ dependencies = [
 
 [[package]]
 name = "lock_api"
-version = "0.4.12"
+version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07af8b9cdd281b7915f413fa73f29ebd5d55d0d3f0155584dade1ff18cea1b17"
+checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
 dependencies = [
- "autocfg",
  "scopeguard",
 ]
 
@@ -5275,7 +5274,7 @@ dependencies = [
  "futures-util",
  "num_cpus",
  "once_cell",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "quanta",
  "rustc_version 0.4.0",
  "scheduled-thread-pool",
@@ -5921,12 +5920,12 @@ dependencies = [
 
 [[package]]
 name = "parking_lot"
-version = "0.12.0"
+version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87f5ec2493a61ac0506c0f4199f99070cbe83857b0337006a30f3e6719b8ef58"
+checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
 dependencies = [
  "lock_api",
- "parking_lot_core 0.9.10",
+ "parking_lot_core 0.9.12",
 ]
 
 [[package]]
@@ -5945,15 +5944,15 @@ dependencies = [
 
 [[package]]
 name = "parking_lot_core"
-version = "0.9.10"
+version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e401f977ab385c9e4e3ab30627d6f26d00e2c73eef317493c4ec6d468726cf8"
+checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
 dependencies = [
  "cfg-if 1.0.0",
  "libc 0.2.172",
  "redox_syscall 0.5.7",
  "smallvec",
- "windows-targets 0.52.6",
+ "windows-link",
 ]
 
 [[package]]
@@ -6272,7 +6271,7 @@ dependencies = [
  "log",
  "nix 0.26.4",
  "once_cell",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "protobuf",
  "protobuf-codegen-pure",
  "smallvec",
@@ -6660,7 +6659,7 @@ dependencies = [
  "ahash 0.8.11",
  "equivalent",
  "hashbrown 0.14.3",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
 ]
 
 [[package]]
@@ -6708,7 +6707,7 @@ dependencies = [
  "nix 0.25.1",
  "num-derive",
  "num-traits",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "prometheus",
  "prometheus-static-metric",
  "protobuf",
@@ -6804,7 +6803,7 @@ dependencies = [
  "openssl",
  "ordered-float",
  "panic_hook",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "pd_client",
  "prometheus",
  "prometheus-static-metric",
@@ -7394,6 +7393,7 @@ dependencies = [
  "memory_trace_macros",
  "online_config",
  "pd_client",
+ "pin-project",
  "prometheus",
  "prometheus-static-metric",
  "protobuf",
@@ -7864,7 +7864,7 @@ version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3cbc66816425a074528352f5789333ecff06ca41b36b0b0efdfbb29edc391a19"
 dependencies = [
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
 ]
 
 [[package]]
@@ -8238,7 +8238,7 @@ dependencies = [
  "futures 0.3.28",
  "log",
  "once_cell",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "scc",
  "serial_test_derive",
 ]
@@ -9859,7 +9859,7 @@ dependencies = [
  "openssl",
  "overload_protector",
  "panic_hook",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "paste",
  "pd_client",
  "pin-project",
@@ -10161,7 +10161,7 @@ dependencies = [
  "openssl",
  "page_size",
  "panic_hook",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "pin-project",
  "procfs",
  "procinfo",
@@ -10291,7 +10291,7 @@ dependencies = [
  "memchr",
  "mio 0.8.11",
  "num_cpus",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -10726,7 +10726,7 @@ dependencies = [
  "crossbeam-utils 0.8.8",
  "kvproto",
  "lazy_static",
- "parking_lot 0.12.0",
+ "parking_lot 0.12.5",
  "pin-project",
  "prometheus",
  "slab",
@@ -11256,6 +11256,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-link"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
 name = "windows-sys"
 version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11557,7 +11563,7 @@ dependencies = [
  "fail 0.5.0",
  "lazy_static",
  "num_cpus",
- "parking_lot_core 0.9.10",
+ "parking_lot_core 0.9.12",
  "prometheus",
  "rand 0.8.5",
 ]

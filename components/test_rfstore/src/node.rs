@@ -13,7 +13,10 @@ use kvproto::{raft_cmdpb::*, raft_serverpb::RaftMessage};
 use raftstore::coprocessor::CoprocessorHost;
 use rfstore::{
     router::{LocalReadRouter, RaftStoreRouter},
-    store::{Callback, Engines, LocalReader, RaftBatchSystem, StoreMeta, StoreMsg, Transport},
+    store::{
+        config_manager::RfstoreConfigManager, Callback, Engines, LocalReader, RaftBatchSystem,
+        StoreMeta, StoreMsg, Transport,
+    },
     Error as RaftError, RaftRouter, Result, ServerRaftStoreRouter,
 };
 use sst_importer::SstImporter;
@@ -21,7 +24,6 @@ use test_pd_client::TestPdClient;
 use test_raftstore::Config;
 use tikv_util::{
     box_err,
-    config::VersionTrack,
     time::ThreadReadId,
     worker::{Builder as WorkerBuilder, LazyWorker},
 };
@@ -118,16 +120,8 @@ impl Simulator for NodeCluster {
                 cfg.coprocessor.region_bucket_size,
             )
             .unwrap();
-        let store_cfg_tracker = Arc::new(VersionTrack::new(rf_store_cfg));
 
-        let mut node = Node::new(
-            system,
-            &cfg.server,
-            store_cfg_tracker.clone(),
-            self.pd_client.clone(),
-            bg_worker,
-            "",
-        );
+        let mut node = Node::new(system, &cfg.server, self.pd_client.clone(), bg_worker, "");
         node.try_bootstrap_store(engines.clone())
             .unwrap_or_else(|e| panic!("failed to bootstrap node id: {}", e));
 
@@ -182,6 +176,15 @@ impl Simulator for NodeCluster {
         }
         self.trans.routers.lock().unwrap().remove(&node_id).unwrap();
     }
+
+    fn get_rfstore_config_manager(&mut self, node_id: u64) -> RfstoreConfigManager {
+        self.nodes
+            .get_mut(&node_id)
+            .unwrap()
+            .mut_raft_batch_system()
+            .get_rfstore_config_manager()
+    }
+
     fn get_node_ids(&self) -> HashSet<u64> {
         self.nodes.keys().cloned().collect()
     }

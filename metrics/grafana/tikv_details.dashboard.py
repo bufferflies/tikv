@@ -2597,6 +2597,47 @@ def RaftProcess() -> RowPanel:
             ),
         ]
     )
+    layout.row(
+        [
+            graph_panel(
+                title="Apply Poll Handle Duration",
+                description="The duration of each apply future task running in one round",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                targets=[
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "tikv_rfstore_apply_running_duration_secs",
+                            by_labels=["instance"],
+                        ),
+                        legend_format="{{instance}}-P99",
+                    )
+                ],
+            ),
+            graph_panel(
+                title="Apply Poll Handle Batch Count",
+                description="The number of apply batch a apply future task handles",
+                yaxes=yaxes(left_format=UNITS.SHORT),
+                targets=[
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "tikv_rfstore_apply_handle_msgs_batch_number",
+                            by_labels=["instance"],
+                        ),
+                        legend_format="{{instance}}-P99",
+                    ),
+                    target(
+                        expr=expr_histogram_avg(
+                            "tikv_rfstore_apply_handle_msgs_batch_number",
+                            by_labels=["instance"],
+                        ),
+                        legend_format="{{instance}}-avg",
+                    ),
+                ],
+            ),
+        ]
+    )
     return layout.row_panel
 
 

@@ -710,7 +710,7 @@ mod tests {
         // test Yatp
         let get_name_fn = get_name.clone();
         block_on(
-            YatpPoolBuilder::new(DefaultTicker {})
+            YatpPoolBuilder::new(DefaultTicker)
                 .name_prefix(thread_name)
                 .after_start(|| {})
                 .before_stop(|| {})

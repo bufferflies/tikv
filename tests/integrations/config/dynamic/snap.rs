@@ -6,7 +6,7 @@ use std::{
 };
 
 use engine_rocks::RocksEngine;
-use grpcio::{EnvBuilder, ResourceQuota};
+use grpcio::EnvBuilder;
 use raft_log_engine::RaftLogEngine;
 use raftstore::store::{fsm::create_raft_batch_system, SnapManager};
 use security::SecurityManager;
@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use tikv::{
     config::{ConfigController, TikvConfig},
     server::{
-        config::{Config as ServerConfig, ServerConfigManager},
+        config::Config as ServerConfig,
         raftkv::RaftRouterWrap,
         snap::{Runner as SnapHandler, Task as SnapTask},
     },
@@ -49,17 +49,19 @@ fn start_server(
         &TikvConfig::compatible_adjust_to_raftstore(&cfg.raft_store),
     );
     let mut snap_worker = Worker::new("snap-handler").lazy_build("snap-handler");
-    let snap_worker_scheduler = snap_worker.scheduler();
+    // let snap_worker_scheduler = snap_worker.scheduler();
     let server_config = Arc::new(VersionTrack::new(cfg.server.clone()));
     let cfg_controller = ConfigController::new(cfg);
-    cfg_controller.register(
-        tikv::config::Module::Server,
-        Box::new(ServerConfigManager::new(
-            snap_worker_scheduler,
-            server_config.clone(),
-            ResourceQuota::new(None),
-        )),
-    );
+    // TODO: register ServerConfigManager once we want to test this module.
+    // cfg_controller.register(
+    //     tikv::config::Module::Server,
+    //     Box::new(tikv::server::config::ServerConfigManager::new(
+    //         snap_worker_scheduler,
+    //         server_config.clone(),
+    //         grpcio::ResourceQuota::new(None),
+    //         None,
+    //     )),
+    // );
     let snap_runner = SnapHandler::new(
         Arc::clone(&env),
         snap_mgr.clone(),

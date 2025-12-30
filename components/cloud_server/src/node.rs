@@ -17,10 +17,7 @@ use raftstore::{
 };
 use resource_metering::ResourceTagFactory;
 use rfstore::{
-    store::{
-        self, store_fsm::StoreMeta, Config as StoreConfig, Engines, PdTask, RaftBatchSystem,
-        Transport,
-    },
+    store::{self, store_fsm::StoreMeta, Engines, PdTask, RaftBatchSystem, Transport},
     RaftRouter,
 };
 use tikv::{
@@ -33,7 +30,6 @@ use tikv::{
     },
 };
 use tikv_util::{
-    config::VersionTrack,
     quota_limiter::QuotaLimiter,
     worker::{LazyWorker, Worker},
 };
@@ -82,7 +78,6 @@ pub fn create_raft_storage<R: FlowStatsReporter, F: KvFormat>(
 pub struct Node {
     cluster_id: u64,
     store: metapb::Store,
-    store_cfg: Arc<VersionTrack<StoreConfig>>,
     system: RaftBatchSystem,
     has_started: bool,
 
@@ -95,7 +90,6 @@ impl Node {
     pub fn new(
         system: RaftBatchSystem,
         cfg: &ServerConfig,
-        store_cfg: Arc<VersionTrack<StoreConfig>>,
         pd_client: Arc<dyn PdClient>,
         bg_worker: Worker,
         version: &str,
@@ -139,7 +133,6 @@ impl Node {
         Node {
             cluster_id: cfg.cluster_id,
             store,
-            store_cfg,
             pd_client,
             system,
             has_started: false,
@@ -218,6 +211,10 @@ impl Node {
 
     pub fn get_router(&self) -> RaftRouter {
         self.system.router()
+    }
+
+    pub fn mut_raft_batch_system(&mut self) -> &mut RaftBatchSystem {
+        &mut self.system
     }
 
     // check store, return store id for the engine.
@@ -383,13 +380,11 @@ impl Node {
             return Err(box_err!("{} is already started", store_id));
         }
         self.has_started = true;
-        let cfg = self.store_cfg.clone();
         let pd_client = Arc::clone(&self.pd_client);
         let store = self.store.clone();
 
         self.system.spawn(
             store,
-            cfg,
             engines,
             trans,
             pd_client,

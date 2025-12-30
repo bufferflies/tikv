@@ -48,6 +48,7 @@ use tikv_util::{
     sys::{get_global_memory_usage, record_global_memory_usage, thread::ThreadBuildWrapper},
     timer::GLOBAL_TIMER_HANDLE,
     worker::Scheduler,
+    yatp_pool::ScalableTokioRuntime,
     Either,
 };
 use tokio::runtime::{Builder as RuntimeBuilder, Handle as RuntimeHandle, Runtime};
@@ -136,6 +137,7 @@ pub struct Server<T: RaftStoreRouter + 'static, S: StoreAddrResolver + 'static> 
     ///
     /// If the listening port is configured, the server will be started lazily.
     builder_or_server: Option<Either<ServerBuilder, GrpcServer>>,
+    grpc_mem_quota: ResourceQuota,
     local_addr: SocketAddr,
     // Transport.
     trans: ServerTransport<T, S>,
@@ -146,7 +148,7 @@ pub struct Server<T: RaftStoreRouter + 'static, S: StoreAddrResolver + 'static> 
     grpc_thread_load: Arc<ThreadLoadPool>,
     read_pool: Option<ReadPool>,
     debug_thread_pool: Arc<Runtime>,
-    scheduler_runtime: Option<Runtime>,
+    scheduler_runtime: Option<ScalableTokioRuntime>,
     health_service: HealthService,
     timer: Handle,
 }
@@ -166,7 +168,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         read_pool: ReadPool,
         debug_thread_pool: Arc<Runtime>,
         check_leader_scheduler: Scheduler<CheckLeaderTask>,
-        scheduler_runtime: Option<Runtime>,
+        scheduler_runtime: Option<ScalableTokioRuntime>,
     ) -> Result<Self> {
         // A helper thread (or pool) for transport layer.
         let stats_pool = if cfg.value().stats_concurrency > 0 {
@@ -206,7 +208,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             .stream_initial_window_size(cfg.value().grpc_stream_initial_window_size.0 as i32)
             .max_concurrent_stream(cfg.value().grpc_concurrent_stream)
             .max_receive_message_len(-1)
-            .set_resource_quota(mem_quota)
+            .set_resource_quota(mem_quota.clone())
             .max_send_message_len(-1)
             .http2_max_ping_strikes(i32::MAX) // For pings without data from clients.
             .keepalive_time(cfg.value().grpc_keepalive_time.into())
@@ -240,6 +242,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         let svr = Server {
             env: Arc::clone(&env),
             builder_or_server: Some(builder),
+            grpc_mem_quota: mem_quota,
             local_addr: addr,
             trans,
             _raft_router: raft_router,
@@ -265,6 +268,10 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
 
     pub fn env(&self) -> Arc<Environment> {
         self.env.clone()
+    }
+
+    pub fn get_grpc_mem_quota(&self) -> &ResourceQuota {
+        &self.grpc_mem_quota
     }
 
     /// Register a gRPC service.
@@ -362,9 +369,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         if let Some(read_pool) = self.read_pool.take() {
             read_pool.shutdown();
         }
-        if let Some(runtime) = self.scheduler_runtime.take() {
-            runtime.shutdown_background();
-        }
+        self.scheduler_runtime.take();
         self.health_service
             .set_serving_status("", ServingStatus::NotServing);
         Ok(())

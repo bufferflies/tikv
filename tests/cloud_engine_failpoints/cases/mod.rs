@@ -12,6 +12,7 @@ mod test_load_data;
 mod test_merge;
 mod test_native_br;
 mod test_rfengine;
+mod test_rfstore_online_config;
 mod test_split_region;
 mod test_transaction;
 mod test_trim_over_bound;

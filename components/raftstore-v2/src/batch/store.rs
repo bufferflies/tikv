@@ -254,7 +254,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
             pool_size,
             std::cmp::max(4, SysQuota::cpu_cores_quota() as usize),
         );
-        let apply_pool = YatpPoolBuilder::new(DefaultTicker::default())
+        let apply_pool = YatpPoolBuilder::new(DefaultTicker)
             .thread_count(1, pool_size, max_pool_size)
             .after_start(move || set_io_type(IoType::ForegroundWrite))
             .name_prefix("apply")

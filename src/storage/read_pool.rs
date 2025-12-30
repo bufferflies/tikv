@@ -74,7 +74,7 @@ pub fn build_read_pool_for_test<E: Engine>(
         .zip(names)
         .map(|(config, name)| {
             let engine = Arc::new(Mutex::new(engine.clone()));
-            YatpPoolBuilder::new(DefaultTicker::default())
+            YatpPoolBuilder::new(DefaultTicker)
                 .config(config)
                 .name_prefix(name)
                 .after_start(move || {

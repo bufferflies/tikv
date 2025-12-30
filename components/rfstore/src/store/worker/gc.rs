@@ -20,9 +20,9 @@ use kvengine::{
 };
 use kvproto::import_sstpb::SwitchMode;
 use sst_importer::SstImporter;
-use tikv_util::{error, info, warn, worker::Runnable};
+use tikv_util::{config::Tracker, error, info, warn, worker::Runnable};
 
-use crate::store::worker::metrics::*;
+use crate::store::{worker::metrics::*, Config};
 
 const COLUMNAR_FILE_SUFFIX: &str = ".col";
 const SCHEMA_FILE_SUFFIX: &str = ".schema";
@@ -97,12 +97,17 @@ pub struct GcRunner {
     ia_gc_runner: Option<IaGcRunner>,
     importer: Arc<SstImporter>,
     timeout: Duration,
+    cfg_tracker: Tracker<Config>,
 }
 
 impl Runnable for GcRunner {
     type Task = GcTask;
 
     fn run(&mut self, _: GcTask) {
+        if let Some(c) = self.cfg_tracker.any_new() {
+            self.timeout = c.local_file_gc_timeout.0;
+        }
+
         if let Err(err) = self.gc_kv_files() {
             LOCAL_FILE_GC_ERRORS.inc();
             error!("local file gc kv files failed {:?}", err);
@@ -114,7 +119,12 @@ impl Runnable for GcRunner {
 }
 
 impl GcRunner {
-    pub fn new(kv: kvengine::Engine, importer: Arc<SstImporter>, timeout: Duration) -> Self {
+    pub fn new(
+        kv: kvengine::Engine,
+        importer: Arc<SstImporter>,
+        timeout: Duration,
+        cfg_tracker: Tracker<Config>,
+    ) -> Self {
         let ia_gc_runner = match kv.ia_ctx() {
             IaCtx::Enabled(ia_mgr, meta_path) => {
                 #[cfg_attr(not(feature = "testexport"), allow(unused_mut))]
@@ -140,6 +150,7 @@ impl GcRunner {
             ia_gc_runner,
             importer,
             timeout,
+            cfg_tracker,
         }
     }
 

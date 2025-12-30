@@ -26,10 +26,13 @@ pub struct Config {
     pub wake_up_delay_duration: ReadableDuration,
     /// Whether to enable the pipelined pessimistic lock feature.
     pub pipelined: bool,
+
+    // TOOD: next-gen does not support in-memory pessimistic lock yet.
     /// Whether to enable the in-memory pessimistic lock feature.
     /// It will take effect only if the `pipelined` config is true because we
     /// assume that the success rate of pessimistic transactions is important
     /// to people who disable the pipelined pessimistic lock feature.
+    #[online_config(skip)]
     pub in_memory: bool,
 }
 

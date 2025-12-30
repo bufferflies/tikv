@@ -1,7 +1,15 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    borrow::Cow, future::Future, iter::FromIterator, marker::PhantomData, ops::Deref, sync::Arc,
+    borrow::Cow,
+    future::Future,
+    iter::FromIterator,
+    marker::PhantomData,
+    ops::Deref,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -23,6 +31,7 @@ use kvproto::{
     coprocessor as coppb, errorpb, kvrpcpb,
     kvrpcpb::{ScanDetailV2, TimeDetail, TimeDetailV2},
 };
+use online_config::ConfigManager;
 use overload_protector::{CopTaskStats, OverloadProtector};
 use protobuf::{CodedInputStream, Message};
 use resource_metering::{FutureExt, ResourceTagFactory, StreamExt};
@@ -41,6 +50,7 @@ use txn_types::Lock;
 use crate::{
     coprocessor::{
         cache::CachedRequestHandler,
+        config_manager::CopConfigManager,
         interceptors::*,
         metrics::*,
         remote_dispatcher::{try_remote_dag_handler, RemoteContext, RemoteRequest},
@@ -98,7 +108,7 @@ pub struct Endpoint<E: Engine> {
 
     _phantom: PhantomData<E>,
 
-    max_resp_size: u64,
+    max_resp_size: Arc<AtomicU64>,
 
     quota_limiter: Arc<QuotaLimiter>,
 
@@ -158,8 +168,12 @@ impl<E: Engine> Endpoint<E> {
             overload_protector,
             security_mgr,
             status_addr,
-            max_resp_size: cfg.cop_max_resp_size.0,
+            max_resp_size: Arc::new(AtomicU64::new(cfg.cop_max_resp_size.0)),
         }
+    }
+
+    pub fn config_manager(&self) -> Box<dyn ConfigManager> {
+        Box::new(CopConfigManager::new(self.max_resp_size.clone()))
     }
 
     pub fn set_remote_url(
@@ -699,7 +713,12 @@ impl<E: Engine> Endpoint<E> {
         let result_of_batch = self.process_batch_tasks(&mut req, &peer);
         set_tls_tracker_token(tracker);
         let result_of_future = self
-            .parse_request_and_check_memory_locks(req, peer, false, self.max_resp_size)
+            .parse_request_and_check_memory_locks(
+                req,
+                peer,
+                false,
+                self.max_resp_size.load(Ordering::Relaxed),
+            )
             .map(|(handler_builder, req_ctx)| self.handle_unary_request(req_ctx, handler_builder));
         async move {
             let res = match result_of_future {
@@ -767,7 +786,7 @@ impl<E: Engine> Endpoint<E> {
                 cur_req,
                 peer.clone(),
                 false,
-                self.max_resp_size,
+                self.max_resp_size.load(Ordering::Relaxed),
             ) {
                 Ok((handler_builder, req_ctx)) => {
                     let cur_tracker = GLOBAL_TRACKERS.insert(::tracker::Tracker::new(request_info));
@@ -1771,7 +1790,7 @@ mod tests {
             .into_iter()
             .map(|config| {
                 let engine = Arc::new(Mutex::new(engine.clone()));
-                YatpPoolBuilder::new(DefaultTicker::default())
+                YatpPoolBuilder::new(DefaultTicker)
                     .config(config)
                     .name_prefix("coprocessor_endpoint_test_full")
                     .after_start(move || set_tls_engine(engine.lock().unwrap().clone()))

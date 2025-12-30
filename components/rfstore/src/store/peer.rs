@@ -438,6 +438,8 @@ pub(crate) struct Peer {
     pub(crate) peer: metapb::Peer,
     /// The Raft state machine of this Peer.
     pub(crate) raft_group: raft::RawNode<PeerStorage>,
+    /// The online configurable Raft configurations
+    raft_max_inflight_msgs: usize,
     /// The cache of meta information for Region's other Peers.
     peer_cache: RefCell<HashMap<u64, metapb::Peer>>,
     /// Record the last instant of each peer's heartbeat response.
@@ -603,6 +605,7 @@ impl Peer {
             peer,
             region_id: region.get_id(),
             raft_group,
+            raft_max_inflight_msgs: cfg.raft_max_inflight_msgs,
             proposals: ProposalQueue::default(),
             pending_reads: Default::default(),
             pending_apply_results: Default::default(),
@@ -3876,6 +3879,21 @@ impl Peer {
 
     pub fn needs_update_last_leader_committed_idx(&self) -> bool {
         self.busy_on_apply.is_some() && self.last_leader_committed_idx.is_none()
+    }
+    pub fn adjust_cfg_if_changed(&mut self, ctx: &RaftContext) {
+        let raft_max_inflight_msgs = ctx.cfg.raft_max_inflight_msgs;
+        if self.is_leader() && (raft_max_inflight_msgs != self.raft_max_inflight_msgs) {
+            let peers: Vec<_> = self.region().get_peers().into();
+            for p in peers {
+                if p != self.peer {
+                    self.raft_group
+                        .raft
+                        .adjust_max_inflight_msgs(p.get_id(), raft_max_inflight_msgs);
+                }
+            }
+            self.raft_max_inflight_msgs = raft_max_inflight_msgs;
+        }
+        self.raft_group.raft.r.max_msg_size = ctx.cfg.raft_max_size_per_msg.0;
     }
 }
 

@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Debug, sync::Arc};
+use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Debug, sync::Arc, time::Duration};
 
 use cloud_encryption::EncryptionKey;
 use kvengine::table::columnar::SchemaFile;
@@ -324,6 +324,14 @@ pub(crate) struct IoTask {
     pub(crate) readies: Vec<PersistReady>,
     pub(crate) raft_wb: rfengine::WriteBatch,
     pub(crate) remove_dependents: Vec<(u64 /* parent_id */, u64 /* dependent_id */)>,
+}
+
+pub(crate) enum IoWorkerTask {
+    IoTask(IoTask),
+    UpdateConfig {
+        max_batch_size: Option<usize>,
+        min_write_duration: Option<Duration>,
+    },
 }
 
 #[derive(Debug)]

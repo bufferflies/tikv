@@ -73,14 +73,17 @@ use rfstore::{
 use security::SecurityManager;
 use sst_importer::SstImporter;
 use tikv::{
-    config::{ConfigController, LogConfigManager, TikvConfig},
+    config::{ConfigController, LogConfigManager, MemoryConfigManager, TikvConfig},
     coprocessor, coprocessor_v2,
-    read_pool::{build_tokio_pool, build_yatp_read_pool},
+    read_pool::{build_tokio_pool, build_yatp_read_pool, ReadPoolConfigManager},
     server::{
-        config::Config as ServerConfig, lock_manager::LockManager, raftkv::ReplicaReadLockChecker,
+        config::{Config as ServerConfig, ServerConfigManager},
+        lock_manager::LockManager,
+        raftkv::ReplicaReadLockChecker,
         CPU_CORES_QUOTA_GAUGE, DEFAULT_CLUSTER_ID, GRPC_THREAD_PREFIX, MEMORY_LIMIT_GAUGE,
     },
     storage::{
+        config_manager::StorageConfigManger,
         mvcc::MvccConsistencyCheckObserver,
         txn::flow_controller::{FlowController, CLOUD_MIN_THROTTLE_SPEED},
         SCHED_WRITE_FLOW_GAUGE,
@@ -304,7 +307,7 @@ impl TikvServer {
     ) -> TikvServer {
         // Initialize and check config
         let cfg_controller = Self::init_config(config);
-        let config = cfg_controller.get_current();
+        let mut config = cfg_controller.get_current();
         let (flow_controller, store_limiter) = Self::init_flow_control(&config);
         let io_rate_limiter = Arc::new(IoRateLimiter::new(
             IoRateLimitMode::WriteOnly,
@@ -326,8 +329,18 @@ impl TikvServer {
 
         let store_path = Path::new(&config.storage.data_dir).to_owned();
 
+        config
+            .raft_store
+            .validate(
+                config.coprocessor.region_split_size,
+                config.coprocessor.region_split_keys,
+                config.coprocessor.enable_region_bucket,
+                config.coprocessor.region_bucket_size,
+            )
+            .unwrap_or_else(|e| fatal!("failed to validate raftstore config {}", e));
         // Initialize raftstore channels.
-        let system = rfstore::store::RaftBatchSystem::new(&raw_engines, &config.raft_store);
+        let conf = Arc::new(VersionTrack::new(config.raft_store.clone()));
+        let system = rfstore::store::RaftBatchSystem::new(&raw_engines, conf);
         let router = system.router();
 
         let thread_count = config.server.background_thread_count;
@@ -682,8 +695,13 @@ impl TikvServer {
             ))),
         );
         cfg_controller.register(tikv::config::Module::Log, Box::new(LogConfigManager));
+        cfg_controller.register(tikv::config::Module::Memory, Box::new(MemoryConfigManager));
 
         let lock_mgr = LockManager::new(&self.config.pessimistic_txn);
+        cfg_controller.register(
+            tikv::config::Module::PessimisticTxn,
+            Box::new(lock_mgr.config_manager()),
+        );
         lock_mgr.register_detector_role_change_observer(self.coprocessor_host.as_mut().unwrap());
 
         let engines = self.engines.as_mut().unwrap();
@@ -719,6 +737,15 @@ impl TikvServer {
                 engines.engine.clone(),
             )
         };
+        cfg_controller.register(
+            tikv::config::Module::Readpool,
+            Box::new(ReadPoolConfigManager::new(
+                unified_read_pool.handle(),
+                &self.background_worker,
+                self.config.readpool.unified.max_thread_count,
+                self.config.readpool.unified.auto_adjust_pool_size,
+            )),
+        );
 
         // The `DebugService` and `DiagnosticsService` will share the same thread pool
         let props = tikv_util::thread_group::current_properties();
@@ -819,6 +846,15 @@ impl TikvServer {
             self.pd_client.feature_gate().clone(),
         )
         .unwrap_or_else(|e| fatal!("failed to create raft storage: {}", e));
+        cfg_controller.register(
+            tikv::config::Module::Storage,
+            Box::new(StorageConfigManger::new(
+                storage.get_concurrency_manager(),
+                self.io_rate_limiter.clone(),
+                storage.get_scheduler(),
+                self.config.storage.use_separated_scheduler_pool,
+            )),
+        );
 
         ReplicaReadLockChecker::new(self.concurrency_manager.clone())
             .register(self.coprocessor_host.as_mut().unwrap());
@@ -838,11 +874,9 @@ impl TikvServer {
             )
             .unwrap_or_else(|e| fatal!("failed to validate raftstore config {}", e));
 
-        let raft_store = Arc::new(VersionTrack::new(self.config.raft_store.clone()));
         let mut node = Node::new(
             self.system.take().unwrap(),
             &server_config.value().clone(),
-            raft_store,
             self.pd_client.clone(),
             self.background_worker.clone(),
             tikv_build_version(),
@@ -884,6 +918,8 @@ impl TikvServer {
             self.config.kvengine.remote_coprocessor_min_blocks_size,
             self.config.kvengine.remote_coprocessor_num_ranges,
         );
+        let copr_config_manager = copr.config_manager();
+
         // Create server
         let server = Server::new(
             node.id(),
@@ -901,6 +937,14 @@ impl TikvServer {
             scheduler_runtime,
         )
         .unwrap_or_else(|e| fatal!("failed to create server: {}", e));
+        cfg_controller.register(
+            tikv::config::Module::Server,
+            Box::new(ServerConfigManager::new(
+                server_config.clone(),
+                server.get_grpc_mem_quota().clone(),
+                copr_config_manager,
+            )),
+        );
 
         let import_path = self.store_path.join("import");
         let mut importer = SstImporter::new(
@@ -958,6 +1002,13 @@ impl TikvServer {
             self.concurrency_manager.clone(),
         )
         .unwrap_or_else(|e| panic!("failed to start node: {:?}", e));
+
+        // RfstoreConfigManager is only available after node started.
+        let rfstore_cfg_manager = node.mut_raft_batch_system().get_rfstore_config_manager();
+        cfg_controller.register(
+            tikv::config::Module::Raftstore,
+            Box::new(rfstore_cfg_manager),
+        );
 
         initial_metric(&self.config.metric);
 

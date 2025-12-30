@@ -4,6 +4,7 @@ pub mod apply;
 pub mod bootstrap;
 pub mod cmd_resp;
 pub mod config;
+pub mod config_manager;
 pub mod engine;
 pub mod ingest;
 pub mod io_limiter;

@@ -22,6 +22,9 @@ pub struct GcConfig {
     /// greater than 5.0.0. Change `compaction_filter_skip_version_check`
     /// can enable it by force.
     pub compaction_filter_skip_version_check: bool,
+
+    // The next-gen implementation only uses the following 2 fields.
+    // However, these fields are deprecated in the kvenigne codebase.
     pub enable_safe_point_v2: bool,
     pub disable_safe_point_fallback_v1: bool,
 }

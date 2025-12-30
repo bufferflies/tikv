@@ -34,22 +34,25 @@ pub struct Config {
     // They may be ignored or have no effect in next-gen implementations.
     // =====================================================================
     // Interval to compact unnecessary raft log.
+    #[online_config(skip)]
     pub raft_log_compact_sync_interval: ReadableDuration,
     // A threshold to gc stale raft log, must >= 1.
+    #[online_config(skip)]
     pub raft_log_gc_threshold: u64,
+    // Deprecated in next-gen.
     // When entry count exceed this value, gc will be forced trigger.
+    #[online_config(skip)]
     pub raft_log_gc_count_limit: Option<u64>,
-    // When the approximate size of raft log entries exceed this value,
-    // gc will be forced trigger.
-    pub raft_log_gc_size_limit: Option<ReadableSize>,
     // Old Raft logs could be reserved if `raft_log_gc_threshold` is not reached.
     // GC them after ticks `raft_log_reserve_max_ticks` times.
     #[doc(hidden)]
     #[online_config(hidden)]
     pub raft_log_reserve_max_ticks: usize,
     // Old logs in Raft engine needs to be purged peridically.
+    #[online_config(skip)]
     pub raft_engine_purge_interval: ReadableDuration,
     // When a peer is not responding for this time, leader will not keep entry cache for it.
+    #[online_config(skip)]
     pub raft_entry_cache_life_time: ReadableDuration,
     // Deprecated! The configuration has no effect.
     // They are preserved for compatibility check.
@@ -60,14 +63,19 @@ pub struct Config {
     pub raft_reject_transfer_leader_duration: ReadableDuration,
     /// When size change of region exceed the diff since last check, it
     /// will be checked again whether it should be split.
+    #[online_config(skip)]
     pub region_split_check_diff: Option<ReadableSize>,
     /// Interval (ms) to check whether start compaction for a region.
+    #[online_config(skip)]
     pub region_compact_check_interval: ReadableDuration,
     /// Number of regions for each time checking.
+    #[online_config(skip)]
     pub region_compact_check_step: u64,
     /// Minimum number of tombstones to trigger manual compaction.
+    #[online_config(skip)]
     pub region_compact_min_tombstones: u64,
     /// Minimum percentage of tombstones to trigger manual compaction.
+    #[online_config(skip)]
     /// Should between 1 and 100.
     pub region_compact_tombstones_percent: u64,
     // used to periodically check whether schedule pending applies in region runner
@@ -82,9 +90,12 @@ pub struct Config {
 
     #[online_config(skip)]
     pub snap_apply_batch_size: ReadableSize,
+    #[online_config(skip)]
     pub snap_gc_timeout: ReadableDuration,
     #[online_config(skip)]
+    #[online_config(skip)]
     pub snap_generator_pool_size: usize,
+    #[online_config(skip)]
     pub snap_mgr_gc_tick_interval: ReadableDuration,
 
     // used to periodically check whether we should delete a stale peer's range in
@@ -94,24 +105,31 @@ pub struct Config {
     pub clean_stale_ranges_tick: usize,
 
     // Interval (ms) to check region whether the data is consistent.
+    #[online_config(skip)]
     pub consistency_check_interval: ReadableDuration,
 
+    #[online_config(skip)]
     pub lock_cf_compact_interval: ReadableDuration,
+    #[online_config(skip)]
     pub lock_cf_compact_bytes_threshold: ReadableSize,
 
+    #[online_config(skip)]
     pub peer_stale_state_check_interval: ReadableDuration,
     // Interval of scheduling a tick to check the leader lease.
     // It will be set to raft_store_max_leader_lease/4 by default.
+    #[online_config(skip)]
     pub check_leader_lease_interval: ReadableDuration,
 
     #[online_config(skip)]
     pub notify_capacity: usize,
+    #[online_config(skip)]
     pub messages_per_tick: usize,
 
     /// Max log gap allowed to propose merge.
     #[online_config(hidden)]
     pub merge_max_log_gap: u64,
     /// Interval to re-propose merge.
+    #[online_config(skip)]
     pub merge_check_tick_interval: ReadableDuration,
     #[online_config(hidden)]
     pub use_delete_range: bool,
@@ -134,6 +152,7 @@ pub struct Config {
     // * raft_entry_max_size), this is intentional because in the common case, a raft entry
     // is unlikely to exceed this threshold, but in case when raftstore is the bottleneck,
     // we still allow big raft batch for better throughput.
+    #[online_config(skip)]
     pub apply_yield_write_size: ReadableSize,
     /// Whether to enable `hiberate` feature.
     ///
@@ -162,59 +181,71 @@ pub struct Config {
     // * system=32G, memory_usage_limit=24G, evict=4.8G
     pub evict_cache_on_memory_ratio: f64,
 
+    #[online_config(skip)]
     /// When the count of concurrent ready exceeds this value, command will not
     /// be proposed until the previous ready has been persisted.
     /// If `cmd_batch` is 0, this config will have no effect.
     /// If it is 0, it means no limit.
     pub cmd_batch_concurrent_ready_max_count: usize,
 
+    #[online_config(skip)]
     /// When the size of raft db writebatch exceeds this value, write will be
     /// triggered.
     pub raft_write_size_limit: ReadableSize,
+    #[online_config(skip)]
     pub waterfall_metrics: bool,
-
+    #[online_config(skip)]
     pub io_reschedule_concurrent_max_count: usize,
+    #[online_config(skip)]
     pub io_reschedule_hotpot_duration: ReadableDuration,
 
-    // Deprecated! Batch is done in raft client.
+    // Deprecated. Batch is done in raft client.
     #[doc(hidden)]
     #[serde(skip_serializing)]
     #[online_config(skip)]
     pub raft_msg_flush_interval: ReadableDuration,
 
-    // Deprecated! The time to clean stale peer safely can be decided based on RocksDB snapshot
-    // sequence number.
     #[doc(hidden)]
     #[serde(skip_serializing)]
     #[online_config(skip)]
     pub clean_stale_peer_delay: ReadableDuration,
 
+    // TODO: slow store detection is not support yet.
     // Interval to inspect the latency of raftstore for slow store detection.
     pub inspect_interval: ReadableDuration,
 
+    // TODO: resolved_ts is not support yet.
     // Interval to report min resolved ts, if it is zero, it means disabled.
     pub report_min_resolved_ts_interval: ReadableDuration,
+
+    // TODO: in-memory pessimistic lock is not supported yet.
     /// Interval to check whether to reactivate in-memory pessimistic lock after
     /// being disabled before transferring leader.
     pub reactive_memory_lock_tick_interval: ReadableDuration,
     /// Max tick count before reactivating in-memory pessimistic lock.
     pub reactive_memory_lock_timeout_tick: usize,
+
     // Interval of scheduling a tick to report region buckets.
     pub report_region_buckets_tick_interval: ReadableDuration,
     /// Interval to check long uncommitted proposals.
     #[doc(hidden)]
+    #[online_config(skip)]
     pub check_long_uncommitted_interval: ReadableDuration,
     /// Base threshold of long uncommitted proposal.
     #[doc(hidden)]
+    #[online_config(skip)]
     pub long_uncommitted_base_threshold: ReadableDuration,
 
+    #[online_config(skip)]
     /// Max duration for the entry cache to be warmed up.
     /// Set it to 0 to disable warmup.
     pub max_entry_cache_warmup_duration: ReadableDuration,
 
     #[doc(hidden)]
+    #[online_config(skip)]
     pub max_snapshot_file_raw_size: ReadableSize,
 
+    #[online_config(skip)]
     pub unreachable_backoff: ReadableDuration,
 
     #[doc(hidden)]
@@ -223,12 +254,29 @@ pub struct Config {
     // Interval to check peers availability info.
     pub check_peers_availability_interval: ReadableDuration,
 
+    // Deprecated.
+    /// Maximum size of every local read task batch.
+    #[online_config(hidden)]
+    pub local_read_batch_size: u64,
+    // Deprecated.
+    #[online_config(hidden)]
+    pub cmd_batch: bool,
+    // Deprecated.
+    /// Capacity of the internal channel for raftstore batch processing.
+    /// Larger values allow more concurrent requests but increase memory usage.
+    #[online_config(hidden)]
+    pub channel_capacity: usize,
+
     // =====================================================================
     // Valid configurations
     // ---------------------------------------------------------------------
     // These fields are actively used and maintained in the current engine.
     // They represent the main operational parameters for Raftstore.
     // =====================================================================
+
+    // When the approximate size of raft log entries exceed this value,
+    // gc will be forced trigger.
+    pub raft_log_gc_size_limit: Option<ReadableSize>,
 
     // minimizes disruption when a partitioned node rejoins the cluster by using a two phase
     // election.
@@ -253,9 +301,7 @@ pub struct Config {
     pub raft_min_election_timeout_ticks: usize,
     #[online_config(hidden)]
     pub raft_max_election_timeout_ticks: usize,
-    #[online_config(hidden)]
     pub raft_max_size_per_msg: ReadableSize,
-    #[online_config(hidden)]
     pub raft_max_inflight_msgs: usize,
     // When the entry exceed the max size, reject to propose it.
     pub raft_entry_max_size: ReadableSize,
@@ -283,6 +329,8 @@ pub struct Config {
     pub abnormal_leader_missing_duration: ReadableDuration,
 
     /// Interval to check peer states with ver low frequency.
+    /// Currently used for checking stale peer and retrigering failed
+    /// compaction.
     pub peer_long_check_interval: ReadableDuration,
 
     #[online_config(hidden)]
@@ -292,6 +340,9 @@ pub struct Config {
     pub raft_store_max_leader_lease: ReadableDuration,
     // Check if leader lease will expire at `current_time + renew_leader_lease_advance_duration`.
     // It will be set to raft_store_max_leader_lease/4 by default.
+    // NOTE: `renew_leader_lease_advance_duration` is only used to determine the `max_lease` of
+    // `Lease`, so it's actually not support OnlineConfig.
+    #[online_config(skip)]
     pub renew_leader_lease_advance_duration: ReadableDuration,
 
     /// This setting can only ensure conf remove will not be proposed by the
@@ -301,9 +352,6 @@ pub struct Config {
     /// change. Keep the configuration only for convenient test.
     pub allow_remove_leader: bool,
 
-    /// Maximum size of every local read task batch.
-    pub local_read_batch_size: u64,
-
     #[online_config(submodule)]
     #[serde(flatten, with = "prefix_apply")]
     pub apply_batch_system: BatchSystemConfig,
@@ -311,8 +359,6 @@ pub struct Config {
     #[online_config(submodule)]
     #[serde(flatten, with = "prefix_store")]
     pub store_batch_system: BatchSystemConfig,
-
-    pub cmd_batch: bool,
 
     // Deprecated! These configuration has been moved to Coprocessor.
     // They are preserved for compatibility check.
@@ -352,6 +398,7 @@ pub struct Config {
     /// Number of schema worker threads for schema-related background tasks.
     /// Used for DDL, schema changes, and metadata management in next-gen
     /// engine.
+    #[online_config(skip)]
     pub schema_worker_count: usize,
     /// Maximum CPU utilization threshold for auxiliary workers.
     /// Lower than main worker to ensure synchronization and avoid contention.
@@ -370,10 +417,6 @@ pub struct Config {
     /// Used to avoid too frequent writes and reduce write amplification in
     /// next-gen engine.
     pub io_worker_min_write_duration: ReadableDuration,
-
-    /// Capacity of the internal channel for raftstore batch processing.
-    /// Larger values allow more concurrent requests but increase memory usage.
-    pub channel_capacity: usize,
 
     /// Enable inner key offset optimization for next-gen engine.
     /// Used for advanced key encoding and fast lookups.
@@ -705,11 +748,9 @@ impl Config {
             ));
         }
 
-        // Since the following configuration supports online update, in order to
-        // prevent mistakenly inputting too large values, the max limit is made
-        // according to the cpu quota * 10. Notice 10 is only an estimate, not an
-        // empirical value.
-        let limit = (SysQuota::cpu_cores_quota() * 10.0) as usize;
+        // As the nextgen apply thread does not involve IO anymore, we set the pool size
+        // limit to MAX(2, CPU_CORES/2) to avoid creating useless threads.
+        let limit = get_max_apply_pool_size();
         if self.apply_batch_system.pool_size == 0 || self.apply_batch_system.pool_size > limit {
             return Err(box_err!(
                 "apply-pool-size should be greater than 0 and less than or equal to: {}",
@@ -842,7 +883,9 @@ impl Config {
         // For tests only.
         if cfg!(debug_assertions) && self.raft_base_tick_interval.as_millis() < 100 {
             // It is a test config, adjust the fields not included in the old.
-            self.update_gc_safe_point_interval.0 = self.raft_base_tick_interval.0 * 60;
+            if self.update_gc_safe_point_interval.0 > self.raft_base_tick_interval.0 * 60 {
+                self.update_gc_safe_point_interval.0 = self.raft_base_tick_interval.0 * 60;
+            }
             self.switch_mem_table_check_tick_interval.0 = self.raft_base_tick_interval.0 * 60;
             if self.local_file_gc_timeout.0 > self.raft_base_tick_interval.0 * 20 * 30 {
                 self.local_file_gc_timeout.0 = self.raft_base_tick_interval.0 * 20 * 30; // 30s, see `new_test_config`.
@@ -856,6 +899,14 @@ impl Config {
             self.aux_worker_max_util = 12;
 
             self.schema_worker_count = self.schema_worker_count.max(2);
+        }
+
+        let cpu_cores_quota = SysQuota::cpu_cores_quota().ceil() as usize;
+        if self.aux_worker_count > cpu_cores_quota {
+            return Err(box_err!(
+                "aux_worker_count must be smaller or equal to {}",
+                cpu_cores_quota
+            ));
         }
 
         (|| {
@@ -872,6 +923,12 @@ impl Config {
 
     // TODO
     pub fn write_into_metrics(&self) {}
+}
+
+// the maximum thread count of apply pool size is MAX(2, CPU_CORES/2).
+pub(crate) fn get_max_apply_pool_size() -> usize {
+    let cpu_quota = SysQuota::cpu_cores_quota().ceil() as usize;
+    std::cmp::max(cpu_quota / 2, 2)
 }
 
 #[cfg(test)]

@@ -129,4 +129,18 @@ lazy_static! {
             "Is raft process busy or not",
             &["type"]
         ).unwrap();
+
+    pub static ref APPLY_HANDLE_BATCH_COUNT_HISTOGRAM: Histogram =
+        register_histogram!(
+            "tikv_rfstore_apply_handle_msgs_batch_number",
+            "The number of apply batch handled in one apply futher.",
+            exponential_buckets(1.0, 2.0, 10).unwrap()
+        ).unwrap();
+
+    pub static ref APPLY_POLL_DURATION_HISTOGRAM: Histogram =
+        register_histogram!(
+            "tikv_rfstore_apply_running_duration_secs",
+            "Bucketed histogram of apply future running time duration.",
+            exponential_buckets(0.00001, 2.0, 26).unwrap()
+        ).unwrap();
 }

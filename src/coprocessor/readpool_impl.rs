@@ -67,7 +67,7 @@ pub fn build_read_pool_for_test<E: Engine>(
         .into_iter()
         .map(|config| {
             let engine = Arc::new(Mutex::new(engine.clone()));
-            YatpPoolBuilder::new(DefaultTicker::default())
+            YatpPoolBuilder::new(DefaultTicker)
                 .config(config)
                 .after_start(move || {
                     set_tls_engine(engine.lock().unwrap().clone());

@@ -2,12 +2,14 @@
 
 mod future_pool;
 mod metrics;
+mod tokio_pool;
 
 use std::sync::Arc;
 
 use fail::fail_point;
 pub use future_pool::{Full, FuturePool};
 use prometheus::{local::LocalHistogram, Histogram};
+pub use tokio_pool::{ScalableTokioHandle, ScalableTokioRuntime};
 use yatp::{
     pool::{CloneRunnerBuilder, Local, Runner},
     queue::{multilevel, QueueType, TaskCell as _},
@@ -61,8 +63,8 @@ impl<T: PoolTicker> TickerWrapper<T> {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct DefaultTicker {}
+#[derive(Clone, Copy)]
+pub struct DefaultTicker;
 
 impl PoolTicker for DefaultTicker {
     fn on_tick(&mut self) {}
@@ -322,7 +324,7 @@ mod tests {
     #[test]
     fn test_record_schedule_wait_duration() {
         let name = "test_record_schedule_wait_duration";
-        let pool = YatpPoolBuilder::new(DefaultTicker::default())
+        let pool = YatpPoolBuilder::new(DefaultTicker)
             .name_prefix(name)
             .build_single_level_pool();
         let (tx, rx) = mpsc::channel();

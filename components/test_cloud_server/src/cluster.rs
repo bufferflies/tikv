@@ -216,6 +216,7 @@ impl ServerCluster {
             )
         };
         update_conf(node_id, &mut config);
+        info!("run node using config"; "id" => node_id, "cfg" => ?&config);
         let pd_client = self.pd.new_client(); // Different nodes must not share PD client.
         config.server.cluster_id = pd_client.get_cluster_id().unwrap();
         self.confs.insert(node_id, config.clone());

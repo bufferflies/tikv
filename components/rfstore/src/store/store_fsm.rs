@@ -48,9 +48,9 @@ use sst_importer::SstImporter;
 use tikv_util::{
     box_err,
     codec::bytes::encode_bytes,
-    config::VersionTrack,
+    config::{Tracker, VersionTrack},
     debug, error, info,
-    mpsc::Receiver,
+    mpsc::{Receiver, Sender},
     slow_log,
     store::{find_peer, is_learner},
     sys::thread::StdThreadBuildWrapper,
@@ -62,9 +62,9 @@ use tikv_util::{
 use time::Timespec;
 use trace_event::types::TraceContext;
 
-use super::{Config, *};
+use super::{get_max_apply_pool_size, Config, *};
 use crate::{
-    store::{metrics::*, peer_worker::ApplyWorker, worker::ReadRunner},
+    store::{config_manager::RfstoreConfigManager, metrics::*, worker::ReadRunner},
     RaftRouter, RaftStoreRouter, Result,
 };
 
@@ -84,6 +84,7 @@ struct Workers {
 }
 
 pub struct RaftBatchSystem {
+    conf: Arc<VersionTrack<Config>>,
     router: RaftRouter,
 
     // Change to some after spawn.
@@ -93,20 +94,26 @@ pub struct RaftBatchSystem {
     peer_receiver: Option<Receiver<(u64, Box<PeerMsg>)>>,
     store_fsm: Option<StoreFsm>,
     join_handles: Vec<JoinHandle<()>>,
+    io_sender: Option<Sender<Option<IoWorkerTask>>>,
+    apply_pool: Option<tikv_util::yatp_pool::FuturePool>,
 }
 
 impl RaftBatchSystem {
-    pub fn new(engines: &Engines, conf: &Config) -> Self {
+    pub fn new(engines: &Engines, conf: Arc<VersionTrack<Config>>) -> Self {
         let (store_sender, store_receiver) =
             engines.meta_change_channel.lock().unwrap().take().unwrap();
         let (peer_sender, peer_receiver) = tikv_util::mpsc::unbounded();
         let router = RaftRouter::new(peer_sender, store_sender);
+        let store_fsm = StoreFsm::new(store_receiver, &conf.value());
         Self {
+            conf,
             router,
             workers: None,
             peer_receiver: Some(peer_receiver),
-            store_fsm: Some(StoreFsm::new(store_receiver, conf)),
+            store_fsm: Some(store_fsm),
             join_handles: vec![],
+            io_sender: None,
+            apply_pool: None,
         }
     }
 
@@ -118,7 +125,6 @@ impl RaftBatchSystem {
     pub fn spawn(
         &mut self,
         meta: metapb::Store,
-        cfg: Arc<VersionTrack<Config>>,
         engines: Engines,
         trans: Box<dyn Transport>,
         pd_client: Arc<dyn PdClient>,
@@ -140,14 +146,15 @@ impl RaftBatchSystem {
         let gc_runner = GcRunner::new(
             engines.kv.clone(),
             importer.clone(),
-            cfg.value().local_file_gc_timeout.0,
+            self.conf.value().local_file_gc_timeout.0,
+            self.conf.clone().tracker("gc-runner".into()),
         );
         gc_worker.start(gc_runner);
         let gc_scheduler = gc_worker.scheduler();
 
         let schema_worker_name = "schema-worker";
         let mut schema_worker = Builder::new(schema_worker_name)
-            .thread_count(cfg.value().schema_worker_count)
+            .thread_count(self.conf.value().schema_worker_count)
             .pending_capacity(256)
             .create()
             .lazy_build(schema_worker_name);
@@ -169,7 +176,7 @@ impl RaftBatchSystem {
         };
         let pd_scheduler = workers.pd_worker.scheduler();
         let ctx = GlobalContext {
-            cfg,
+            cfg: self.conf.clone(),
             engines,
             store: meta,
             readers: store_meta.lock().unwrap().readers.clone(),
@@ -220,6 +227,48 @@ impl RaftBatchSystem {
         assert!(workers.pd_worker.start(pd_runner));
         self.workers = Some(workers);
 
+        #[derive(Clone)]
+        struct ApplyPoolCtx {
+            engine: kvengine::Engine,
+            router: RaftRouter,
+            host: CoprocessorHost<kvengine::Engine>,
+        }
+
+        // impl Sync for ApplyPoolCtx because `CoprocessorHost` is not Sync.
+        // But it's safe here because we only access the `CoprocessorHost` for `Clone`.
+        unsafe impl Sync for ApplyPoolCtx {}
+
+        let apply_pool_size = store_ctx.cfg.apply_batch_system.pool_size;
+        let max_apply_pool_size = get_max_apply_pool_size();
+        let props = tikv_util::thread_group::current_properties();
+        let apply_pool_ctx = ApplyPoolCtx {
+            engine: ctx.engines.kv.clone(),
+            router: ctx.router.clone(),
+            host: ctx.coprocessor_host.clone(),
+        };
+        let apply_pool = tikv_util::yatp_pool::YatpPoolBuilder::new(tikv_util::yatp_pool::DefaultTicker)
+            .name_prefix("apply")
+            .stack_size(10 << 20) // 10MiB)
+            .thread_count(1, apply_pool_size, max_apply_pool_size)
+            .after_start(move || {
+                tikv_util::thread_group::set_properties(props.clone());
+                let apply_ctx = ApplyContext::new(apply_pool_ctx.engine.clone(), Some(apply_pool_ctx.router.clone()), Some(apply_pool_ctx.host.clone()));
+                APPLY_CTX_STATE.with_borrow_mut(|c| {
+                    // this is safe as `after_start` is ensured to be only called once.
+                    c.write(apply_ctx);
+                })
+            })
+            .before_stop(|| {
+                // SAFETY: this is safe as we always initialize it in `after_start`.
+                unsafe {
+                    APPLY_CTX_STATE.with_borrow_mut(|c| {
+                        c.assume_init_drop();
+                    });
+                }
+            })
+            .build_future_pool();
+        self.apply_pool = Some(apply_pool);
+
         let (mut io_worker, io_sender) = IoWorker::new(
             ctx.store.id,
             ctx.engines.raft.clone(),
@@ -228,6 +277,7 @@ impl RaftBatchSystem {
             ctx.cfg.value().raft_worker_max_batch_size.0 as usize,
             ctx.cfg.value().io_worker_min_write_duration.0,
         );
+        self.io_sender = Some(io_sender.clone());
         let props = tikv_util::thread_group::current_properties();
         let handle = std::thread::Builder::new()
             .name("raft-io".to_string())
@@ -238,14 +288,15 @@ impl RaftBatchSystem {
             .unwrap();
         self.join_handles.push(handle);
         let peer_receiver = self.peer_receiver.take().unwrap();
-        let apply_pool_size = store_ctx.cfg.apply_batch_system.pool_size;
-        let (mut rw, mut apply_receivers) = RaftWorker::new(
+
+        let mut rw = RaftWorker::new(
             store_ctx,
             peer_receiver,
             ctx.router.clone(),
             io_sender,
             store_fsm,
             cpu_util_ref.clone(),
+            self.apply_pool.as_ref().unwrap().clone(),
         );
         let props = tikv_util::thread_group::current_properties();
         let handle = std::thread::Builder::new()
@@ -257,28 +308,6 @@ impl RaftBatchSystem {
             .unwrap();
         self.join_handles.push(handle);
 
-        for (i, apply_receiver) in apply_receivers.drain(..).enumerate() {
-            let thread_name = if i < apply_pool_size {
-                format!("apply-{}", i)
-            } else {
-                format!("apply-follower-{}", i - apply_pool_size)
-            };
-            let props = tikv_util::thread_group::current_properties();
-            let mut aw = ApplyWorker::new(
-                ctx.engines.kv.clone(),
-                ctx.router.clone(),
-                apply_receiver,
-                Some(ctx.coprocessor_host.clone()),
-            );
-            let handle = std::thread::Builder::new()
-                .name(thread_name)
-                .spawn_wrapper(move || {
-                    tikv_util::thread_group::set_properties(props);
-                    aw.run();
-                })
-                .unwrap();
-            self.join_handles.push(handle);
-        }
         self.router.send_store(StoreMsg::Start {
             store: ctx.store.clone(),
         });
@@ -288,11 +317,21 @@ impl RaftBatchSystem {
         Ok(())
     }
 
+    pub fn get_rfstore_config_manager(&mut self) -> RfstoreConfigManager {
+        assert!(self.io_sender.is_some() && self.apply_pool.is_some());
+        RfstoreConfigManager::new(
+            self.conf.clone(),
+            self.io_sender.take().unwrap(),
+            self.apply_pool.as_ref().unwrap().clone(),
+        )
+    }
+
     pub fn shutdown(&mut self) {
         if self.workers.is_none() {
             return;
         }
         self.router.send_store(StoreMsg::Stop);
+        self.apply_pool.as_ref().unwrap().shutdown();
         for handle in self.join_handles.drain(..) {
             handle.join().unwrap();
         }
@@ -700,6 +739,7 @@ pub(crate) struct RaftContext {
     pub(crate) current_time: Option<Timespec>,
     pub(crate) raft_metrics: RaftMetrics,
     pub(crate) cfg: Config,
+    pub(crate) cfg_tracker: Tracker<Config>,
 }
 
 // There is only one StoreContext owned by the main raft worker.
@@ -763,6 +803,7 @@ impl DerefMut for StoreContext {
 impl RaftContext {
     pub(crate) fn new(global: GlobalContext) -> Self {
         let cfg = global.cfg.value().clone();
+        let cfg_tracker = global.cfg.clone().tracker("raft-context".to_string());
         Self {
             global,
             apply_msgs: ApplyMsgs { msgs: vec![] },
@@ -772,6 +813,13 @@ impl RaftContext {
             current_time: None,
             raft_metrics: RaftMetrics::new(false),
             cfg,
+            cfg_tracker,
+        }
+    }
+
+    pub fn maybe_refresh_raft_config(&mut self) {
+        if let Some(cfg) = self.cfg_tracker.any_new() {
+            self.cfg = cfg.clone();
         }
     }
 
@@ -960,6 +1008,7 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     fn on_tick(&mut self) {
+        self.store.ticker.update_store_ticker(&self.ctx.cfg);
         let timer = TiInstant::now_coarse();
         self.store.ticker.tick_clock();
         let mut tag = None;
@@ -1130,11 +1179,13 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     fn on_pd_heartbeat_tick(&mut self) {
+        fail::fail_point!("on_store_pd_heartbeat_tick");
         self.store_heartbeat_pd();
         self.store.ticker.schedule_store(STORE_TICK_PD_HEARTBEAT);
     }
 
     fn on_update_gc_safe_point(&mut self) {
+        fail::fail_point!("on_update_gc_safe_point");
         if let Err(e) = self
             .ctx
             .global
@@ -1152,6 +1203,7 @@ impl<'a> StoreMsgHandler<'a> {
     }
 
     fn on_local_file_gc(&mut self) {
+        fail::fail_point!("on_local_file_gc");
         if let Err(e) = self.ctx.global.gc_scheduler.schedule(GcTask {}) {
             error!("local file gc failed";
                 "store_id" => self.store.id,

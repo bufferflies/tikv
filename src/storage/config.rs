@@ -88,12 +88,16 @@ pub struct Config {
     pub enable_ttl: bool,
     #[online_config(skip)]
     pub background_error_recovery_window: ReadableDuration,
+    // Deprecated for nextgen.
     /// Interval to check TTL for all SSTs,
     pub ttl_check_poll_interval: ReadableDuration,
     #[online_config(skip)]
     pub txn_status_cache_capacity: usize,
+    // TODO: next-gen's flow-control parameters (for kvengine) does not
+    // support online config currently.
     #[online_config(submodule)]
     pub flow_control: FlowControlConfig,
+    // TODO: Do not support online config currently.
     #[online_config(submodule)]
     pub block_cache: BlockCacheConfig,
     #[online_config(submodule)]
@@ -220,6 +224,8 @@ impl Config {
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct FlowControlConfig {
+    // do not support online config currently for next-gen.
+    #[online_config(skip)]
     pub enable: bool,
     #[online_config(skip)]
     pub soft_pending_compaction_bytes_limit: ReadableSize,
@@ -309,6 +315,8 @@ impl FlowControlConfig {
 pub struct BlockCacheConfig {
     #[online_config(skip)]
     pub shared: bool,
+    // the capacity for kvengine does not support OnlineConfig currently.
+    #[online_config(skip)]
     pub capacity: Option<ReadableSize>,
     #[online_config(skip)]
     pub num_shard_bits: i32,

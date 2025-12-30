@@ -17,7 +17,9 @@ use prometheus::local::*;
 use raftstore::store::WriteStats;
 use tikv_util::{
     sys::{thread::ThreadBuildWrapper, SysQuota},
-    yatp_pool::{self, FuturePool, PoolTicker, YatpPoolBuilder},
+    yatp_pool::{
+        self, FuturePool, PoolTicker, ScalableTokioHandle, ScalableTokioRuntime, YatpPoolBuilder,
+    },
 };
 
 use crate::storage::{
@@ -50,7 +52,7 @@ pub enum SchedPool {
         pool: FuturePool,
     },
     Tokio {
-        handle: tokio::runtime::Handle,
+        handle: ScalableTokioHandle,
         task_monitor: tokio_metrics::TaskMonitor,
     },
 }
@@ -110,17 +112,19 @@ impl SchedPool {
         pool_size: usize,
         feature_gate: FeatureGate,
         name_prefix: &str,
-    ) -> (Self, tokio::runtime::Runtime) {
+    ) -> (Self, ScalableTokioRuntime) {
         let engine = Arc::new(Mutex::new(engine));
         let thread_name_prefix = name_prefix.to_string();
         let props = tikv_util::thread_group::current_properties();
+        let max_pool_size = std::cmp::max(1, SysQuota::cpu_cores_quota().ceil() as usize);
+        assert!(max_pool_size >= pool_size);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .thread_name_fn(move || {
                 static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
                 let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
                 format!("{}-{}", thread_name_prefix, id)
             })
-            .worker_threads(pool_size)
+            .worker_threads(max_pool_size)
             .after_start_wrapper(move || {
                 let engine = engine.lock().unwrap().clone();
                 set_tls_engine(engine);
@@ -135,7 +139,8 @@ impl SchedPool {
             .build()
             .unwrap();
 
-        let handle = runtime.handle().clone();
+        let scalable_runtime = ScalableTokioRuntime::new(runtime, max_pool_size, pool_size);
+        let handle = scalable_runtime.handle().unwrap();
         // Create TaskMonitor for schedule wait time metrics
         let task_monitor = tokio_metrics::TaskMonitor::new();
 
@@ -165,7 +170,7 @@ impl SchedPool {
                 handle,
                 task_monitor,
             },
-            runtime,
+            scalable_runtime,
         )
     }
 

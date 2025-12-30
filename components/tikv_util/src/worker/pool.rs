@@ -344,7 +344,7 @@ impl<S: Into<String>> Builder<S> {
     }
 
     pub fn create(self) -> Worker {
-        let pool = YatpPoolBuilder::new(DefaultTicker::default())
+        let pool = YatpPoolBuilder::new(DefaultTicker)
             .name_prefix(self.name)
             .thread_count(
                 self.min_thread_count.unwrap_or(self.core_thread_count),
