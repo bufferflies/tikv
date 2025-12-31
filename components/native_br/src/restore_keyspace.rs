@@ -52,7 +52,7 @@ use tikv_util::{
     backoff::ExponentialBackoff, box_err, box_try, http::CONTENT_TYPE_PROTOBUF,
     merge_range::MergeRanges, mpsc, retry::try_wait_result_async, time::Instant, HandyRwLock,
 };
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, sync::Semaphore};
 
 use crate::{
     archive::{
@@ -435,7 +435,7 @@ pub fn restore_keyspace(
             &reporter,
             snapshots,
             &mut success_ranges,
-            config.timeout_restore_snapshot.0,
+            &config,
             &mut bo,
             &limiter,
         )?;
@@ -2748,7 +2748,7 @@ fn restore_snapshots(
     reporter: &Arc<dyn ReportRestoreStepTrait>,
     snapshots: Vec<pb::ChangeSet>,
     success_ranges: &mut MergeRanges,
-    timeout: Duration,
+    config: &RestoreConfig,
     bo: &mut Backoff,
     limiter: &Option<Arc<ThroughputLimiter>>,
 ) -> Result<RestoredSnapshots> {
@@ -2757,6 +2757,8 @@ fn restore_snapshots(
 
     let security_mgr = pd_client.get_security_mgr();
     let client = security_mgr.http_client(hyper::Client::builder())?;
+    let timeout = config.timeout_restore_snapshot.0;
+    let semaphore = Arc::new(Semaphore::new(config.restore_snapshot_concurrency.max(1)));
 
     let mut handles = Vec::with_capacity(snapshots.len());
     for (snap, snapshot_size) in snapshots.into_iter().zip(snapshots_size.into_iter()) {
@@ -2767,7 +2769,9 @@ fn restore_snapshots(
         let start = snap.get_restore_shard().get_outer_start().to_vec();
         let end = snap.get_restore_shard().get_outer_end().to_vec();
         let limiter = limiter.clone();
+        let semaphore = semaphore.clone();
         let task = async move {
+            let _permit = box_try!(semaphore.acquire().await);
             request_restore_snapshot(
                 pd_client,
                 client,

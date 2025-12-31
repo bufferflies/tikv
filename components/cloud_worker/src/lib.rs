@@ -910,6 +910,7 @@ impl Config {
             dfs: self.dfs.clone(),
             timeout_wait_flush: self.native_br.restore_timeout_wait_flush,
             timeout_restore_snapshot: self.native_br.restore_timeout_restore_snapshot,
+            restore_snapshot_concurrency: self.native_br.restore_snapshot_concurrency,
             timeout_fetch_wal: self.native_br.restore_timeout_fetch_wal,
             timeout_pd_control: self.native_br.restore_timeout_pd_control,
             max_retry: self.native_br.restore_max_retry,

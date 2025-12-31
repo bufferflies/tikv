@@ -449,6 +449,7 @@ async fn restore_pd_keyspace_meta(
 const DEFAULT_WAL_TARGET_SIZE: ReadableSize = ReadableSize::mb(512);
 pub const DEFAULT_TIMEOUT_WAIT_FLUSH: ReadableDuration = ReadableDuration::minutes(10);
 pub const DEFAULT_TIMEOUT_RESTORE_SNAPSHOT: ReadableDuration = ReadableDuration::minutes(10);
+pub const DEFAULT_RESTORE_SNAPSHOT_CONCURRENCY: usize = 16;
 pub const DEFAULT_TIMEOUT_FETCH_WAL: ReadableDuration = ReadableDuration::minutes(10);
 pub const DEFAULT_TIMEOUT_SPLIT_REGIONS: ReadableDuration = ReadableDuration::secs(30);
 pub const DEFAULT_TIMEOUT_PD_CONTROL: ReadableDuration = ReadableDuration::secs(10);
@@ -468,6 +469,8 @@ pub struct RestoreConfig {
     pub timeout_wait_flush: ReadableDuration,
     /// The timeout for the requests of restoring snapshots to TiKV servers.
     pub timeout_restore_snapshot: ReadableDuration,
+    /// The concurrency number of restoring snapshots.
+    pub restore_snapshot_concurrency: usize,
     /// The maximum number of retries for the process from split regions to
     /// restore snapshots.
     pub max_retry: usize,
@@ -510,6 +513,7 @@ impl Default for RestoreConfig {
             new_store_id_delta: 0,
             timeout_wait_flush: DEFAULT_TIMEOUT_WAIT_FLUSH,
             timeout_restore_snapshot: DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
+            restore_snapshot_concurrency: DEFAULT_RESTORE_SNAPSHOT_CONCURRENCY,
             timeout_fetch_wal: DEFAULT_TIMEOUT_FETCH_WAL,
             timeout_split_regions: DEFAULT_TIMEOUT_SPLIT_REGIONS,
             timeout_pd_control: DEFAULT_TIMEOUT_PD_CONTROL,

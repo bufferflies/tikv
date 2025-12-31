@@ -1132,6 +1132,7 @@ pub struct NativeBrConfig {
     pub restore_timeout_wait_flush: ReadableDuration,
     /// The timeout for the requests of restoring snapshots to TiKV servers.
     pub restore_timeout_restore_snapshot: ReadableDuration,
+    pub restore_snapshot_concurrency: usize,
     /// The timeout for fetching the latest wal chunk from store.
     pub restore_timeout_fetch_wal: ReadableDuration,
     pub restore_timeout_pd_control: ReadableDuration,
@@ -1181,6 +1182,7 @@ impl Default for NativeBrConfig {
             restore_task_ttl: ReadableDuration::minutes(60),
             restore_timeout_wait_flush: restore::DEFAULT_TIMEOUT_WAIT_FLUSH,
             restore_timeout_restore_snapshot: restore::DEFAULT_TIMEOUT_RESTORE_SNAPSHOT,
+            restore_snapshot_concurrency: restore::DEFAULT_RESTORE_SNAPSHOT_CONCURRENCY,
             restore_timeout_fetch_wal: restore::DEFAULT_TIMEOUT_FETCH_WAL,
             restore_timeout_pd_control: restore::DEFAULT_TIMEOUT_PD_CONTROL,
             restore_max_retry: restore::DEFAULT_RESTORE_MAX_RETRY,
