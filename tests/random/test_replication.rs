@@ -6,6 +6,7 @@ use api_version::ApiV2;
 use chrono::Utc;
 use cloud_worker::CloudWorker;
 use futures::executor::block_on;
+use kvengine::table::tiny_meta::MetaPackConfig;
 use log_wrappers::Value as LogValue;
 use native_br::{backup, backup_worker};
 use pd_client::{PdClient, RpcClient};
@@ -180,6 +181,12 @@ fn test_random_replication() {
     rep_config.merged_engine.block_cache_size = ReadableSize::mb(64).into();
     rep_config.merged_engine.mem_table_size = cluster.get_mem_table_size();
     rep_config.merged_engine.raft_write_batch_size = ReadableSize::kb(256);
+    rep_config.merged_engine.meta_pack = MetaPackConfig {
+        enabled: true,
+        max_pending: 1000,
+        try_compact_threshold: ReadableSize::kb(2),
+        compact_ratio: 2.0,
+    };
 
     let mut worker = CloudWorker::new(worker_conf.clone(), None, 2, pd_client.clone());
     worker.start();

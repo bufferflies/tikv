@@ -22,7 +22,11 @@ use crate::{
         DEFAULT_COMPACTION_TOMBS_RATIO,
     },
     ia::util::IaConfig,
-    table::{blobtable, columnar, sstable, vector_index::VectorIndexBuildOptions},
+    table::{
+        blobtable, columnar, sstable,
+        tiny_meta::{MetaPackReader, MetaPackScheduler},
+        vector_index::VectorIndexBuildOptions,
+    },
     *,
 };
 
@@ -236,6 +240,14 @@ pub trait RecoverHandler: Clone + Send {
         info: &ShardMeta,
         is_parent: bool,
     ) -> Result<()>;
+
+    fn meta_pack_scheduler(&self) -> Option<&MetaPackScheduler> {
+        None
+    }
+
+    fn meta_pack_reader(&self) -> Option<&MetaPackReader> {
+        None
+    }
 }
 
 pub trait MetaIterator {

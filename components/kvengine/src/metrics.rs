@@ -192,7 +192,17 @@ pub(crate) fn elapsed_secs(t: Instant) -> f64 {
 
 make_static_metric! {
     pub label_enum PrepareMetric {
+        total_files,
+        local_files,
+        local_ia_files,
+        local_auto_ia_files,
+        remote_files,
+        remote_ia_files,
+        remote_auto_ia_files,
+        tiny_meta_hit,
         tiny_meta_segment_offsets_hit,
+        load_parent_shards,
+        load_shards,
     }
 
     pub struct PrepareCounterVec: IntCounter {

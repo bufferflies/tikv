@@ -41,6 +41,7 @@ use crate::{
         schema_file::SchemaFile,
         search,
         sstable::{L0Table, SsTable},
+        tiny_meta::TypedTinyMeta,
         vector_index::{VectorIndex, VectorIndexes},
         BoundedDataSet, DataBound, InnerKey, OwnedInnerKey, SnapVersion, TxnFile,
     },
@@ -426,6 +427,8 @@ impl Shard {
                         ctx.columnar_file_cache.clone(),
                         encryption_key.clone(),
                         ctx.columnar_meta_cache.clone(),
+                        TypedTinyMeta::None,
+                        None,
                     )?;
                     added_files.insert(*id);
                 }
@@ -478,6 +481,8 @@ impl Shard {
                         ctx.columnar_file_cache.clone(),
                         encryption_key.clone(),
                         ctx.columnar_meta_cache.clone(),
+                        TypedTinyMeta::None,
+                        None,
                     )?;
                     if fm.is_schema_file() {
                         if let Some(schema_files) = ctx.schema_files.as_ref() {

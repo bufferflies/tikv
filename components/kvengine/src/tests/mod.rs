@@ -1366,14 +1366,7 @@ impl Applier {
                         self.engine.apply_change_set(
                             &self
                                 .engine
-                                .prepare_change_set(
-                                    cs,
-                                    false,
-                                    FilePrepareType::Local,
-                                    None,
-                                    None,
-                                    None
-                                )
+                                .prepare_change_set(cs, PrepareOpts::default())
                                 .unwrap()
                         ),
                         "applier apply changeset"

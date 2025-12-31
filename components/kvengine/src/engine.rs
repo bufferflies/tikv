@@ -25,7 +25,7 @@ use file_system::IoRateLimiter;
 use fslock;
 use security::SecurityManager;
 use slog_global::info;
-use tikv_util::{box_err, mpsc, sys::thread::StdThreadBuildWrapper, HandyRwLock};
+use tikv_util::{box_err, mpsc, sys::thread::StdThreadBuildWrapper, time::Instant, HandyRwLock};
 use txn_chunk_manager::with_pool_size;
 
 use crate::{
@@ -35,13 +35,14 @@ use crate::{
     ia::manager::IaManager,
     limiter::{DfsLoadLimiter, StoreLimiter},
     meta::ShardMeta,
-    metrics::ENGINE_FREE_MEM_BYTES_HISTOGRAM,
+    metrics::{ENGINE_FREE_MEM_BYTES_HISTOGRAM, PREPARE_COUNTER_VEC},
     table::{
         columnar::ColumnarMetaCache,
         file::FdCache,
         memtable::{CfTable, CfTableCore},
         schema_file::SchemaFile,
         sstable::{BlockCache, MAGIC_NUMBER},
+        tiny_meta::{MetaPackReader, MetaPackScheduler},
         BoundedDataSet, DataBound, InnerKey, SnapVersion, ZSTD_COMPRESSION,
     },
     txn_chunk_manager::{TxnChunkManager, TxnChunkManagerConfig},
@@ -185,6 +186,7 @@ impl Engine {
             dfs_load_limiter,
             available_space_bytes: AtomicU64::new(0),
             worker_handles: Default::default(),
+            meta_pack_scheduler: recoverer.meta_pack_scheduler().cloned(),
         };
         let en = Engine {
             core: Arc::new(core),
@@ -237,6 +239,12 @@ impl Engine {
         recoverer: impl RecoverHandler + 'static,
         load_table_filter: Option<LoadTableFilterFn>,
     ) -> Result<()> {
+        if metas.is_empty() {
+            return Ok(());
+        };
+
+        let start_time = Instant::now_coarse();
+        info!("load_shards: start load parents");
         let mut parents = HashMap::new();
         for meta in metas.values() {
             if let Some(parent) = &meta.parent {
@@ -244,8 +252,11 @@ impl Engine {
                 if !parents.contains_key(&id_ver) {
                     info!("load parent of {}", meta.tag());
                     tikv_util::set_current_region(id_ver.id);
-                    let parent_shard =
-                        Arc::new(self.load_parent_shard(parent, load_table_filter.clone())?);
+                    let parent_shard = Arc::new(self.load_parent_shard(
+                        parent,
+                        load_table_filter.clone(),
+                        recoverer.meta_pack_reader(),
+                    )?);
 
                     // Ingest the parent shard before recovery, as recoverer depends on the shard
                     // existing in kvengine.
@@ -262,9 +273,11 @@ impl Engine {
                 }
             }
         }
+
         let concurrency = usize::from_str(&env::var("RECOVERY_CONCURRENCY").unwrap_or_default())
             .unwrap_or_else(|_| std::cmp::min(num_cpus::get() * 8, 64));
-        info!("recovery concurrency {}", concurrency);
+        let load_shards_time = Instant::now_coarse();
+        info!("load_shards: start"; "shards" => metas.len(), "concurrency" => concurrency);
         let (token_tx, token_rx) = tikv_util::mpsc::bounded(concurrency);
         for _ in 0..concurrency {
             token_tx.send(true).unwrap();
@@ -286,7 +299,7 @@ impl Engine {
             std::thread::spawn(move || {
                 tikv_util::set_current_region(meta.id);
                 let shard = engine
-                    .load_and_ingest_shard(&meta, load_table_filter)
+                    .load_and_ingest_shard(&meta, load_table_filter, recoverer.meta_pack_reader())
                     .unwrap();
                 if let Some(parent) = parent_shard {
                     shard.add_parent_data(parent)
@@ -298,6 +311,20 @@ impl Engine {
         for _ in 0..concurrency {
             token_rx.recv().unwrap();
         }
+
+        let end_time = Instant::now_coarse();
+        let load_parents_dur = load_shards_time.saturating_duration_since(start_time);
+        let total_dur = end_time.saturating_duration_since(start_time);
+        PREPARE_COUNTER_VEC
+            .load_parent_shards
+            .inc_by(parents.len() as u64);
+        PREPARE_COUNTER_VEC.load_shards.inc_by(metas.len() as u64);
+        info!("load_shards: finished";
+            "shards" => metas.len(),
+            "parents" => parents.len(),
+            "takes" => ?total_dur,
+            "load_parents" => ?load_parents_dur,
+        );
         Ok(())
     }
 
@@ -305,7 +332,8 @@ impl Engine {
         self.loaded.store(true, Ordering::Relaxed);
     }
 
-    // This method is used for merged_engine to prepare remote files for recovery.
+    // This method is used for merged_engine to prepare remote files on adding
+    // keyspace.
     pub fn prepare_shards(&self, metas: &collections::HashMap<u64, ShardMeta>) -> Result<()> {
         let concurrency = usize::from_str(&env::var("RECOVERY_CONCURRENCY").unwrap_or_default())
             .unwrap_or_else(|_| std::cmp::min(num_cpus::get() * 4, 64));
@@ -321,7 +349,16 @@ impl Engine {
             let prepare_type = FilePrepareType::from_shard_meta(meta);
             let task = move || -> Result<()> {
                 tikv_util::set_current_region(cs.shard_id);
-                engine.prepare_change_set(cs, false, prepare_type, None, None, None)?;
+                // Not using tiny meta as it's designed for start up by now.
+                // And it's unlikely that tiny meta existed in this scenario.
+                engine.prepare_change_set(
+                    cs,
+                    PrepareOpts {
+                        prepare_type,
+                        encryption_key: None, // Get from snapshot.
+                        ..Default::default()
+                    },
+                )?;
                 Ok(())
             };
             runtime.spawn_blocking(move || {
@@ -407,6 +444,7 @@ pub struct EngineCore {
     pub(crate) files_in_blacklist: Arc<HashSet<u64>>,
     pub(crate) schema_files: Arc<DashMap<u64, SchemaFile>>,
     pub(crate) dfs_load_limiter: DfsLoadLimiter,
+    pub(crate) meta_pack_scheduler: Option<MetaPackScheduler>,
     available_space_bytes: AtomicU64, // Set during store heartbeat.
     worker_handles: Mutex<Vec<thread::JoinHandle<()>>>,
 }
@@ -452,6 +490,7 @@ impl EngineCore {
         &self,
         meta: &ShardMeta,
         table_filter: Option<LoadTableFilterFn>,
+        meta_pack_reader: Option<&MetaPackReader>,
     ) -> Result<Arc<Shard>> {
         if let Some(shard) = self.get_shard(meta.id) {
             if shard.ver == meta.ver {
@@ -462,11 +501,13 @@ impl EngineCore {
         // Encryption key is not necessary for change set of snapshot.
         let change_set = self.prepare_change_set(
             meta.to_change_set(),
-            false,
-            FilePrepareType::from_shard_meta(meta),
-            None,
-            table_filter,
-            None,
+            PrepareOpts {
+                prepare_type: FilePrepareType::from_shard_meta(meta),
+                table_filter,
+                encryption_key: None, // Get from snapshot.
+                meta_pack_reader,
+                ..Default::default()
+            },
         )?;
         self.ingest(change_set, false)?;
         let shard = self.get_shard(meta.id);
@@ -479,16 +520,19 @@ impl EngineCore {
         &self,
         meta: &ShardMeta,
         table_filter: Option<LoadTableFilterFn>,
+        meta_pack_reader: Option<&MetaPackReader>,
     ) -> Result<Shard> {
         info!("load parent shard {}", meta.tag());
         // Encryption key is not necessary for change set of snapshot.
         let change_set = self.prepare_change_set(
             meta.to_change_set(),
-            false,
-            FilePrepareType::from_shard_meta(meta),
-            None,
-            table_filter,
-            None,
+            PrepareOpts {
+                prepare_type: FilePrepareType::from_shard_meta(meta),
+                table_filter,
+                encryption_key: None, // Get from snapshot.
+                meta_pack_reader,
+                ..Default::default()
+            },
         )?;
         let shard = self.new_shard_from_change_set(change_set);
         shard.refresh_states();
@@ -1295,8 +1339,6 @@ fn create_ia_ctx(opts: Arc<Options>, fs: Arc<dyn dfs::Dfs>, meta_fd_cache: FdCac
 
 #[cfg(test)]
 mod tests {
-    use tikv_util::time::Instant;
-
     use super::*;
 
     #[test]

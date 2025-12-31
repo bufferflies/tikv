@@ -22,7 +22,8 @@ use crate::{
         columnar::{ColumnarFile, ColumnarFileCache, ColumnarLevels, ColumnarMetaCache},
         file::File,
         schema_file::SchemaFile,
-        sstable::{BlockCache, L0Table, SsTable},
+        sstable::{BlockCache, L0Table, NewSsTableCtx, SsTable},
+        tiny_meta::{MetaPackScheduler, SstTinyMeta, TypedTinyMeta},
         vector_index::{VectorIndexCache, VectorIndexFile, VectorIndexes},
         BoundedDataSet, SnapVersion, TxnFile,
     },
@@ -111,6 +112,8 @@ impl ChangeSet {
         columnar_file_cache: Option<ColumnarFileCache>,
         encryption_key: Option<EncryptionKey>,
         columnar_meta_cache: ColumnarMetaCache,
+        tiny_meta: TypedTinyMeta,
+        meta_pack_scheduler: Option<&MetaPackScheduler>,
     ) -> Result<()> {
         match meta.file_type {
             FileType::Sst => {
@@ -118,7 +121,13 @@ impl ChangeSet {
                     let l0_table = L0Table::new(file, cache, false, encryption_key)?;
                     self.l0_tables.insert(id, l0_table.unwrap());
                 } else {
-                    let ln_table = SsTable::new(file, cache, encryption_key)?;
+                    let mut ctx = NewSsTableCtx {
+                        tiny_meta: tiny_meta.into_sst(),
+                        ..Default::default()
+                    };
+                    let ln_table = SsTable::new_with_ctx(file, cache, encryption_key, &mut ctx)?;
+
+                    try_pack_sstable_meta(&ln_table, meta_pack_scheduler, ctx);
                     self.ln_tables.insert(id, ln_table);
                 }
             }
@@ -1270,6 +1279,21 @@ impl EngineCore {
         builder.set_vector_indexes(vector_indexes);
         shard.set_data(builder.build());
     }
+}
+
+fn try_pack_sstable_meta(
+    sstable: &SsTable,
+    meta_pack_scheduler: Option<&MetaPackScheduler>,
+    ctx: NewSsTableCtx,
+) {
+    let Some((meta_pack_scheduler, (footer, props_data))) =
+        meta_pack_scheduler.zip(ctx.footer_and_properties_data)
+    else {
+        return;
+    };
+
+    let tiny_meta = SstTinyMeta::from_sstable(sstable, footer, &props_data);
+    meta_pack_scheduler.try_pack(tiny_meta.into());
 }
 
 #[cfg(test)]

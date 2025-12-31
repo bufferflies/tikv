@@ -18,8 +18,8 @@ use cloud_encryption::EncryptionKey;
 use fail::fail_point;
 use kvengine::{
     encode_extra_txn_status_key, get_shard_property, mvcc, table::InnerKey, util::PropertiesHelper,
-    ChangeSet, Engine, FilePrepareType, SnapAccess, UserMeta, WriteBatch, ENCRYPTION_KEY, EXTRA_CF,
-    LOCK_CF, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
+    ChangeSet, Engine, FilePrepareType, PrepareOpts, SnapAccess, UserMeta, WriteBatch,
+    ENCRYPTION_KEY, EXTRA_CF, LOCK_CF, TRIM_OVER_BOUND, TRIM_OVER_BOUND_ENABLE, TXN_FILE_REF,
 };
 use kvenginepb::{TxnFileRef, TxnFileRefs};
 use kvproto::{
@@ -1596,11 +1596,13 @@ impl Applier {
             tikv_util::set_current_region(id);
             let res = engine.prepare_change_set(
                 cs,
-                !is_leader,
-                prepare_type,
-                reload_snap,
-                None,
-                encryption_key,
+                PrepareOpts {
+                    use_direct_io: !is_leader,
+                    prepare_type,
+                    reload_snap,
+                    encryption_key,
+                    ..Default::default()
+                },
             );
             router.send(id, PeerMsg::PrepareChangeSetResult(res, peer_id));
         });
@@ -1675,11 +1677,12 @@ impl Applier {
             tikv_util::set_current_region(source.shard_id);
             let res = engine.prepare_change_set(
                 source,
-                !is_leader,
-                FilePrepareType::Local, // reset by snapshot
-                None,
-                None,
-                encryption_key,
+                PrepareOpts {
+                    use_direct_io: !is_leader,
+                    prepare_type: FilePrepareType::Local, // reset by snapshot
+                    encryption_key,
+                    ..Default::default()
+                },
             );
             router.send(
                 region_id,

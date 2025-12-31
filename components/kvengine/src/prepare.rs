@@ -34,31 +34,46 @@ use crate::{
         ia_file::{table_meta_file_local_path, IaFile},
     },
     limiter::{DfsLoadLimiter, DfsLoadLimiterPermit},
-    metrics::ENGINE_LEVEL_WRITE_VEC,
+    metrics::{ENGINE_LEVEL_WRITE_VEC, PREPARE_COUNTER_VEC},
     table::{
         file::{FdCache, File, InMemFile, LocalFile},
         get_local_dir,
         schema_file::SchemaFile,
         sstable::{SsTable, SsTableCore, SsTableProperty, PROP_KEY_MAX_TS},
-        tiny_meta::TypedTinyMeta,
+        tiny_meta::{MetaPackReader, TypedTinyMeta},
         vector_index::VectorIndexFile,
         BoundedDataSet,
     },
     EngineCore, *,
 };
 
+#[derive(Default)]
+pub struct PrepareOpts<'a> {
+    pub use_direct_io: bool,
+    pub prepare_type: FilePrepareType,
+    // The snap contains the current files that need to be reloaded.
+    pub reload_snap: Option<kvenginepb::Snapshot>,
+    pub table_filter: Option<LoadTableFilterFn>,
+    // encryption_key will be ignored if cs is snapshot or restore_shard.
+    pub encryption_key: Option<EncryptionKey>,
+    pub meta_pack_reader: Option<&'a MetaPackReader>,
+}
+
 impl EngineCore {
     pub fn prepare_change_set(
         &self,
         cs: kvenginepb::ChangeSet,
-        use_direct_io: bool,
-        prepare_type: FilePrepareType,
-        reload_snap: Option<kvenginepb::Snapshot>, /* The snap contains the current files that
-                                                    * need to be reloaded. */
-        table_filter: Option<LoadTableFilterFn>,
-        encryption_key: Option<EncryptionKey>, /* encryption_key will be ignored if cs is
-                                                * snapshot or restore_shard */
+        opts: PrepareOpts<'_>,
     ) -> Result<ChangeSet> {
+        let PrepareOpts {
+            use_direct_io,
+            prepare_type,
+            reload_snap,
+            table_filter,
+            encryption_key,
+            meta_pack_reader,
+        } = opts;
+
         let mut ids: HashMap<u64, FileMeta> = HashMap::new();
         let mut lock_txn_file_refs: Vec<TxnFileRef> = vec![];
         let mut cs = ChangeSet::new(cs);
@@ -231,6 +246,7 @@ impl EngineCore {
             use_direct_io,
             prepare_type,
             encryption_key.clone(),
+            meta_pack_reader,
         )?;
 
         if !lock_txn_file_refs.is_empty() {
@@ -283,6 +299,7 @@ impl EngineCore {
         use_direct_io: bool,
         shard_prepare_type: FilePrepareType,
         encryption_key: Option<EncryptionKey>,
+        meta_pack_reader: Option<&MetaPackReader>,
     ) -> Result<()> {
         let start_time = Instant::now_coarse();
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(ids.len());
@@ -300,17 +317,32 @@ impl EngineCore {
             } else {
                 FilePrepareType::Local
             };
+            let tiny_meta = meta_pack_reader
+                .as_ref()
+                .and_then(|reader| reader.get(id))
+                .map(|tm| tm.try_convert_to(fm.file_type))
+                .map(|typed_tm| {
+                    PREPARE_COUNTER_VEC.tiny_meta_hit.inc();
+                    typed_tm
+                })
+                .unwrap_or_default();
 
             // Try open local file first.
             let mut table_meta_file = None;
             let file: Option<Arc<dyn File>> = match &prepare_type {
-                FilePrepareType::Local => self
-                    .open_local_file(id, fm.file_type, None) // TODO: support tiny meta.
-                    .ok()
-                    .map(|f| Arc::new(f) as _),
+                FilePrepareType::Local => {
+                    // TODO: support tiny meta.
+                    self.open_local_file(id, fm.file_type, None).ok().map(|f| {
+                        PREPARE_COUNTER_VEC.local_files.inc();
+                        Arc::new(f) as _
+                    })
+                }
                 FilePrepareType::Ia => self
-                    .try_open_local_ia_file(tag, id, fm, use_direct_io, &TypedTinyMeta::None)? // TODO: support tiny meta.
-                    .map(|f| Arc::new(f) as _),
+                    .try_open_local_ia_file(tag, id, fm, use_direct_io, &tiny_meta)?
+                    .map(|f| {
+                        PREPARE_COUNTER_VEC.local_ia_files.inc();
+                        Arc::new(f) as _
+                    }),
                 FilePrepareType::AutoIa(spec) => {
                     let (ia_auto_f, table_meta_f) = self.try_open_local_auto_ia_file(
                         tag,
@@ -322,7 +354,10 @@ impl EngineCore {
                         &TypedTinyMeta::None, // TODO: support tiny meta.
                     )?;
                     table_meta_file = table_meta_f;
-                    ia_auto_f.map(|f| Arc::new(f) as _)
+                    ia_auto_f.map(|f| {
+                        PREPARE_COUNTER_VEC.local_auto_ia_files.inc();
+                        Arc::new(f) as _
+                    })
                 }
             };
             if let Some(file) = file {
@@ -335,6 +370,8 @@ impl EngineCore {
                     None,
                     encryption_key.clone(),
                     self.columnar_meta_cache.clone(),
+                    tiny_meta,
+                    self.meta_pack_scheduler.as_ref(),
                 )?;
                 continue;
             }
@@ -366,6 +403,7 @@ impl EngineCore {
         for _ in 0..msg_count {
             self.recv_file_data(cs, use_direct_io, &result_rx, encryption_key.clone())?;
         }
+        PREPARE_COUNTER_VEC.total_files.inc_by(ids.len() as u64);
         info!("{} load tables by ids", tag; "ids" => ids.len(),
             "takes" => ?start_time.saturating_elapsed(), "available_permits" => available_permits);
         Ok(())
@@ -438,13 +476,22 @@ impl EngineCore {
         let file: Arc<dyn File> = match prepared {
             PreparedFileResult::Local { local_data } => self
                 .save_and_open_table(id, &fm, local_data, permit, use_direct_io)
-                .map(|f| Arc::new(f) as _)?,
+                .map(|f| {
+                    PREPARE_COUNTER_VEC.remote_files.inc();
+                    Arc::new(f) as _
+                })?,
             PreparedFileResult::Ia { table_meta_data } => self
                 .save_and_open_ia_file(id, &fm, table_meta_data, Some(permit), use_direct_io)
-                .map(|f| Arc::new(f) as _)?,
+                .map(|f| {
+                    PREPARE_COUNTER_VEC.remote_ia_files.inc();
+                    Arc::new(f) as _
+                })?,
             prepared @ PreparedFileResult::AutoIa { .. } => self
                 .save_and_open_auto_ia_file(id, &fm, prepared, permit, use_direct_io)
-                .map(|f| Arc::new(f) as _)?,
+                .map(|f| {
+                    PREPARE_COUNTER_VEC.remote_auto_ia_files.inc();
+                    Arc::new(f) as _
+                })?,
         };
         cs.add_file(
             file.id(),
@@ -455,6 +502,8 @@ impl EngineCore {
             None,
             encryption_key,
             self.columnar_meta_cache.clone(),
+            TypedTinyMeta::None,
+            self.meta_pack_scheduler.as_ref(),
         )?;
         Ok(())
     }
@@ -488,6 +537,7 @@ impl EngineCore {
             use_direct_io,
             FilePrepareType::Local,
             shard.encryption_key.clone(),
+            None,
         )?;
 
         // level 0

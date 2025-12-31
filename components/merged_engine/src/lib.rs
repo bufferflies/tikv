@@ -28,6 +28,7 @@ use kvengine::{
     dfs::{Dfs, S3Fs},
     ia::util::IaConfig,
     limiter::StoreLimiter,
+    table::tiny_meta::{CompactKeeper, MetaPackConfig, MetaPacker},
     IdVer, MetaIterator, Shard, ShardMeta, ShardTag, TERM_KEY,
 };
 use kvenginepb::ChangeSet;
@@ -130,6 +131,7 @@ pub struct MergedEngineConfig {
     pub raft_write_batch_size: ReadableSize,
     pub force_ia: bool,
     pub get_latest_backup_timeout: ReadableDuration,
+    pub meta_pack: MetaPackConfig,
 }
 
 impl Default for MergedEngineConfig {
@@ -142,6 +144,7 @@ impl Default for MergedEngineConfig {
             raft_write_batch_size: ReadableSize::mb(4),
             force_ia: true,
             get_latest_backup_timeout: ReadableDuration::minutes(30),
+            meta_pack: MetaPackConfig::default(),
         }
     }
 }
@@ -351,6 +354,8 @@ pub struct MergedEngine {
     peer_receiver: mpsc::Receiver<(u64, Box<PeerMsg>)>,
     _store_receiver: mpsc::Receiver<StoreMsg>, // applier never send store message.
     router: RaftRouter,
+    meta_packer: Option<MetaPacker>,
+    closed: bool,
 }
 
 impl MergedEngine {
@@ -433,8 +438,20 @@ impl MergedEngine {
         }
         let io_rate_limiter = Arc::new(IoRateLimiter::new(IoRateLimitMode::WriteOnly, true, true));
         let store_limiter = Arc::new(StoreLimiter::dummy());
+        let mut meta_packer = if ctx.config.meta_pack.enabled {
+            let path = ctx.local_dir.join("metas.pack");
+            let meta_packer = MetaPacker::new(path, ctx.config.meta_pack.clone())?;
+            Some(meta_packer)
+        } else {
+            None
+        };
+        let (meta_pack_scheduler, meta_pack_reader) = meta_packer
+            .as_mut()
+            .map(|x| (x.get_scheduler(), x.take_reader().unwrap()))
+            .unzip();
         let mut recover_handler = RecoverHandler::new(raft.clone());
         recover_handler.set_merged_engine(true);
+        recover_handler.set_meta_pack(meta_pack_scheduler, meta_pack_reader);
         let mut meta_iter = EmptyMetaIterator {};
         let kv = box_try!(Self::init_kv_engine(
             &ctx,
@@ -453,6 +470,10 @@ impl MergedEngine {
             )
         }));
         kv.set_loaded();
+
+        if let Some(meta_pack) = meta_packer.as_mut() {
+            box_try!(meta_pack.start_worker(kv.clone()));
+        }
 
         // Should be invoked after `load_shards_impl` (to setup the dependency).
         let delay_destroy_regions =
@@ -476,6 +497,8 @@ impl MergedEngine {
             _store_receiver: store_receiver,
             peer_receiver,
             router,
+            meta_packer,
+            closed: false,
         })
     }
 
@@ -511,6 +534,10 @@ impl MergedEngine {
 
     pub fn get_router(&self) -> RaftRouter {
         self.router.clone()
+    }
+
+    pub fn get_meta_pack_compact_keeper(&self) -> Option<CompactKeeper> {
+        self.meta_packer.as_ref().map(|x| x.compact_keeper())
     }
 
     fn load_shards_impl(
@@ -569,8 +596,17 @@ impl MergedEngine {
         Self::load_shard_metas_impl(&self.ctx, &mut recoverer, &states, None)
     }
 
-    pub fn close(&self) {
+    pub fn close(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+
+        if let Some(meta_packer) = self.meta_packer.take() {
+            meta_packer.stop();
+        }
         self.raft.stop_worker(false);
+        self.raft.close_writer();
         self.kv.close();
     }
 

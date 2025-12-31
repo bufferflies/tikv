@@ -22,7 +22,7 @@ use grpcio_health::{create_health, HealthService, ServingStatus};
 use hyper::{http, StatusCode};
 use kvengine::{
     dfs::S3Fs,
-    table::{InnerKey, SnapVersion},
+    table::{tiny_meta, InnerKey, SnapVersion},
     Engine, IdVer, ShardMeta, ShardTag, SnapAccess, UserMeta, LOCK_CF, WRITE_CF,
 };
 use kvproto::{
@@ -355,6 +355,7 @@ impl ReplicationWorker {
             sp_mgr.shutdown();
         }
         self.shutdown_report_region_loops();
+        self.merged_engine.close();
     }
 
     fn shutdown_report_region_loops(&mut self) {
@@ -1859,6 +1860,9 @@ impl ReplicationWorker {
         let runtime = self.runtime.handle().clone();
         let scheduler = self.scheduler();
         let kv = self.merged_engine.kv.clone();
+        // Pause meta pack compaction during prepare shards. Otherwise, the prepared
+        // files may be compacted before load shards into kvengine.
+        let meta_pack_compact_keeper = self.merged_engine.get_meta_pack_compact_keeper();
         let http_client = self.http_client.clone();
         tokio::spawn(tikv_util::init_task_local(async move {
             let start_time = Instant::now_coarse();
@@ -1879,6 +1883,8 @@ impl ReplicationWorker {
             // Note that the rfengine will update at the same time. So during load shards,
             // we will prepare again.
             let prepare_time = Instant::now_coarse();
+            let compact_guard: Option<tiny_meta::CompactPauseGuard> =
+                meta_pack_compact_keeper.map(|x| x.pause());
             {
                 let scheduler = scheduler.clone();
                 let kv = kv.clone();
@@ -1914,6 +1920,8 @@ impl ReplicationWorker {
             // Load shards.
             let load_shards_time = Instant::now_coarse();
             let cb_with_log = move |res: Result<()>| {
+                drop(compact_guard);
+
                 let end_time = Instant::now_coarse();
                 info!("add_keyspace: {:?}", &res;
                     "keyspace" => keyspace_id,

@@ -7,7 +7,12 @@ use bytes::{Buf, Bytes};
 use cloud_encryption::EncryptionKey;
 use collections::HashSet;
 use kvengine::{
-    collect_snap_lock_txn_file_refs, table::SnapVersion, Engine, FilePrepareType, Shard, ShardMeta,
+    collect_snap_lock_txn_file_refs,
+    table::{
+        tiny_meta::{MetaPackReader, MetaPackScheduler},
+        SnapVersion,
+    },
+    Engine, FilePrepareType, PrepareOpts, Shard, ShardMeta,
 };
 use kvenginepb::ChangeSet;
 use kvproto::{
@@ -39,6 +44,9 @@ pub struct RecoverHandler {
     contained_region_ids: Option<HashSet<u64>>,
     files_in_blacklist: Vec<u64>,
     merged_engine: bool,
+
+    meta_pack_scheduler: Option<MetaPackScheduler>,
+    meta_pack_reader: Option<MetaPackReader>,
 }
 
 pub const BLACK_LIST_FILE: &str = "black_list_file";
@@ -121,6 +129,8 @@ impl RecoverHandler {
             contained_region_ids: None,
             files_in_blacklist: vec![],
             merged_engine: false,
+            meta_pack_scheduler: None,
+            meta_pack_reader: None,
         }
     }
 
@@ -130,6 +140,15 @@ impl RecoverHandler {
 
     pub fn set_merged_engine(&mut self, merged_engine: bool) {
         self.merged_engine = merged_engine;
+    }
+
+    pub fn set_meta_pack(
+        &mut self,
+        scheduler: Option<MetaPackScheduler>,
+        reader: Option<MetaPackReader>,
+    ) {
+        self.meta_pack_scheduler = scheduler;
+        self.meta_pack_reader = reader;
     }
 
     pub fn set_black_list(&mut self, black_list: BlackList) {
@@ -284,6 +303,7 @@ impl RecoverHandler {
                         meta,
                         encryption_key.as_ref(),
                         &custom,
+                        self.meta_pack_reader.as_ref(),
                     )?)
                 } else {
                     None
@@ -316,6 +336,14 @@ impl kvengine::RecoverHandler for RecoverHandler {
         let mut ctx = ApplyContext::new(engine.clone(), None);
         self.recover_with_apply_ctx(&mut ctx, shard, meta, is_parent)
     }
+
+    fn meta_pack_scheduler(&self) -> Option<&MetaPackScheduler> {
+        self.meta_pack_scheduler.as_ref()
+    }
+
+    fn meta_pack_reader(&self) -> Option<&MetaPackReader> {
+        self.meta_pack_reader.as_ref()
+    }
 }
 
 fn prepare_txn_file_ref(
@@ -333,6 +361,7 @@ fn recover_change_set(
     meta: &ShardMeta,
     encryption_key: Option<&EncryptionKey>,
     custom: &CustomRaftLog<'_>,
+    meta_pack_reader: Option<&MetaPackReader>,
 ) -> kvengine::Result<ChangeSet> {
     let mut cs = custom.get_change_set().unwrap();
     // Change sets that only set property are applied synchronously by
@@ -344,11 +373,12 @@ fn recover_change_set(
             // synchronously.
             let cs1 = ctx.engine.prepare_change_set(
                 std::mem::take(&mut cs),
-                false,
-                FilePrepareType::from_shard_meta(meta),
-                None,
-                None,
-                encryption_key.cloned(),
+                PrepareOpts {
+                    prepare_type: FilePrepareType::from_shard_meta(meta),
+                    encryption_key: encryption_key.cloned(),
+                    meta_pack_reader,
+                    ..Default::default()
+                },
             )?;
             ctx.engine.apply_change_set(&cs1)?;
             cs = cs1.into_inner();

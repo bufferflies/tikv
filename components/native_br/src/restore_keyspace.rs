@@ -29,7 +29,7 @@ use kvengine::{
     ia::util::IaConfig,
     limiter::StoreLimiter,
     table::{BoundedDataSet, DataBound, InnerKey},
-    FilePrepareType, IdAllocator, IdVer, LoadTableFilterFn, ShardMeta, ShardRange, ShardStats,
+    IdAllocator, IdVer, LoadTableFilterFn, PrepareOpts, ShardMeta, ShardRange, ShardStats,
     ShardTag, ENCRYPTION_KEY, GLOBAL_SHARD_END_KEY,
 };
 use kvenginepb as pb;
@@ -2599,11 +2599,10 @@ impl MetaApplier {
                         .engine
                         .prepare_change_set(
                             cs,
-                            false,
-                            FilePrepareType::Local,
-                            None,
-                            None,
-                            self.encryption_key.clone(),
+                            PrepareOpts {
+                                encryption_key: self.encryption_key.clone(),
+                                ..Default::default()
+                            },
                         )
                         .and_then(|cs| self.engine.apply_change_set(&cs))
                     {
