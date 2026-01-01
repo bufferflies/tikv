@@ -179,12 +179,16 @@ fn test_random_all_impl(use_builtin_dfs: bool) {
         ..Default::default()
     };
     let rfengine_cache_dir = temp_dir.path().join("rfengine_cache");
-    let rfengine_cache = RfEngineCache::new(
-        rfengine_cache_dir,
-        restore_config.clone(),
-        Arc::new(s3fs.clone()),
-        pd_client.clone(),
-    );
+    let rfengine_cache = if switches.enable_rfengine_cache {
+        Some(RfEngineCache::new(
+            rfengine_cache_dir,
+            restore_config.clone(),
+            Arc::new(s3fs.clone()),
+            pd_client.clone(),
+        ))
+    } else {
+        None
+    };
     if !use_builtin_dfs {
         let object_cache = cluster.create_object_cache_randomly();
         let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
@@ -666,6 +670,7 @@ pub(crate) struct Switches {
     pub enable_oss_chaos: bool,
     pub txn_check_backup_ts: bool,
     pub enable_value_cache: bool,
+    pub enable_rfengine_cache: bool,
     pub restore_lower_memory: bool,
 }
 
@@ -676,6 +681,7 @@ impl Switches {
         let enable_oss_chaos = rng.gen_bool(env_param("OSS_CHAOS_RATIO", 0.2));
         let txn_check_backup_ts = env_switch("TXN_CHECK_BACKUP_TS");
         let enable_value_cache = env_switch("ENABLE_VALUE_CACHE");
+        let enable_rfengine_cache = env_switch_opt("ENABLE_RFENGINE_CACHE", 0);
         let lower_memory = rng.gen_bool(0.5);
 
         Self {
@@ -683,6 +689,7 @@ impl Switches {
             enable_oss_chaos,
             txn_check_backup_ts,
             enable_value_cache,
+            enable_rfengine_cache,
             restore_lower_memory: lower_memory,
         }
     }

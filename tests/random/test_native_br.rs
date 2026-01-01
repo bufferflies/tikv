@@ -49,11 +49,13 @@ pub(crate) fn do_restore_keyspace(
     reporter: Arc<dyn ReportRestoreStepTrait>,
     object_cache: Option<ObjectCache>,
     limiter: Option<Arc<ThroughputLimiter>>,
-    rfengine_cache: RfEngineCache,
+    rfengine_cache: Option<RfEngineCache>,
 ) -> native_br::Result<restore_keyspace::RestoredKeyspace> {
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(S3Fs::new_from_config(dfs_config));
-    rfengine_cache.fill_cache(backup_name, truncate_ts, object_cache.clone())?;
+    if let Some(rf_cache) = &rfengine_cache {
+        rf_cache.fill_cache(backup_name, truncate_ts, object_cache.clone())?;
+    }
     restore_keyspace::restore_keyspace(
         keyspace,
         target_keyspace,
@@ -67,7 +69,7 @@ pub(crate) fn do_restore_keyspace(
         reporter,
         object_cache,
         limiter,
-        Some(rfengine_cache),
+        rfengine_cache,
     )
 }
 
@@ -191,7 +193,7 @@ pub(crate) fn spawn_restore_keyspace(
     object_cache: Option<ObjectCache>,
     limiter: Option<Arc<ThroughputLimiter>>,
     timeout: Duration,
-    rfengine_cache: RfEngineCache,
+    rfengine_cache: Option<RfEngineCache>,
 ) -> JoinHandle<()> {
     let s3fs = s3fs.clone();
     std::thread::spawn(move || {
@@ -214,7 +216,9 @@ pub(crate) fn spawn_restore_keyspace(
                     continue;
                 }
             };
-            rfengine_cache.register_keyspace(backup.keyspace_id, backup.backup_ts);
+            if let Some(rf_cache) = &rfengine_cache {
+                rf_cache.register_keyspace(backup.keyspace_id, backup.backup_ts);
+            }
 
             let source_keyspace = backup.keyspace_id;
             let branching = source_keyspace > 0 && rng.gen_bool(0.5);
