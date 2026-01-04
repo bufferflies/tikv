@@ -134,7 +134,10 @@ impl IaFile {
             Some(segment_offsets) if segment_offsets.len() >= 2 => {
                 // Require at least two offsets to avoid out-of-bounds in align_to_segment.
                 PREPARE_COUNTER_VEC.tiny_meta_segment_offsets_hit.inc();
-                f.segment_offsets = segment_offsets.clone();
+                f.segment_offsets = segment_offsets
+                    .iter()
+                    .map(|&offset| u64::from(offset))
+                    .collect();
             }
             Some(segment_offsets) => {
                 warn!(

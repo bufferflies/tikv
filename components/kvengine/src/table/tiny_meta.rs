@@ -50,7 +50,7 @@ bitflags! {
 pub struct TinyMeta {
     pub file_id: u64,
     pub footer_and_properties: Bytes,      // Footer + properties.
-    pub segment_offsets: Option<Vec<u64>>, // For IA only.
+    pub segment_offsets: Option<Vec<u32>>, // For IA only.
 }
 
 impl fmt::Debug for TinyMeta {
@@ -99,7 +99,7 @@ impl TinyMeta {
             + U8_SIZE
             + U32_SIZE
             + self.footer_and_properties.len()
-            + include_segment_offsets as usize * (U32_SIZE + segment_offsets_len * U64_SIZE);
+            + include_segment_offsets as usize * (U32_SIZE + segment_offsets_len * U32_SIZE);
         let mut buf = Vec::with_capacity(cap);
         buf.put_u64_le(self.file_id);
         buf.put_u8(flag.bits());
@@ -108,7 +108,7 @@ impl TinyMeta {
         if let Some(segment_offsets) = &self.segment_offsets {
             buf.put_u32_le(box_try!(segment_offsets.len().try_into()));
             for offset in segment_offsets {
-                buf.put_u64_le(*offset);
+                buf.put_u32_le(*offset);
             }
         }
         Ok(buf)
@@ -148,10 +148,10 @@ impl TinyMeta {
             }
             let segment_offsets_len = buf.get_u32_le() as usize;
             let segment_offsets_bytes =
-                segment_offsets_len.checked_mul(U64_SIZE).ok_or_else(|| {
+                segment_offsets_len.checked_mul(U32_SIZE).ok_or_else(|| {
                     Error::CorruptedMetaPack(format!(
                         "segment offsets size overflow: {} * {}",
-                        segment_offsets_len, U64_SIZE
+                        segment_offsets_len, U32_SIZE
                     ))
                 })?;
             if buf.remaining() < segment_offsets_bytes {
@@ -163,7 +163,7 @@ impl TinyMeta {
             }
             let mut segment_offsets = Vec::with_capacity(segment_offsets_len);
             for _ in 0..segment_offsets_len {
-                segment_offsets.push(buf.get_u64_le());
+                segment_offsets.push(buf.get_u32_le());
             }
             Some(segment_offsets)
         };
@@ -273,6 +273,21 @@ impl From<SstTinyMeta> for TinyMeta {
 }
 
 impl SstTinyMeta {
+    fn convert_segment_offsets(file_id: u64, offsets: &[u64]) -> Option<Vec<u32>> {
+        let mut converted = Vec::with_capacity(offsets.len());
+        for &offset in offsets {
+            match u32::try_from(offset) {
+                Ok(value) => converted.push(value),
+                Err(_) => {
+                    warn!("SstTinyMeta: segment offset overflow";
+                        "file" => file_id, "offset" => offset);
+                    return None;
+                }
+            }
+        }
+        Some(converted)
+    }
+
     pub fn from_sstable(
         sstable: &SsTable,
         footer: sstable::Footer,
@@ -286,11 +301,11 @@ impl SstTinyMeta {
 
         let segment_offsets = sstable
             .try_get_ia_file()
-            .map(|f| f.segment_offsets.clone())
+            .and_then(|f| Self::convert_segment_offsets(sstable.id(), &f.segment_offsets))
             .or_else(|| {
-                sstable
-                    .try_get_auto_ia_file()
-                    .map(|f| f.ia_file.segment_offsets.clone())
+                sstable.try_get_auto_ia_file().and_then(|f| {
+                    Self::convert_segment_offsets(sstable.id(), &f.ia_file.segment_offsets)
+                })
             });
 
         Self {
@@ -1573,7 +1588,9 @@ mod tests {
         let (table_data, tiny_meta_off, meta_off) = make_sstable_data(file_id, n, 7, 10, false);
         let mut rng = thread_rng();
         let amount = rng.gen_range(0..5);
-        let segment_offsets = with_offsets.then(|| (0..meta_off).choose_multiple(&mut rng, amount));
+        let meta_off_u32 = u32::try_from(meta_off).expect("meta_off should fit in u32");
+        let segment_offsets =
+            with_offsets.then(|| (0..meta_off_u32).choose_multiple(&mut rng, amount));
         (
             TinyMeta {
                 file_id,

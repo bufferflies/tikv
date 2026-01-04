@@ -167,5 +167,7 @@ fn test_open_for_sst_with_tiny_meta_matches() {
     assert_eq!(ia_file.size, ia_with_tiny.size);
     assert_eq!(ia_file.ftype, ia_with_tiny.ftype);
     assert_eq!(ia_file.table_meta_off, ia_with_tiny.table_meta_off);
+    let segment_offsets_u64: Vec<u64> = segment_offsets.iter().copied().map(u64::from).collect();
+    assert_eq!(ia_file.segment_offsets, segment_offsets_u64);
     assert_eq!(ia_file.segment_offsets, ia_with_tiny.segment_offsets);
 }
