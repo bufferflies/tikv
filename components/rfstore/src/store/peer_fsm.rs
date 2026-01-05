@@ -509,6 +509,7 @@ impl<'a> PeerMsgHandler<'a> {
             let _ = peer.raft_group.campaign();
             peer.need_campaign = false;
         }
+        peer.check_snapshot_ack_timeout();
     }
 
     fn on_apply_result(&mut self, res: MsgApplyResult) {
