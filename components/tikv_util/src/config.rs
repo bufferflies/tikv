@@ -371,7 +371,7 @@ impl AbsoluteOrPercentSize {
     pub fn as_disk_size(&self, path: &Path) -> std::io::Result<u64> {
         match self {
             Self::Abs(size) => Ok(size.0),
-            Self::Percent(_) => Ok(self.absolute(get_disk_capacity(path)?)),
+            Self::Percent(_) => Ok(self.absolute(get_capacity(path)?)),
         }
     }
 }
@@ -1315,7 +1315,7 @@ use std::collections::HashMap;
 
 use num_traits::Zero;
 
-use crate::sys::disk::get_disk_capacity;
+use crate::sys::disk::get_capacity;
 
 /// TomlLine use to parse one line content of a toml file
 #[derive(Debug)]

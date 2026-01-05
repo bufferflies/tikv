@@ -124,6 +124,18 @@ impl RfEngine {
     }
 }
 
+impl RfEngine {
+    #[inline]
+    pub fn db_dir(&self) -> Option<&Path> {
+        Some(&self.core.dir)
+    }
+
+    #[inline]
+    pub fn wal_dir(&self) -> Option<&Path> {
+        Some(self.core.wal_dir())
+    }
+}
+
 pub struct RfEngineCore {
     /// The primary directory holding engine data (e.g., WAL files).
     pub dir: PathBuf,

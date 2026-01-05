@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 #![feature(cell_update)]
+#![feature(div_duration)]
 #![feature(let_chains)]
 #![feature(debug_closure_helpers)]
 

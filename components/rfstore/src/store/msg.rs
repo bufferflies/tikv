@@ -3,6 +3,7 @@
 use std::{borrow::Cow, collections::VecDeque, fmt, fmt::Debug, sync::Arc, time::Duration};
 
 use cloud_encryption::EncryptionKey;
+use health_controller::{InspectFactor, LatencyInspector};
 use kvengine::table::columnar::SchemaFile;
 use kvenginepb::TxnFileRef;
 use kvproto::{
@@ -15,14 +16,15 @@ use kvproto::{
 };
 use pd_client::{BucketMeta, BucketStat};
 use raft_proto::eraftpb;
-use raftstore::store::{fsm::ChangeObserver, util::KeysInfoFormatter};
+use raftstore::store::fsm::ChangeObserver;
 use strum::{EnumCount, EnumVariantNames};
 use tikv_util::time::Instant;
 use trace_event::types::TraceContext;
 
 use super::{Peer, RaftApplyState};
 use crate::store::{
-    ApplyMetrics, ExecResult, Proposal, RegionIdVer, RegionSnapshot, TrimOverBoundParameter,
+    util::KeysInfoFormatter, ApplyMetrics, ExecResult, Proposal, RegionIdVer, RegionSnapshot,
+    TrimOverBoundParameter,
 };
 
 #[derive(EnumCount, EnumVariantNames, Debug)]
@@ -199,6 +201,12 @@ pub enum StoreMsg {
         callback: Callback,
     },
     CheckMerge(u64),
+    /// Inspect the latency of rfstore.
+    LatencyInspect {
+        factor: InspectFactor,
+        send_time: Instant,
+        inspector: LatencyInspector,
+    },
     Stop,
 }
 
@@ -253,6 +261,12 @@ impl StoreMsg {
                 region_id: *region_id,
             },
             StoreMsg::CheckMerge(region_id) => StoreMsgDebug::CheckMerge(*region_id),
+            StoreMsg::LatencyInspect {
+                factor, send_time, ..
+            } => StoreMsgDebug::LatencyInspect {
+                factor: *factor,
+                send_time: *send_time,
+            },
             StoreMsg::Stop => StoreMsgDebug::Stop,
         }
     }
@@ -307,6 +321,10 @@ pub(crate) enum StoreMsgDebug {
         region_id: u64,
     },
     CheckMerge(u64),
+    LatencyInspect {
+        factor: InspectFactor,
+        send_time: Instant,
+    },
     Stop,
 }
 

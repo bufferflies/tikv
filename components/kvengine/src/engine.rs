@@ -6,7 +6,7 @@ use std::{
     fmt::{Debug, Display, Formatter},
     iter::{FromIterator, Iterator},
     ops::Deref,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -74,6 +74,19 @@ impl Debug for Engine {
         let cnt = self.shards.len();
         let str = format!("num_shards: {}", cnt);
         f.write_str(&str)
+    }
+}
+
+impl Engine {
+    #[inline]
+    pub fn db_dir(&self) -> Option<&Path> {
+        Some(&self.core.opts.local_dir)
+    }
+
+    // By default, the no WALs for KvEngine.
+    #[inline]
+    pub fn wal_dir(&self) -> Option<&Path> {
+        None
     }
 }
 

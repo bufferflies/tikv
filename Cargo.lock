@@ -1880,6 +1880,7 @@ dependencies = [
  "futures-timer",
  "grpcio",
  "grpcio-health",
+ "health_controller",
  "hex 0.4.3",
  "hyper",
  "itertools",
@@ -3919,6 +3920,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7249a3129cbc1ffccd74857f81464a323a152173cdb134e0fd81bc803b29facf"
 dependencies = [
  "hashbrown 0.11.2",
+]
+
+[[package]]
+name = "health_controller"
+version = "0.1.0"
+dependencies = [
+ "collections",
+ "grpcio-health",
+ "kvproto",
+ "lazy_static",
+ "ordered-float",
+ "parking_lot 0.12.5",
+ "prometheus",
+ "prometheus-static-metric",
+ "slog",
+ "slog-global",
+ "strum 0.23.0",
+ "strum_macros 0.23.1",
+ "tikv_util",
 ]
 
 [[package]]
@@ -7383,6 +7403,7 @@ dependencies = [
  "futures 0.3.28",
  "futures-util",
  "grpcio",
+ "health_controller",
  "itertools",
  "keys",
  "kvengine",
@@ -7401,6 +7422,7 @@ dependencies = [
  "raft-proto",
  "raftstore",
  "rand 0.8.5",
+ "resource_metering",
  "rfengine",
  "rstest",
  "schema",
@@ -8871,6 +8893,12 @@ dependencies = [
 
 [[package]]
 name = "strum"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cae14b91c7d11c9a851d3fbc80a963198998c2a64eec840477fa92d8ce9b70bb"
+
+[[package]]
+name = "strum"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "063e6045c0e62079840579a7e47a355ae92f60eb74daaf156fb1e84ba164e63f"
@@ -8896,6 +8924,19 @@ dependencies = [
  "heck 0.3.1",
  "proc-macro2",
  "quote",
+ "syn 1.0.107",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bb0dc7ee9c15cea6199cde9a127fa16a4c5819af85395457ad72d68edc85a38"
+dependencies = [
+ "heck 0.3.1",
+ "proc-macro2",
+ "quote",
+ "rustversion",
  "syn 1.0.107",
 ]
 
@@ -9178,6 +9219,7 @@ dependencies = [
  "futures 0.3.28",
  "glob",
  "grpcio",
+ "health_controller",
  "hex 0.4.3",
  "hyper",
  "kvengine",
@@ -9362,6 +9404,7 @@ dependencies = [
  "futures 0.3.28",
  "glob",
  "grpcio",
+ "health_controller",
  "hex 0.4.3",
  "hyper",
  "keys",
@@ -9499,6 +9542,7 @@ dependencies = [
  "futures 0.3.28",
  "grpcio",
  "grpcio-health",
+ "health_controller",
  "hex 0.4.3",
  "http 0.2.9",
  "hyper",
@@ -9544,6 +9588,8 @@ dependencies = [
  "slog-global",
  "sqlx",
  "sst_importer",
+ "strum 0.23.0",
+ "strum_macros 0.23.1",
  "tempfile",
  "test_backup",
  "test_cloud_server",
@@ -9826,6 +9872,7 @@ dependencies = [
  "getset",
  "grpcio",
  "grpcio-health",
+ "health_controller",
  "hex 0.4.3",
  "http 0.2.9",
  "hyper",
@@ -10142,6 +10189,7 @@ dependencies = [
  "derive_more",
  "error_code",
  "fail 0.5.0",
+ "fs2",
  "futures 0.3.28",
  "futures-util",
  "gag",

@@ -539,6 +539,7 @@ impl PeerStorage {
             shard_meta = Some(meta);
         }
         let last_term = init_last_term(&engines, peer_id, &region, raft_state)?;
+        validate_states(peer_id, &region, &raft_state, &apply_state)?;
         Ok(PeerStorage {
             engines,
             peer_id,
@@ -982,6 +983,24 @@ fn init_last_term(
         region.get_id(),
         last_index
     ))
+}
+
+fn validate_states(
+    peer_id: u64,
+    region: &metapb::Region,
+    raft_state: &RaftState,
+    apply_state: &RaftApplyState,
+) -> Result<()> {
+    let commit_index = raft_state.get_commit();
+    let applied_index = apply_state.get_applied_index();
+    if applied_index > commit_index {
+        info!("applied index is larger than recorded commit index";
+            "region_id" => region.get_id(),
+            "peer_id" => peer_id,
+            "apply" => applied_index,
+            "commit" => commit_index);
+    }
+    Ok(())
 }
 
 // When we bootstrap the region we must call this to initialize region local

@@ -28,7 +28,11 @@ fail = "0.5"
 file_system = { path = "../file_system" }
 futures = "0.3"
 glob = "0.3"
-grpcio = { version = "0.10", default-features = false, features = ["openssl-vendored", "protobuf-codec"] }
+grpcio = { version = "0.10", default-features = false, features = [
+    "openssl-vendored",
+    "protobuf-codec",
+] }
+health_controller = { workspace = true }
 hex = "0.4"
 hyper = { version = "0.14", features = ["full"] }
 kvengine = { path = "../kvengine", features = ["testexport"] }
@@ -43,7 +47,10 @@ protobuf = { version = "2.8", features = ["bytes"] }
 quick-xml = { version = "0.23.1", features = ["serialize"] }
 rand = "0.8"
 regex = "1.5"
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "json"] }
+reqwest = { version = "0.11", default-features = false, features = [
+    "blocking",
+    "json",
+] }
 rfengine = { path = "../rfengine" }
 rfstore = { path = "../rfstore" }
 rstest = "0.18"
@@ -52,7 +59,10 @@ security = { path = "../security", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"
 serde_json = "1.0"
-slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
+slog = { version = "2.3", features = [
+    "max_level_trace",
+    "release_max_level_debug",
+] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 tempfile = "3.0"
 test_pd = { path = "../test_pd" }

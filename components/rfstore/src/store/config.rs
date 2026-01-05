@@ -16,7 +16,7 @@ use serde_with::with_prefix;
 use tikv_util::{
     box_err,
     config::{ReadableDuration, ReadableSize},
-    sys::SysQuota,
+    sys::{path_in_diff_mount_point, SysQuota},
     warn,
 };
 use time::Duration as TimeDuration;
@@ -138,8 +138,6 @@ pub struct Config {
     /// If it is 0, it means io tasks are handled in store threads.
     #[online_config(skip)]
     pub store_io_pool_size: usize,
-    #[online_config(skip)]
-    pub store_io_notify_capacity: usize,
 
     #[online_config(skip)]
     pub future_poll_size: usize,
@@ -210,10 +208,6 @@ pub struct Config {
     #[online_config(skip)]
     pub clean_stale_peer_delay: ReadableDuration,
 
-    // TODO: slow store detection is not support yet.
-    // Interval to inspect the latency of raftstore for slow store detection.
-    pub inspect_interval: ReadableDuration,
-
     // TODO: resolved_ts is not support yet.
     // Interval to report min resolved ts, if it is zero, it means disabled.
     pub report_min_resolved_ts_interval: ReadableDuration,
@@ -274,10 +268,6 @@ pub struct Config {
     // They represent the main operational parameters for Raftstore.
     // =====================================================================
 
-    // When the approximate size of raft log entries exceed this value,
-    // gc will be forced trigger.
-    pub raft_log_gc_size_limit: Option<ReadableSize>,
-
     // minimizes disruption when a partitioned node rejoins the cluster by using a two phase
     // election.
     #[online_config(skip)]
@@ -306,8 +296,14 @@ pub struct Config {
     // When the entry exceed the max size, reject to propose it.
     pub raft_entry_max_size: ReadableSize,
 
+    // When the approximate size of raft log entries exceed this value,
+    // gc will be forced trigger.
+    pub raft_log_gc_size_limit: Option<ReadableSize>,
     // Interval to gc unnecessary raft log.
     pub raft_log_gc_tick_interval: ReadableDuration,
+    /// The maximum raft log numbers that applied_index can be ahead of
+    /// persisted_index.
+    pub max_apply_unpersisted_log_limit: u64,
 
     // Interval (ms) to check region whether need to be split or not.
     pub split_region_check_tick_interval: ReadableDuration,
@@ -360,6 +356,9 @@ pub struct Config {
     #[serde(flatten, with = "prefix_store")]
     pub store_batch_system: BatchSystemConfig,
 
+    #[online_config(skip)]
+    pub store_io_notify_capacity: usize,
+
     // Deprecated! These configuration has been moved to Coprocessor.
     // They are preserved for compatibility check.
     #[doc(hidden)]
@@ -381,6 +380,22 @@ pub struct Config {
     /// applying raft logs before being marked as ready.
     #[online_config(hidden)]
     pub store_busy_apply_check_window: ReadableDuration,
+
+    #[online_config(hidden)]
+    // Interval to inspect the latency of rfstore for slow store detection.
+    pub inspect_interval: ReadableDuration,
+    #[online_config(hidden)]
+    // Interval to inspect the latency of flushes on kvdb for slow store detection.
+    // If the kvdb uses the same mount path with raftdb, the default value will be
+    // optimized to `0` to avoid duplicated inspection.
+    pub inspect_kvdb_interval: ReadableDuration,
+    #[online_config(hidden)]
+    // Interval to inspect the network latency between PD and tikv for slow store detection.
+    pub inspect_network_interval: ReadableDuration,
+    #[doc(hidden)]
+    #[online_config(hidden)]
+    /// Threshold of CPU utilization to inspect for slow store detection.
+    pub inspect_cpu_util_thd: f64,
 
     // =====================================================================
     // Extra configs for Next-gen
@@ -460,7 +475,6 @@ impl Default for Config {
             raft_log_compact_sync_interval: ReadableDuration::secs(2),
             raft_log_gc_threshold: 50,
             raft_log_gc_count_limit: None,
-            raft_log_gc_size_limit: Some(ReadableSize::mb(32)),
             raft_log_reserve_max_ticks: 6,
             raft_engine_purge_interval: ReadableDuration::secs(10),
             raft_entry_cache_life_time: ReadableDuration::secs(30),
@@ -494,7 +508,6 @@ impl Default for Config {
             use_delete_range: false,
             cleanup_import_sst_interval: ReadableDuration::minutes(10),
             store_io_pool_size: 0,
-            store_io_notify_capacity: 40960,
             future_poll_size: 1,
             apply_yield_duration: ReadableDuration::millis(500),
             apply_yield_write_size: ReadableSize::kb(32),
@@ -509,7 +522,6 @@ impl Default for Config {
             io_reschedule_hotpot_duration: ReadableDuration::secs(5),
             raft_msg_flush_interval: ReadableDuration::micros(250),
             clean_stale_peer_delay: ReadableDuration::minutes(0),
-            inspect_interval: ReadableDuration::millis(500),
             report_min_resolved_ts_interval: ReadableDuration::secs(1),
             report_region_buckets_tick_interval: ReadableDuration::secs(10),
             max_snapshot_file_raw_size: ReadableSize::mb(100),
@@ -538,7 +550,11 @@ impl Default for Config {
             raft_max_size_per_msg: ReadableSize::mb(1),
             raft_max_inflight_msgs: 256,
             raft_entry_max_size: ReadableSize::mb(8),
+            raft_log_gc_size_limit: Some(ReadableSize::mb(32)),
             raft_log_gc_tick_interval: ReadableDuration::secs(3),
+            // Enlarged to 16k. NextGen currently lacks entry cache eviction, so memory
+            // usage can be higher than OP; pick a more conservative default.
+            max_apply_unpersisted_log_limit: 16384,
             split_region_check_tick_interval: ReadableDuration::secs(3),
             pd_heartbeat_tick_interval: ReadableDuration::minutes(1),
             pd_store_heartbeat_tick_interval: ReadableDuration::secs(10),
@@ -557,9 +573,17 @@ impl Default for Config {
                 ..Default::default()
             },
             store_batch_system: BatchSystemConfig::default(),
+            store_io_notify_capacity: 40960,
             cmd_batch: true,
             region_max_size: ReadableSize(0),
             region_split_size: ReadableSize::mb(SPLIT_SIZE_MB),
+            inspect_interval: ReadableDuration::millis(100),
+            inspect_kvdb_interval: ReadableDuration::millis(100),
+            inspect_network_interval: ReadableDuration::millis(0), // disabled by default
+            // Default `inspect_cpu_util_thd` is 0.6: when CPU utilization falls below
+            // `inspect_cpu_util_thd`, delayed inspected messages are treated as a slow-store
+            // signal. This keeps the false-positive rate low for typical workloads.
+            inspect_cpu_util_thd: 0.6,
             // Extra configs for Next-gen
             local_file_gc_tick_interval: ReadableDuration::minutes(10),
             local_file_gc_timeout: ReadableDuration::minutes(30),
@@ -921,6 +945,24 @@ impl Config {
         Ok(())
     }
 
+    pub fn optimize_for(&mut self, rf_wal_dir: &str, rfdb_dir: &str, kvdb_dir: &str) {
+        // Optimize the inspector configurations.
+        let kvengine_independent_with_rfengine = path_in_diff_mount_point(rf_wal_dir, kvdb_dir)
+            && path_in_diff_mount_point(rfdb_dir, kvdb_dir);
+        self.tune_inspector_configs(kvengine_independent_with_rfengine);
+    }
+
+    /// Optimize the interval of different inspectors according to the
+    /// configuration.
+    fn tune_inspector_configs(&mut self, separated_raft_mount_path: bool) {
+        // If the kvdb uses the same mount path with raftdb, the health status
+        // of kvdb will be inspected by raftstore automatically. So it's not necessary
+        // to inspect kvdb.
+        if !separated_raft_mount_path {
+            self.inspect_kvdb_interval = ReadableDuration::ZERO;
+        }
+    }
+
     // TODO
     pub fn write_into_metrics(&self) {}
 }
@@ -993,6 +1035,34 @@ mod tests {
             cfg.raft_log_gc_no_kv_count,
             default_cfg.raft_log_gc_no_kv_count
         );
+    }
+
+    #[test]
+    fn test_config_optimization() {
+        let mut cfg = Config::new();
+
+        cfg.optimize_for("./", "./", "./");
+        assert_eq!(cfg.inspect_kvdb_interval, ReadableDuration::ZERO);
+
+        cfg.inspect_kvdb_interval = ReadableDuration::secs(10);
+        cfg.tune_inspector_configs(false);
+        assert_eq!(cfg.inspect_kvdb_interval, ReadableDuration::ZERO);
+
+        cfg = Config::new();
+        cfg.inspect_kvdb_interval = ReadableDuration::secs(1);
+        cfg.tune_inspector_configs(false);
+        assert_eq!(cfg.inspect_kvdb_interval, ReadableDuration::ZERO);
+        cfg.tune_inspector_configs(true);
+        assert_eq!(cfg.inspect_kvdb_interval, ReadableDuration::ZERO);
+
+        cfg.inspect_kvdb_interval = ReadableDuration::secs(1);
+        cfg.tune_inspector_configs(true);
+        assert_eq!(cfg.inspect_kvdb_interval, ReadableDuration::secs(1));
+
+        cfg = Config::new();
+        cfg.inspect_kvdb_interval = ReadableDuration::millis(1);
+        cfg.tune_inspector_configs(true);
+        assert_eq!(cfg.inspect_kvdb_interval, ReadableDuration::millis(1));
     }
 }
 

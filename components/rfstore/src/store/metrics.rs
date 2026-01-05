@@ -143,4 +143,15 @@ lazy_static! {
             "Bucketed histogram of apply future running time duration.",
             exponential_buckets(0.00001, 2.0, 26).unwrap()
         ).unwrap();
+
+    pub static ref STORE_RAFT_APPLY_AHEAD_PERSIST_HISTOGRAM: Histogram = register_histogram!(
+        "tikv_raft_apply_ahead_of_persist",
+        "Histogram of the raft log lag between persisted index and applied index",
+        exponential_buckets(1.0, 2.0, 20).unwrap()
+    ).unwrap();
+
+    pub static ref STORE_RAFT_ENABLE_UNPERSISTED_APPLY_GAUGE: IntGauge = register_int_gauge!(
+        "tikv_raft_enable_unpersisted_apply_regions",
+        "The number of regions that enable apply unpersisted raft log."
+    ).unwrap();
 }

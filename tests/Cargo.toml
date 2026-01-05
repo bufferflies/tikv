@@ -70,8 +70,22 @@ harness = false
 path = "cloud_engine_benches/storage_class/mod.rs"
 
 [features]
-default = ["failpoints", "testexport", "test-engine-kv-rocksdb", "test-engine-raft-raft-engine", "cloud-aws", "cloud-gcp", "cloud-azure"]
-failpoints = ["fail/failpoints", "tikv/failpoints", "pd_client/failpoints", "tikv_util/failpoints", "native_br/failpoints"]
+default = [
+    "failpoints",
+    "testexport",
+    "test-engine-kv-rocksdb",
+    "test-engine-raft-raft-engine",
+    "cloud-aws",
+    "cloud-gcp",
+    "cloud-azure",
+]
+failpoints = [
+    "fail/failpoints",
+    "tikv/failpoints",
+    "pd_client/failpoints",
+    "tikv_util/failpoints",
+    "native_br/failpoints",
+]
 cloud-aws = ["external_storage_export/cloud-aws"]
 cloud-gcp = ["external_storage_export/cloud-gcp"]
 cloud-azure = ["external_storage_export/cloud-azure"]
@@ -92,18 +106,10 @@ profiling = ["profiler/profiling"]
 # Ref: https://docs.rs/env_logger/latest/env_logger/#enabling-logging
 env-logger = ["tikv_util/env-logger"]
 
-test-engine-kv-rocksdb = [
-    "raftstore/test-engine-kv-rocksdb"
-]
-test-engine-raft-raft-engine = [
-    "raftstore/test-engine-raft-raft-engine"
-]
-test-engines-rocksdb = [
-    "raftstore/test-engines-rocksdb",
-]
-test-engines-panic = [
-    "raftstore/test-engines-panic",
-]
+test-engine-kv-rocksdb = ["raftstore/test-engine-kv-rocksdb"]
+test-engine-raft-raft-engine = ["raftstore/test-engine-raft-raft-engine"]
+test-engines-rocksdb = ["raftstore/test-engines-rocksdb"]
+test-engines-panic = ["raftstore/test-engines-panic"]
 jemalloc = ["tikv/jemalloc"]
 mimalloc = ["tikv/mimalloc"]
 snmalloc = ["tikv/snmalloc"]
@@ -139,13 +145,14 @@ file_system = { workspace = true }
 futures = "0.3"
 grpcio = { workspace = true }
 grpcio-health = { version = "0.10", default-features = false }
+health_controller = { workspace = true }
 hex = "0.4"
 http = "0.2.8"
 kvengine = { workspace = true }
 kvenginepb = { workspace = true }
 kvproto = { workspace = true }
 libc = "0.2"
-load_data = { path = "../components/load_data" }
+load_data = { workspace = true }
 log = "0.4"
 log_wrappers = { workspace = true }
 merged_engine = { workspace = true }
@@ -155,7 +162,9 @@ online_config = { workspace = true }
 paste = "1.0"
 pd_client = { workspace = true }
 protobuf = { version = "2.8", features = ["bytes"] }
-raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
+raft = { version = "0.7.0", default-features = false, features = [
+    "protobuf-codec",
+] }
 raft_log_engine = { workspace = true }
 raftstore = { workspace = true }
 rand = "0.8.3"
@@ -164,9 +173,19 @@ rfengine = { workspace = true }
 rfenginepb = { workspace = true }
 rfstore = { workspace = true }
 schema = { workspace = true }
-slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debug"] }
+slog = { version = "2.3", features = [
+    "max_level_trace",
+    "release_max_level_debug",
+] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
-sqlx = { version = "0.5", features = ["runtime-tokio-rustls", "mysql", "chrono", "bigdecimal"] }
+sqlx = { version = "0.5", features = [
+    "runtime-tokio-rustls",
+    "mysql",
+    "chrono",
+    "bigdecimal",
+] }
+strum = "0.23"
+strum_macros = "0.23"
 tempfile = "3.0"
 test_rfstore = { workspace = true }
 tidb_query_aggr = { workspace = true }

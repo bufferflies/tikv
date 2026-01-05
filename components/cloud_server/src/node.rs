@@ -8,6 +8,7 @@ use std::{
 
 use api_version::KvFormat;
 use concurrency_manager::ConcurrencyManager;
+use health_controller::HealthController;
 use kvproto::{metapb, raft_serverpb::RegionLocalState, replication_modepb::ReplicationStatus};
 use pd_client::{Error as PdError, FeatureGate, PdClient, INVALID_ID};
 use protobuf::Message;
@@ -168,6 +169,7 @@ impl Node {
         store_meta: Arc<Mutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost<kvengine::Engine>,
         importer: Arc<SstImporter>,
+        health_controller: HealthController,
         concurrency_manager: ConcurrencyManager,
     ) -> Result<()> {
         let store_id = self.id();
@@ -198,6 +200,7 @@ impl Node {
             store_meta,
             coprocessor_host,
             importer,
+            health_controller,
             concurrency_manager,
         )?;
 
@@ -371,6 +374,7 @@ impl Node {
         store_meta: Arc<Mutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost<kvengine::Engine>,
         importer: Arc<SstImporter>,
+        health_controller: HealthController,
         concurrency_manager: ConcurrencyManager,
     ) -> Result<()> {
         let store_id = store_meta.lock().unwrap().store_id.unwrap();
@@ -389,9 +393,11 @@ impl Node {
             trans,
             pd_client,
             pd_worker,
+            self.bg_worker.clone(),
             store_meta,
             coprocessor_host,
             importer,
+            health_controller,
             concurrency_manager,
         )?;
         Ok(())

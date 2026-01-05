@@ -40,6 +40,7 @@ grpcio = { version = "0.10", default-features = false, features = [
     "openssl-vendored",
     "protobuf-codec",
 ] }
+health_controller = { workspace = true }
 itertools = "0.10"
 keys = { path = "../keys" }
 kvengine = { path = "../kvengine" }
@@ -60,6 +61,7 @@ raft = { version = "0.7.0", default-features = false, features = [
 raft-proto = { version = "0.7.0", default-features = false }
 raftstore = { path = "../raftstore" }
 rand = "0.8"
+resource_metering = { workspace = true }
 rfengine = { path = "../rfengine" }
 schema = { workspace = true }
 serde = "1.0"

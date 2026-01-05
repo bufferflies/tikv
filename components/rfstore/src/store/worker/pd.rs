@@ -3,24 +3,33 @@
 use std::{
     cmp,
     cmp::Ordering as CmpOrdering,
-    collections::HashMap,
     fmt::{self, Display, Formatter},
     mem,
     sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc,
+        mpsc::{Sender, SyncSender},
         Arc,
     },
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
 use api_version::{api_v2::is_whole_keyspace_range, ApiV2};
 use cloud_encryption::{KeyspaceEncryptionConfig, MasterKeyConfig};
+use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::MiscExt;
-#[cfg(feature = "failpoints")]
 use fail::fail_point;
 use futures::{compat::Future01CompatExt, FutureExt};
-use kvengine::{context::IaCtx, Shard, CF_NAMES, GLOBAL_SHARD_END_KEY};
+use health_controller::{
+    metrics::{
+        flush_store_inspect_disk_duration_metrics, flush_store_inspect_network_duration_metrics,
+        flush_store_inspect_slow_score_metrics,
+    },
+    reporters::{Config as ReporterConfig, RfStoreReporter},
+    HealthController, InspectDuration, InspectFactor, LatencyInspector,
+};
+use kvengine::{Shard, GLOBAL_SHARD_END_KEY};
 use kvproto::{
     metapb,
     metapb::Region,
@@ -40,11 +49,15 @@ use prometheus::local::LocalHistogram;
 use protobuf::Message;
 use raft::{eraftpb::ConfChangeType, StateRole};
 use raftstore::store::{util, util::ConfChangeKind, ReadStats, TxnExt, WriteStats};
+use resource_metering::{Collector, RawRecords};
 use schema::schema::StorageClass;
 use tikv_util::{
     debug, defer, error, info,
+    metrics::ThreadInfoStatistics,
     store::{find_peer, QueryStats},
-    time::UnixSecs,
+    sys::{disk, thread::StdThreadBuildWrapper, SysQuota},
+    thd_name,
+    time::{Instant as TiInstant, UnixSecs},
     timer::GLOBAL_TIMER_HANDLE,
     topn::TopN,
     warn,
@@ -57,8 +70,9 @@ use yatp::Remote;
 
 use crate::{
     store::{
-        encode_split_flag_encryption_metas, raw_end_key, raw_start_key, Callback, CasualMessage,
-        CpuUtilCollector, PeerMsg, PeerTag, RegionIdVer, RegionMap, StoreInfo, StoreMsg,
+        encode_split_flag_encryption_metas, raw_end_key, raw_start_key, util::KeysInfoFormatter,
+        Callback, CasualMessage, Config as RfStoreConfig, CpuUtilCollector, PeerMsg, PeerTag,
+        RegionIdVer, RegionMap, StoreInfo, StoreMsg,
     },
     RaftRouter, RaftStoreRouter,
 };
@@ -134,9 +148,15 @@ pub enum PdTask {
     WriteStats {
         write_stats: WriteStats,
     },
+    RegionCpuRecords(Arc<RawRecords>),
     DestroyPeer {
         region_id: u64,
         keyspace_id: Option<u32>,
+    },
+    StoreInfos {
+        cpu_usages: RecordPairVec,
+        read_io_rates: RecordPairVec,
+        write_io_rates: RecordPairVec,
     },
     UpdateMaxTimestamp {
         region_id: u64,
@@ -161,6 +181,426 @@ pub enum PdTask {
         role: StateRole,
     },
     UpdateRaftCpuUtil,
+    InspectLatency {
+        factor: InspectFactor,
+    },
+    UpdateSlowScore {
+        id: u64,
+        factor: InspectFactor,
+        duration: InspectDuration,
+    },
+}
+
+impl Display for PdTask {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            PdTask::AskBatchSplit {
+                ref region,
+                ref split_keys,
+                ..
+            } => write!(
+                f,
+                "ask split region {} with {}",
+                region.get_id(),
+                KeysInfoFormatter(split_keys.iter())
+            ),
+            PdTask::Heartbeat(ref hb_task) => write!(
+                f,
+                "heartbeat for region {:?}, leader {}, replication status {:?}",
+                hb_task.region,
+                hb_task.peer.get_id(),
+                hb_task.replication_status
+            ),
+            PdTask::StoreHeartbeat { ref stats, .. } => {
+                write!(f, "store heartbeat stats: {:?}", stats)
+            }
+            PdTask::ReportBatchSplit { ref regions } => write!(f, "report split {:?}", regions),
+            PdTask::ValidatePeer {
+                ref region,
+                ref peer,
+            } => write!(f, "validate peer {:?} with region {:?}", peer, region),
+            PdTask::ReadStats { ref read_stats } => {
+                write!(f, "get the read statistics {:?}", read_stats)
+            }
+            PdTask::WriteStats { ref write_stats } => {
+                write!(f, "get the write statistics {:?}", write_stats)
+            }
+            PdTask::RegionCpuRecords(ref cpu_records) => {
+                write!(f, "get region cpu records: {:?}", cpu_records)
+            }
+            PdTask::DestroyPeer {
+                ref region_id,
+                keyspace_id,
+            } => {
+                write!(
+                    f,
+                    "destroy peer of region {} keyspace_id {:?}",
+                    region_id, keyspace_id
+                )
+            }
+            PdTask::StoreInfos {
+                ref cpu_usages,
+                ref read_io_rates,
+                ref write_io_rates,
+            } => write!(
+                f,
+                "get store's information: cpu_usages {:?}, read_io_rates {:?}, write_io_rates {:?}",
+                cpu_usages, read_io_rates, write_io_rates,
+            ),
+            PdTask::UpdateMaxTimestamp { region_id, .. } => write!(
+                f,
+                "update the max timestamp for region {} in the concurrency manager",
+                region_id
+            ),
+            PdTask::UpdateGcSafePoint => write!(f, "update GC safe point"),
+            PdTask::SyncRegion { start, end, .. } => {
+                write!(
+                    f,
+                    "sync region, range: [{}, {})",
+                    log_wrappers::Value(start),
+                    log_wrappers::Value(end)
+                )
+            }
+            PdTask::SyncRegionById { region_id, .. } => {
+                write!(f, "sync region by id: {}", region_id)
+            }
+            PdTask::RoleChanged {
+                region_id,
+                keyspace_id,
+                role,
+            } => {
+                write!(
+                    f,
+                    "region {} keyspace {} change role to {:?}",
+                    region_id,
+                    keyspace_id.unwrap_or_default(),
+                    role
+                )
+            }
+            PdTask::UpdateRaftCpuUtil => write!(f, "update raft cpu utilization"),
+            PdTask::InspectLatency { factor } => {
+                write!(f, "inspect raftstore latency: {:?}", factor)
+            }
+            PdTask::UpdateSlowScore {
+                id,
+                factor,
+                ref duration,
+            } => {
+                write!(
+                    f,
+                    "compute slow score: id {}, factor: {:?}, duration {:?}",
+                    id, factor, duration
+                )
+            }
+        }
+    }
+}
+
+pub const NUM_COLLECT_STORE_INFOS_PER_HEARTBEAT: u32 = 2;
+/// The upper bound of buffered stats messages.
+/// It prevents unexpected memory buildup when AutoSplitController
+/// runs slowly.
+const STATS_CHANNEL_CAPACITY_LIMIT: usize = 128;
+
+const DEFAULT_LOAD_BASE_SPLIT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_COLLECT_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+fn default_collect_tick_interval() -> Duration {
+    fail_point!("mock_collect_tick_interval", |_| {
+        Duration::from_millis(1)
+    });
+    DEFAULT_COLLECT_TICK_INTERVAL
+}
+
+/// Max limitation of delayed store_heartbeat.
+const STORE_HEARTBEAT_DELAY_LIMIT: u64 = 5 * 60;
+
+/// Determines the minimal interval for latency inspection ticks based on raft
+/// and kvdb inspection intervals.
+///
+/// This function handles different scenarios for latency inspection:
+/// 1. Both intervals are zero: Inspection is disabled, returns a large interval
+///    (1 hour)
+/// 2. Only raft interval is zero: Uses kvdb interval (raft inspection disabled)
+/// 3. Only kvdb interval is zero: Uses raft interval (kvdb inspection disabled)
+/// 4. Both intervals non-zero: Uses the smaller of the two intervals
+///
+/// # Arguments
+///
+/// * `inspect_raft_latency_interval` - Interval for raft latency inspection
+/// * `inspect_kvdb_latency_interval` - Interval for kvdb latency inspection
+///
+/// # Returns
+///
+/// The minimal interval that should be used for latency inspection ticks
+fn get_minimal_inspect_tick_interval(
+    inspect_raft_latency_interval: Duration,
+    inspect_kvdb_latency_interval: Duration,
+) -> Duration {
+    match (
+        inspect_raft_latency_interval.is_zero(),
+        inspect_kvdb_latency_interval.is_zero(),
+    ) {
+        (true, true) => {
+            // Both inspections are disabled - return a large interval to avoid misleading
+            // tick checks
+            Duration::from_secs(3600)
+        }
+        (true, false) => {
+            // raft inspection disabled - use kvdb interval
+            inspect_kvdb_latency_interval
+        }
+        (false, true) => {
+            // kvdb inspection disabled - use raft interval
+            inspect_raft_latency_interval
+        }
+        (false, false) => {
+            // Both inspections enabled - use the smaller interval
+            std::cmp::min(inspect_raft_latency_interval, inspect_kvdb_latency_interval)
+        }
+    }
+}
+
+#[inline]
+fn convert_record_pairs(m: HashMap<String, u64>) -> RecordPairVec {
+    m.into_iter()
+        .map(|(k, v)| {
+            let mut pair = pdpb::RecordPair::default();
+            pair.set_key(k);
+            pair.set_value(v);
+            pair
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+pub struct WrappedScheduler(Scheduler<PdTask>);
+
+impl Collector for WrappedScheduler {
+    fn collect(&self, records: Arc<RawRecords>) {
+        self.0.schedule(PdTask::RegionCpuRecords(records)).ok();
+    }
+}
+
+pub trait StoreStatsReporter: Send + Clone + Sync + 'static + Collector {
+    fn report_store_infos(
+        &self,
+        cpu_usages: RecordPairVec,
+        read_io_rates: RecordPairVec,
+        write_io_rates: RecordPairVec,
+    );
+    fn update_latency_stats(&self, timer_tick: u64, factor: InspectFactor);
+}
+
+impl StoreStatsReporter for WrappedScheduler {
+    fn report_store_infos(
+        &self,
+        cpu_usages: RecordPairVec,
+        read_io_rates: RecordPairVec,
+        write_io_rates: RecordPairVec,
+    ) {
+        let task = PdTask::StoreInfos {
+            cpu_usages,
+            read_io_rates,
+            write_io_rates,
+        };
+        if let Err(e) = self.0.schedule(task) {
+            error!(
+                "failed to send store infos to pd worker";
+                "err" => ?e,
+            );
+        }
+    }
+
+    fn update_latency_stats(&self, timer_tick: u64, factor: InspectFactor) {
+        debug!("update latency statistics for rfstore";
+                "tick" => timer_tick);
+        let task = PdTask::InspectLatency { factor };
+        if let Err(e) = self.0.schedule(task) {
+            warn!(
+                "failed to send inspect rfstore latency task to pd worker";
+                "err" => ?e,
+            );
+        }
+    }
+}
+
+pub struct StatsMonitor<T>
+where
+    T: StoreStatsReporter,
+{
+    reporter: T,
+    handle: Option<JoinHandle<()>>,
+    timer: Option<Sender<bool>>,
+    read_stats_sender: Option<SyncSender<ReadStats>>,
+    cpu_stats_sender: Option<SyncSender<Arc<RawRecords>>>,
+    collect_store_infos_interval: Duration,
+    load_base_split_check_interval: Duration, // Unimplemented!()
+    collect_tick_interval: Duration,
+    inspect_raft_latency_interval: Duration, // for raft mount path
+    inspect_kvdb_latency_interval: Duration, // for kvdb mount path
+    inspect_network_interval: Duration,
+}
+
+impl<T> StatsMonitor<T>
+where
+    T: StoreStatsReporter,
+{
+    pub fn new(
+        interval: Duration,
+        inspect_raft_latency_interval: Duration,
+        inspect_kvdb_latency_interval: Duration,
+        inspect_network_interval: Duration,
+        reporter: T,
+    ) -> Self {
+        StatsMonitor {
+            reporter,
+            handle: None,
+            timer: None,
+            read_stats_sender: None,
+            cpu_stats_sender: None,
+            collect_store_infos_interval: interval,
+            load_base_split_check_interval: cmp::min(
+                DEFAULT_LOAD_BASE_SPLIT_CHECK_INTERVAL,
+                interval,
+            ),
+            // Use the smallest inspect latency as the minimal limitation for collecting tick.
+            collect_tick_interval: cmp::min(
+                get_minimal_inspect_tick_interval(
+                    inspect_raft_latency_interval,
+                    inspect_kvdb_latency_interval,
+                ),
+                interval.min(default_collect_tick_interval()),
+            ),
+            inspect_raft_latency_interval,
+            inspect_kvdb_latency_interval,
+            inspect_network_interval,
+        }
+    }
+
+    // Collecting thread information and obtaining qps informations.
+    // They run together in the same thread by taking module at different intervals.
+    pub fn start(&mut self) -> Result<(), std::io::Error> {
+        if self.collect_tick_interval
+            < cmp::min(
+                get_minimal_inspect_tick_interval(
+                    self.inspect_raft_latency_interval,
+                    self.inspect_kvdb_latency_interval,
+                ),
+                default_collect_tick_interval(),
+            )
+        {
+            info!(
+                "interval is too small, skip stats monitoring. If we are running tests, it is normal, otherwise a check is needed."
+            );
+            return Ok(());
+        }
+        let mut timer_cnt = 0; // to run functions with different intervals in a loop
+        let tick_interval = self.collect_tick_interval;
+        let collect_store_infos_interval = self
+            .collect_store_infos_interval
+            .div_duration_f64(tick_interval) as u64;
+        let _load_base_split_check_interval = self
+            .load_base_split_check_interval
+            .div_duration_f64(tick_interval) as u64;
+        let update_raftdisk_latency_stats_interval =
+            self.inspect_raft_latency_interval
+                .div_duration_f64(tick_interval) as u64;
+        let update_kvdisk_latency_stats_interval =
+            self.inspect_kvdb_latency_interval
+                .div_duration_f64(tick_interval) as u64;
+        let update_network_latency_stats_interval =
+            self.inspect_network_interval
+                .div_duration_f64(tick_interval) as u64;
+
+        let (timer_tx, timer_rx) = mpsc::channel();
+        self.timer = Some(timer_tx);
+
+        let (read_stats_sender, _read_stats_receiver) =
+            mpsc::sync_channel(STATS_CHANNEL_CAPACITY_LIMIT);
+        self.read_stats_sender = Some(read_stats_sender);
+
+        let (cpu_stats_sender, _cpu_stats_receiver) =
+            mpsc::sync_channel(STATS_CHANNEL_CAPACITY_LIMIT);
+        self.cpu_stats_sender = Some(cpu_stats_sender);
+
+        let reporter = self.reporter.clone();
+        let props = tikv_util::thread_group::current_properties();
+
+        fn is_enable_tick(timer_cnt: u64, interval: u64) -> bool {
+            interval != 0 && timer_cnt % interval == 0
+        }
+        let h = std::thread::Builder::new()
+            .name(thd_name!("stats-monitor"))
+            .spawn_wrapper(move || {
+                tikv_util::thread_group::set_properties(props);
+
+                // Create different `ThreadInfoStatistics` for different purposes to
+                // make sure the record won't be disturbed.
+                let mut collect_store_infos_thread_stats = ThreadInfoStatistics::new();
+                while let Err(mpsc::RecvTimeoutError::Timeout) =
+                    timer_rx.recv_timeout(tick_interval)
+                {
+                    if is_enable_tick(timer_cnt, collect_store_infos_interval) {
+                        StatsMonitor::collect_store_infos(
+                            &mut collect_store_infos_thread_stats,
+                            &reporter,
+                        );
+                    }
+                    if is_enable_tick(timer_cnt, update_raftdisk_latency_stats_interval) {
+                        reporter.update_latency_stats(timer_cnt, InspectFactor::RaftDisk);
+                    }
+                    if is_enable_tick(timer_cnt, update_kvdisk_latency_stats_interval) {
+                        reporter.update_latency_stats(timer_cnt, InspectFactor::KvDisk);
+                    }
+                    if is_enable_tick(timer_cnt, update_network_latency_stats_interval) {
+                        reporter.update_latency_stats(timer_cnt, InspectFactor::Network);
+                    }
+                    timer_cnt += 1;
+                }
+            })?;
+
+        self.handle = Some(h);
+        Ok(())
+    }
+
+    pub fn collect_store_infos(thread_stats: &mut ThreadInfoStatistics, reporter: &T) {
+        thread_stats.record();
+        let cpu_usages = convert_record_pairs(thread_stats.get_cpu_usages());
+        let read_io_rates = convert_record_pairs(thread_stats.get_read_io_rates());
+        let write_io_rates = convert_record_pairs(thread_stats.get_write_io_rates());
+
+        reporter.report_store_infos(cpu_usages, read_io_rates, write_io_rates);
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            drop(self.timer.take());
+            drop(self.read_stats_sender.take());
+            drop(self.cpu_stats_sender.take());
+            if let Err(e) = h.join() {
+                error!("join stats collector failed"; "err" => ?e);
+            }
+        }
+    }
+
+    #[inline]
+    pub fn maybe_send_read_stats(&self, read_stats: ReadStats) {
+        if let Some(sender) = &self.read_stats_sender {
+            if sender.try_send(read_stats).is_err() {
+                debug!("send read_stats failed, are we shutting down or channel is full?")
+            }
+        }
+    }
+
+    #[inline]
+    pub fn maybe_send_cpu_stats(&self, cpu_stats: &Arc<RawRecords>) {
+        if let Some(sender) = &self.cpu_stats_sender {
+            if sender.try_send(cpu_stats.clone()).is_err() {
+                debug!("send region cpu info failed, are we shutting down or channel is full?")
+            }
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -196,6 +636,9 @@ pub struct StoreStat {
     pub engine_last_total_bytes_read: u64,
     pub engine_last_total_keys_read: u64,
     pub engine_last_query_num: QueryStats,
+    pub engine_last_capacity_size: u64,
+    pub engine_last_used_size: u64,
+    pub engine_last_available_size: u64,
     pub last_report_ts: UnixSecs,
 
     pub region_bytes_read: LocalHistogram,
@@ -206,6 +649,9 @@ pub struct StoreStat {
     pub store_cpu_usages: RecordPairVec,
     pub store_read_io_rates: RecordPairVec,
     pub store_write_io_rates: RecordPairVec,
+
+    store_cpu_quota: f64, // quota of cpu usage
+    store_cpu_busy_thd: f64,
 }
 
 impl Default for StoreStat {
@@ -216,6 +662,9 @@ impl Default for StoreStat {
             region_bytes_written: REGION_WRITTEN_BYTES_HISTOGRAM.local(),
             region_keys_written: REGION_WRITTEN_KEYS_HISTOGRAM.local(),
 
+            engine_last_capacity_size: 0,
+            engine_last_used_size: 0,
+            engine_last_available_size: 0,
             last_report_ts: UnixSecs::zero(),
             engine_total_bytes_read: 0,
             engine_total_keys_read: 0,
@@ -227,7 +676,30 @@ impl Default for StoreStat {
             store_cpu_usages: RecordPairVec::default(),
             store_read_io_rates: RecordPairVec::default(),
             store_write_io_rates: RecordPairVec::default(),
+
+            store_cpu_quota: 0.0_f64,
+            store_cpu_busy_thd: 0.8_f64,
         }
+    }
+}
+
+impl StoreStat {
+    fn set_cpu_quota(&mut self, cpu_cores: f64, busy_thd: f64) {
+        self.store_cpu_quota = cpu_cores * 100.0;
+        self.store_cpu_busy_thd = busy_thd;
+    }
+
+    fn maybe_busy(&self) -> bool {
+        if self.store_cpu_quota < 1.0 || self.store_cpu_busy_thd > 1.0 {
+            return false;
+        }
+
+        let mut cpu_usage = 0_u64;
+        for record in self.store_cpu_usages.iter() {
+            cpu_usage += record.get_value();
+        }
+
+        (cpu_usage as f64 / self.store_cpu_quota) >= self.store_cpu_busy_thd
     }
 }
 
@@ -306,85 +778,6 @@ impl ReportBucket {
     }
 }
 
-impl Display for PdTask {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            PdTask::AskBatchSplit {
-                ref region,
-                ref split_keys,
-                ..
-            } => write!(
-                f,
-                "ask split region {} with {}",
-                region.get_id(),
-                util::KeysInfoFormatter(split_keys.iter())
-            ),
-            PdTask::Heartbeat(ref hb_task) => write!(
-                f,
-                "heartbeat for region {:?}, leader {}, replication status {:?}",
-                hb_task.region,
-                hb_task.peer.get_id(),
-                hb_task.replication_status
-            ),
-            PdTask::StoreHeartbeat { ref stats, .. } => {
-                write!(f, "store heartbeat stats: {:?}", stats)
-            }
-            PdTask::ReportBatchSplit { ref regions } => write!(f, "report split {:?}", regions),
-            PdTask::ValidatePeer {
-                ref region,
-                ref peer,
-            } => write!(f, "validate peer {:?} with region {:?}", peer, region),
-            PdTask::ReadStats { ref read_stats } => {
-                write!(f, "get the read statistics {:?}", read_stats)
-            }
-            PdTask::WriteStats { ref write_stats } => {
-                write!(f, "get the write statistics {:?}", write_stats)
-            }
-            PdTask::DestroyPeer {
-                ref region_id,
-                keyspace_id,
-            } => {
-                write!(
-                    f,
-                    "destroy peer of region {} keyspace_id {:?}",
-                    region_id, keyspace_id
-                )
-            }
-            PdTask::UpdateMaxTimestamp { region_id, .. } => write!(
-                f,
-                "update the max timestamp for region {} in the concurrency manager",
-                region_id
-            ),
-            PdTask::UpdateGcSafePoint => write!(f, "update GC safe point"),
-            PdTask::SyncRegion { start, end, .. } => {
-                write!(
-                    f,
-                    "sync region, range: [{}, {})",
-                    log_wrappers::Value(start),
-                    log_wrappers::Value(end)
-                )
-            }
-            PdTask::SyncRegionById { region_id, .. } => {
-                write!(f, "sync region by id: {}", region_id)
-            }
-            PdTask::RoleChanged {
-                region_id,
-                keyspace_id,
-                role,
-            } => {
-                write!(
-                    f,
-                    "region {} keyspace {} change role to {:?}",
-                    region_id,
-                    keyspace_id.unwrap_or_default(),
-                    role
-                )
-            }
-            PdTask::UpdateRaftCpuUtil => write!(f, "update raft cpu utilization"),
-        }
-    }
-}
-
 pub struct PdRunner {
     store_id: u64,
     cluster_id: u64,
@@ -395,6 +788,7 @@ pub struct PdRunner {
     region_buckets: HashMap<u64, ReportBucket>,
     store_stat: StoreStat,
     store_map: HashMap<u64, bool>,
+    store_heartbeat_interval: Duration,
     is_hb_receiver_scheduled: bool,
     // Records the boot time.
     start_ts: UnixSecs,
@@ -404,12 +798,19 @@ pub struct PdRunner {
     // calls Runner's run() on Task received.
     scheduler: Scheduler<PdTask>,
 
+    // region_id -> total_cpu_time_ms (since last region heartbeat)
+    region_cpu_records: HashMap<u64, u32>,
+
     concurrency_manager: ConcurrencyManager,
     remote: Remote<yatp::task::future::TaskCell>,
     kv: kvengine::Engine,
     raft_cpu_collector: CpuUtilCollector,
 
     update_gc_safe_point_in_progress: Arc<AtomicBool>,
+
+    stats_monitor: StatsMonitor<WrappedScheduler>,
+    health_reporter: RfStoreReporter,
+    _health_controller: HealthController,
 }
 
 const HOTSPOT_KEY_RATE_THRESHOLD: u64 = 128;
@@ -444,37 +845,67 @@ impl PdRunner {
     const INTERVAL_DIVISOR: u32 = 2;
 
     pub fn new(
+        cfg: &RfStoreConfig,
         store_id: u64,
         pd_client: Arc<dyn PdClient>,
         router: RaftRouter,
         scheduler: Scheduler<PdTask>,
-        _store_heartbeat_interval: Duration,
         concurrency_manager: ConcurrencyManager,
         remote: Remote<yatp::task::future::TaskCell>,
         kv: kvengine::Engine,
         raft_cpu_collector: CpuUtilCollector,
+        health_controller: HealthController,
     ) -> PdRunner {
-        // TODO(x): support stats monitor.
         let cluster_id = pd_client.get_cluster_id().unwrap();
+        // Initialize the `StoreStat` with the sepecified inpsecting threshold for CPU
+        // usage, which is used to lower down the bias when updating `SlowScore`.
+        let mut store_stat = StoreStat::default();
+        store_stat.set_cpu_quota(SysQuota::cpu_cores_quota(), cfg.inspect_cpu_util_thd);
+
+        let store_heartbeat_interval = cfg.pd_store_heartbeat_tick_interval.0;
+        let interval = store_heartbeat_interval / NUM_COLLECT_STORE_INFOS_PER_HEARTBEAT;
+        let mut stats_monitor = StatsMonitor::new(
+            interval,
+            cfg.inspect_interval.0,
+            cfg.inspect_kvdb_interval.0,
+            cfg.inspect_network_interval.0,
+            WrappedScheduler(scheduler.clone()),
+        );
+        if let Err(e) = stats_monitor.start() {
+            error!("failed to start stats collector, error = {:?}", e);
+        }
+
+        let health_reporter_config = ReporterConfig {
+            inspect_raft_interval: cfg.inspect_interval.0,
+            inspect_kvdb_interval: cfg.inspect_kvdb_interval.0,
+            inspect_network_interval: cfg.inspect_network_interval.0,
+        };
+
+        let health_reporter = RfStoreReporter::new(&health_controller, health_reporter_config);
         PdRunner {
             store_id,
             cluster_id,
             pd_client,
             router,
+            store_heartbeat_interval,
             is_hb_receiver_scheduled: false,
             region_peers: HashMap::default(),
             region_map: Default::default(),
             region_buckets: HashMap::default(),
-            store_stat: StoreStat::default(),
+            store_stat, // Use the initialized one.
             store_map: HashMap::default(),
             start_ts: UnixSecs::now(),
             scheduler,
+            region_cpu_records: HashMap::default(),
             concurrency_manager,
             remote,
             kv,
             raft_cpu_collector,
 
             update_gc_safe_point_in_progress: Arc::new(AtomicBool::new(false)),
+            stats_monitor,
+            health_reporter,
+            _health_controller: health_controller,
         }
     }
 
@@ -796,21 +1227,9 @@ impl PdRunner {
     fn handle_store_heartbeat(
         &mut self,
         mut stats: pdpb::StoreStats,
-        store_info: StoreInfo,
+        store_info: Option<StoreInfo>,
         _send_detailed_report: bool,
     ) {
-        let disk_stats = match fs2::statvfs(store_info.kv_engine.path()) {
-            Err(e) => {
-                error!(
-                    "get disk stat for rocksdb failed";
-                    "engine_path" => store_info.kv_engine.path(),
-                    "err" => ?e
-                );
-                return;
-            }
-            Ok(stats) => stats,
-        };
-
         let mut report_peers = HashMap::default();
         for (region_id, region_peer) in &mut self.region_peers {
             let read_bytes = region_peer.read_bytes - region_peer.last_store_report_read_bytes;
@@ -839,28 +1258,30 @@ impl PdRunner {
 
         stats = collect_report_read_peer_stats(HOTSPOT_REPORT_CAPACITY, report_peers, stats);
 
-        let disk_cap = disk_stats.total_space();
-        let capacity = if store_info.capacity == 0 || disk_cap < store_info.capacity {
-            disk_cap
+        let (capacity, used_size, available) = if store_info.is_some() {
+            match collect_engine_size(store_info.as_ref()) {
+                Some((capacity, used_size, available)) => (capacity, used_size, available),
+                None => return,
+            }
         } else {
-            store_info.capacity
+            // Use last recorded statistics to report.
+            (
+                self.store_stat.engine_last_capacity_size,
+                self.store_stat.engine_last_used_size,
+                self.store_stat.engine_last_available_size,
+            )
         };
-        stats.set_capacity(capacity);
-        let used_size = store_info.kv_engine.get_engine_used_size().expect("cf")
-            + store_info.rf_engine.get_engine_stats().disk_size;
-        stats.set_used_size(used_size);
-
-        let mut available = capacity.checked_sub(used_size).unwrap_or_default();
-        // We only care about rocksdb SST file size, so we should check disk available
-        // here.
-        available = cmp::min(available, disk_stats.available_space());
-        store_info.kv_engine.set_available_space(available);
-
         if available == 0 {
             warn!("no available space");
         }
-
+        stats.set_capacity(capacity);
+        stats.set_used_size(used_size);
         stats.set_available(available);
+        // Update last reported infos on engine_size.
+        self.store_stat.engine_last_capacity_size = capacity;
+        self.store_stat.engine_last_used_size = used_size;
+        self.store_stat.engine_last_available_size = available;
+
         stats.set_bytes_read(
             self.store_stat.engine_total_bytes_read - self.store_stat.engine_last_total_bytes_read,
         );
@@ -895,88 +1316,33 @@ impl PdRunner {
         self.store_stat.region_bytes_read.flush();
         self.store_stat.region_keys_read.flush();
 
-        STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["capacity", "", "", ""])
-            .set(capacity as i64);
-        STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["available", "", "", ""])
-            .set(available as i64);
-        STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["all_used", "", "", ""])
-            .set(used_size as i64);
+        if let Some(store_info) = store_info {
+            // Update the timestap for reporting heratbeat.
+            // If `store_info` is None, the given Task::StoreHeartbeat should be a fake
+            // heartbeat to PD, we won't update the last_report_ts to avoid incorrectly
+            // marking current TiKV node in normal state.
+            self.store_stat.last_report_ts = UnixSecs::now();
 
-        let kv_all_shard_stats = store_info.kv_engine.get_all_shard_stats();
-        kvengine::Engine::update_region_huge_table_bytes_metrics(
-            &kv_all_shard_stats,
-            store_info.kv_engine.opts.max_mem_table_size,
-        );
-        let kv_engine_stats = kvengine::Engine::get_engine_stats(kv_all_shard_stats);
-
-        store_info
-            .kv_engine
-            .notify_memtables_size(kv_engine_stats.mem_tables_size);
-        if let IaCtx::Enabled(mgr, _) = store_info.kv_engine.ia_ctx() {
-            mgr.notify_total_data_size(kv_engine_stats.ia.data_size);
-        }
-        for &id_ver in &kv_engine_stats.ready_destroy_range_shards {
-            if let Ok(shard) = store_info
-                .kv_engine
-                .get_shard_with_ver(id_ver.id, id_ver.ver)
-            {
-                // If the shard is not active, no need to trigger compact.
-                if !shard.is_active() {
-                    continue;
-                }
-                // Send trigger refresh states to peer.
-                self.router.send(
-                    shard.id,
-                    PeerMsg::CasualMessage(CasualMessage::TriggerRefreshShardStates),
-                );
-            }
+            let engine_dfs_stat = store_info.rf_engine.take_dfs_stats();
+            let mut rf_dfs_stat = DfsStatItem::default();
+            let scope = rf_dfs_stat.mut_scope();
+            scope.set_component("rfengine".to_owned());
+            scope.set_is_global(true);
+            rf_dfs_stat.set_write_requests(engine_dfs_stat.requests);
+            rf_dfs_stat.set_written_bytes(engine_dfs_stat.uploaded_bytes);
+            stats.mut_dfs().push(rf_dfs_stat);
         }
 
-        for (cf, level_size) in kv_engine_stats.cf_level_sizes.iter().enumerate() {
-            STORE_ENGINE_SIZE_GAUGE_VEC
-                .with_label_values(&["kv", CF_NAMES[cf]])
-                .set(level_size.iter().sum::<u64>() as i64);
-        }
-        STORE_ENGINE_MEM_SIZE_GAUGE_VEC
-            .with_label_values(&["kv", "memtable"])
-            .set(kv_engine_stats.mem_tables_size as i64);
-        STORE_ENGINE_MEM_SIZE_GAUGE_VEC
-            .with_label_values(&["kv", "block_cache"])
-            .set(store_info.kv_engine.get_cache_size() as i64);
-        STORE_ENGINE_MEM_SIZE_GAUGE_VEC
-            .with_label_values(&["kv", "block_index"])
-            .set(kv_engine_stats.in_mem_index_size as i64);
-        STORE_ENGINE_MEM_SIZE_GAUGE_VEC
-            .with_label_values(&["kv", "table_filter"])
-            .set(kv_engine_stats.in_mem_filter_size as i64);
-
-        STORE_ENGINE_SIZE_GAUGE_VEC
-            .with_label_values(&["kv", "ia"])
-            .set(kv_engine_stats.ia.data_size as i64);
-        STORE_ENGINE_SIZE_GAUGE_VEC
-            .with_label_values(&["kv", "ia_kv"])
-            .set(kv_engine_stats.ia.kv_size as i64);
-
-        let rf_engine_stats = store_info.rf_engine.get_engine_stats();
-        STORE_ENGINE_SIZE_GAUGE_VEC
-            .with_label_values(&["raft", "raft"])
-            .set(rf_engine_stats.disk_size as i64);
-        STORE_ENGINE_MEM_SIZE_GAUGE_VEC
-            .with_label_values(&["raft", ""])
-            .set(rf_engine_stats.total_mem_size as i64);
-        let engine_dfs_stat = store_info.rf_engine.take_dfs_stats();
-        let mut rf_dfs_stat = DfsStatItem::default();
-        let scope = rf_dfs_stat.mut_scope();
-        scope.set_component("rfengine".to_owned());
-        scope.set_is_global(true);
-        rf_dfs_stat.set_write_requests(engine_dfs_stat.requests);
-        rf_dfs_stat.set_written_bytes(engine_dfs_stat.uploaded_bytes);
-        stats.mut_dfs().push(rf_dfs_stat);
-
-        // TODO(x): set slow score
+        // Set slow score for this node.
+        stats.set_slow_score(self.health_reporter.get_disk_slow_score() as u64);
+        // Filter out network slow scores equal to 1 to reduce message volume
+        let network_scores = self
+            .health_reporter
+            .get_network_slow_score()
+            .into_iter()
+            .filter(|(_, score)| *score != 1)
+            .collect();
+        stats.set_network_slow_scores(network_scores);
 
         debug!("Sending store heartbeat."; "stats" => ?stats);
         let optional_report = None;
@@ -1001,6 +1367,36 @@ impl PdRunner {
             }
         };
         self.remote.spawn(f);
+    }
+
+    /// Force to send a special heartbeat to pd when current store is hung on
+    /// some special circumstances, i.e. disk busy, handler busy and others.
+    fn handle_fake_store_heartbeat(&mut self) {
+        let mut stats = pdpb::StoreStats::default();
+        stats.set_store_id(self.store_id);
+        stats.set_region_count(self.region_peers.len() as u32);
+        stats.set_start_time(self.start_ts.into_inner() as u32);
+
+        // This calling means that the current node cannot report heartbeat in normaly
+        // scheduler. That is, the current node must in `busy` state.
+        stats.set_is_busy(true);
+
+        // We do not need to report store_info, so we just set `None` here.
+        self.handle_store_heartbeat(stats, None, false);
+        warn!("scheduling store_heartbeat timeout, force report store slow score to pd.";
+            "store_id" => self.store_id,
+        );
+    }
+
+    fn is_store_heartbeat_delayed(&self) -> bool {
+        let now = UnixSecs::now();
+        let interval_second = now.into_inner() - self.store_stat.last_report_ts.into_inner();
+        // Only if the `last_report_ts`, that is, the last timestamp of
+        // store_heartbeat, exceeds the interval of store heartbaet but less than
+        // the given limitation, will it trigger a report of fake heartbeat to
+        // make the statistics of slowness percepted by PD timely.
+        (interval_second > self.store_heartbeat_interval.as_secs())
+            && (interval_second <= STORE_HEARTBEAT_DELAY_LIMIT)
     }
 
     fn handle_report_batch_split(&self, regions: Vec<metapb::Region>) {
@@ -1207,12 +1603,7 @@ impl PdRunner {
             self.merge_buckets(region_buckets);
         }
         if !read_stats.region_infos.is_empty() {
-            // TODO(x) send stats
-            // if let Some(sender) = self.stats_monitor.get_sender() {
-            // if sender.send(read_stats).is_err() {
-            // warn!("send read_stats failed, are we shutting down?")
-            // }
-            // }
+            self.stats_monitor.maybe_send_read_stats(read_stats);
         }
     }
 
@@ -1224,6 +1615,18 @@ impl PdRunner {
                 .engine_total_query_num
                 .add_query_stats(&region_info.0);
         }
+    }
+
+    // Notice: CPU records here we collect are all from the outside RPC workloads,
+    // CPU consumption from internal TiKV are not included. Also, since the write
+    // path CPU consumption is not large but the logging is complex, the current
+    // CPU time for the write path only takes into account the lock checking,
+    // which is the read load portion of the write path.
+    // TODO: more accurate CPU consumption of a specified region.
+    fn handle_region_cpu_records(&mut self, records: Arc<RawRecords>) {
+        // Send Region CPU info to AutoSplitController inside the stats_monitor.
+        self.stats_monitor.maybe_send_cpu_stats(&records);
+        calculate_region_cpu_records(self.store_id, records, &mut self.region_cpu_records);
     }
 
     fn handle_destroy_peer(&mut self, region_id: u64, keyspace_id: Option<u32>) {
@@ -1239,7 +1642,6 @@ impl PdRunner {
         Self::set_storage_size_metric(region_id, keyspace_id, None, false, None);
     }
 
-    #[allow(unused)]
     fn handle_store_infos(
         &mut self,
         cpu_usages: RecordPairVec,
@@ -1536,6 +1938,78 @@ impl PdRunner {
             Self::set_storage_size_metric(region_id, keyspace_id, None, false, None);
         }
     }
+
+    fn handle_inspect_latency(&mut self, factor: InspectFactor) {
+        let slow_score_tick_result = self
+            .health_reporter
+            .tick(self.store_stat.maybe_busy(), factor);
+        if let Some(score) = slow_score_tick_result.updated_score {
+            flush_store_inspect_slow_score_metrics(factor, score);
+        }
+        let id = slow_score_tick_result.tick_id;
+        let scheduler = self.scheduler.clone();
+
+        let inspector = {
+            match factor {
+                InspectFactor::RaftDisk => {
+                    // If the last slow_score already reached abnormal state and was delayed for
+                    // reporting by `store-heartbeat` to PD, we should report it here manually as
+                    // a FAKE `store-heartbeat`.
+                    if slow_score_tick_result.should_force_report_slow_store
+                        && self.is_store_heartbeat_delayed()
+                    {
+                        self.handle_fake_store_heartbeat();
+                    }
+                    LatencyInspector::new(
+                        id,
+                        Box::new(move |id, duration| {
+                            flush_store_inspect_disk_duration_metrics(factor, duration.clone());
+                            if let Err(e) = scheduler.schedule(PdTask::UpdateSlowScore {
+                                id,
+                                factor,
+                                duration,
+                            }) {
+                                warn!("schedule pd task failed"; "err" => ?e);
+                            }
+                        }),
+                    )
+                }
+                InspectFactor::KvDisk => LatencyInspector::new(
+                    id,
+                    Box::new(move |id, duration| {
+                        flush_store_inspect_disk_duration_metrics(factor, duration.clone());
+                        if let Err(e) = scheduler.schedule(PdTask::UpdateSlowScore {
+                            id,
+                            factor,
+                            duration,
+                        }) {
+                            warn!("schedule pd task failed"; "err" => ?e);
+                        }
+                    }),
+                ),
+                InspectFactor::Network => {
+                    let network_durations = self.health_reporter.record_network_duration(id);
+                    for (store_id, network_duration) in &network_durations {
+                        flush_store_inspect_network_duration_metrics(
+                            *store_id,
+                            tikv_util::time::duration_to_sec(*network_duration),
+                        );
+                    }
+                    // Inspect on network is periodically triggered by pd worker, it's no need to
+                    // trigger a new inspector to rfstore.
+                    return;
+                }
+            }
+        };
+        // Send the inspector to rfstore to trigger the next-round inspection of latency
+        // jitters.
+        let msg = StoreMsg::LatencyInspect {
+            factor,
+            send_time: TiInstant::now(),
+            inspector,
+        };
+        self.router.send_store(msg);
+    }
 }
 
 impl Runnable for PdRunner {
@@ -1652,15 +2126,21 @@ impl Runnable for PdRunner {
                 stats,
                 store_info,
                 send_detailed_report,
-            } => self.handle_store_heartbeat(stats, store_info, send_detailed_report),
+            } => self.handle_store_heartbeat(stats, Some(store_info), send_detailed_report),
             PdTask::ReportBatchSplit { regions } => self.handle_report_batch_split(regions),
             PdTask::ValidatePeer { region, peer } => self.handle_validate_peer(region, peer),
             PdTask::ReadStats { read_stats } => self.handle_read_stats(read_stats),
             PdTask::WriteStats { write_stats } => self.handle_write_stats(write_stats),
+            PdTask::RegionCpuRecords(records) => self.handle_region_cpu_records(records),
             PdTask::DestroyPeer {
                 region_id,
                 keyspace_id,
             } => self.handle_destroy_peer(region_id, keyspace_id),
+            PdTask::StoreInfos {
+                cpu_usages,
+                read_io_rates,
+                write_io_rates,
+            } => self.handle_store_infos(cpu_usages, read_io_rates, write_io_rates),
             PdTask::UpdateMaxTimestamp {
                 region_id,
                 initial_status,
@@ -1692,12 +2172,51 @@ impl Runnable for PdRunner {
             PdTask::UpdateRaftCpuUtil => {
                 self.raft_cpu_collector.update();
             }
+            PdTask::InspectLatency { factor } => {
+                self.handle_inspect_latency(factor);
+            }
+            PdTask::UpdateSlowScore {
+                id,
+                factor,
+                duration,
+            } => {
+                self.health_reporter.record_disk_duration(
+                    id,
+                    factor,
+                    duration,
+                    !self.store_stat.maybe_busy(),
+                );
+            }
         };
     }
 
     fn shutdown(&mut self) {
-        // TODO(x): self.stats_monitor.stop();
+        self.stats_monitor.stop();
     }
+}
+
+fn calculate_region_cpu_records(
+    store_id: u64,
+    records: Arc<RawRecords>,
+    region_cpu_records: &mut HashMap<u64, u32>,
+) {
+    for (tag, record) in &records.records {
+        let record_store_id = tag.store_id;
+        if record_store_id != store_id {
+            continue;
+        }
+        // Reporting a region heartbeat later will clear the corresponding record.
+        *region_cpu_records.entry(tag.region_id).or_insert(0) += record.cpu_time;
+    }
+}
+
+fn collect_engine_size(store_info: Option<&StoreInfo>) -> Option<(u64, u64, u64)> {
+    debug_assert!(store_info.is_some());
+    Some((
+        disk::get_disk_capacity(),
+        disk::get_disk_used_size(),
+        disk::get_disk_available_size(),
+    ))
 }
 
 fn new_change_peer_request(change_type: ConfChangeType, peer: metapb::Peer) -> AdminRequest {

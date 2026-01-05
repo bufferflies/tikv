@@ -70,7 +70,7 @@ use txn_types::Key;
 use uuid::Uuid;
 
 use super::*;
-use crate::{errors::*, RaftRouter};
+use crate::{errors::*, store::metrics::STORE_RAFT_ENABLE_UNPERSISTED_APPLY_GAUGE, RaftRouter};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const MAX_COMMITTED_SIZE_PER_READY: u64 = 16 * 1024 * 1024;
@@ -450,6 +450,29 @@ pub(crate) struct Peer {
 
     pub(crate) pending_apply_results: Vec<MsgApplyResult>,
 
+    // =====================================================================
+    // Configurations for "early-apply" feature.
+    // =====================================================================
+    pub max_apply_unpersisted_log_limit: u64,
+    /// A flag used to track whether `max_apply_unpersisted_log_limit` is set
+    /// to the Peer in raft-rs. We need this flag to handle the metrics
+    /// `RAFT_ENABLE_UNPERSISTED_APPLY_GAUGE` correctly because raft-rs can
+    /// reset `max_apply_unpersisted_log_limit` to 0 when it demotes from
+    /// leader.
+    enable_apply_unpersisted_log_state: bool,
+    /// The minimum raft index after which apply unpersisted raft log can be
+    /// enabled. We force disable apply unpersisted raft log in following 2
+    /// situation:
+    /// 1) Raft term changes. In this case, the min index is set to the current
+    ///    last index. This is to let apply unpersisted log only happen within
+    ///    the same term so it's easier to if any applied but not persisted logs
+    ///    has changed in which case we should just panic to avoid data
+    ///    inconsistency.
+    /// 2) Propose PrepareMerge. In this case, the min index is set to that raft
+    ///    log's index. This is to make online unsafe recovery easier when
+    ///    region state is PrepareMerge.
+    pub min_safe_index_for_unpersisted_apply: u64,
+
     /// Index of last scheduled committed raft log.
     pub(crate) last_applying_idx: u64,
     /// The index of the latest urgent proposal index.
@@ -564,21 +587,21 @@ impl Peer {
         let first = ps.first_index();
         let truncated = ps.truncated_index();
         let truncated_term = ps.truncated_term();
-        let last = ps.last_index();
+        let last_index = ps.last_index();
         let last_term = ps.last_term();
-        let commit = ps.commit_index();
+        let committed_index = ps.commit_index();
 
         let applied_index = ps.applied_index();
         info!(
-            "{} new peer storage first:{} truncated:{} trunc_term:{} last:{}, last_term:{}, applied: {}, commit: {}",
+            "{} new peer storage first:{} truncated:{} trunc_term:{} last_index:{}, last_term:{}, applied_index: {}, committed_index: {}",
             ps.tag(),
             first,
             truncated,
             truncated_term,
-            last,
+            last_index,
             last_term,
             applied_index,
-            commit,
+            committed_index,
         );
 
         let raft_cfg = raft::Config {
@@ -594,6 +617,9 @@ impl Peer {
             skip_bcast_commit: true,
             pre_vote: cfg.prevote,
             max_committed_size_per_ready: MAX_COMMITTED_SIZE_PER_READY,
+            // always disable applying unpersisted log at initialization,
+            // will enable it after applying to the current last_index.
+            max_apply_unpersisted_log_limit: 0,
             ..Default::default()
         };
 
@@ -617,6 +643,9 @@ impl Peer {
             delay_destroy: false,
             delay_destroy_merged_target: None,
             leader_missing_time: Some(Instant::now()),
+            max_apply_unpersisted_log_limit: cfg.max_apply_unpersisted_log_limit,
+            enable_apply_unpersisted_log_state: false,
+            min_safe_index_for_unpersisted_apply: last_index,
             last_applying_idx: applied_index,
             last_urgent_proposal_idx: u64::MAX,
             last_committed_split_idx: 0,
@@ -1460,6 +1489,10 @@ impl Peer {
 
         self.read_progress
             .update_leader_info(leader_id, term, self.region());
+
+        // TODO: Set last_index as the min_index may not be correct on follower,
+        // need to further consider a better solution.
+        self.disable_apply_unpersisted_log(self.raft_group.raft.raft_log.last_index());
     }
 
     pub fn insert_peer_cache(&mut self, peer: metapb::Peer) {
@@ -2623,6 +2656,7 @@ impl Peer {
             let progress = ReadProgress::applied_index_term(applied_index_term);
             let mut reader = ctx.global.readers.get_mut(&self.region_id).unwrap();
             self.maybe_update_read_progress(reader.value_mut(), progress);
+            self.maybe_update_apply_unpersisted_log_state(applied_index);
         }
     }
 
@@ -2978,6 +3012,9 @@ impl Peer {
                         .post_propose(cmd_type, idx, self.term());
                 }
                 self.push_proposal(ctx, p);
+                if req_admin_cmd_type == Some(AdminCmdType::PrepareMerge) {
+                    self.disable_apply_unpersisted_log(idx);
+                }
                 true
             }
         }
@@ -3880,6 +3917,54 @@ impl Peer {
     pub fn needs_update_last_leader_committed_idx(&self) -> bool {
         self.busy_on_apply.is_some() && self.last_leader_committed_idx.is_none()
     }
+
+    #[inline]
+    pub fn maybe_update_apply_unpersisted_log_state(&mut self, applied_index: u64) {
+        if self.min_safe_index_for_unpersisted_apply > 0
+            && self.min_safe_index_for_unpersisted_apply <= applied_index
+        {
+            if self.max_apply_unpersisted_log_limit > 0
+                && self
+                    .raft_group
+                    .raft
+                    .raft_log
+                    .max_apply_unpersisted_log_limit
+                    == 0
+            {
+                STORE_RAFT_ENABLE_UNPERSISTED_APPLY_GAUGE.inc();
+                self.enable_apply_unpersisted_log_state = true;
+            }
+            self.raft_group
+                .raft
+                .set_max_apply_unpersisted_log_limit(self.max_apply_unpersisted_log_limit);
+            self.min_safe_index_for_unpersisted_apply = 0;
+        }
+    }
+
+    #[inline]
+    pub fn disable_apply_unpersisted_log(&mut self, min_enable_index: u64) {
+        self.min_safe_index_for_unpersisted_apply =
+            std::cmp::max(self.min_safe_index_for_unpersisted_apply, min_enable_index);
+        if self
+            .raft_group
+            .raft
+            .raft_log
+            .max_apply_unpersisted_log_limit
+            > 0
+        {
+            self.raft_group.raft.set_max_apply_unpersisted_log_limit(0);
+        }
+        // NOTE: `max_apply_unpersisted_log_limit` can be reset in raft-rs when leader
+        // demote to follower, in this case, we should still decrease the
+        // metrics counter.
+        if self.enable_apply_unpersisted_log_state {
+            self.enable_apply_unpersisted_log_state = false;
+            STORE_RAFT_ENABLE_UNPERSISTED_APPLY_GAUGE.dec();
+        }
+    }
+
+    #[allow(unused)]
+    // TODO: support dynamic configuration changes.
     pub fn adjust_cfg_if_changed(&mut self, ctx: &RaftContext) {
         let raft_max_inflight_msgs = ctx.cfg.raft_max_inflight_msgs;
         if self.is_leader() && (raft_max_inflight_msgs != self.raft_max_inflight_msgs) {
@@ -3894,6 +3979,7 @@ impl Peer {
             self.raft_max_inflight_msgs = raft_max_inflight_msgs;
         }
         self.raft_group.raft.r.max_msg_size = ctx.cfg.raft_max_size_per_msg.0;
+        self.max_apply_unpersisted_log_limit = ctx.cfg.max_apply_unpersisted_log_limit;
     }
 }
 

@@ -17,6 +17,7 @@ use cloud_worker::{local_gc::LocalGcConfig, native_br::NativeBrConfig, CloudWork
 use dashmap::DashMap;
 use futures::{executor::block_on, future::try_join_all};
 use grpcio::{Channel, ChannelBuilder, EnvBuilder, Environment};
+use health_controller::space_usage::reset_update_storage_stats_interval;
 use hyper::{http, Body, Request};
 use kvengine::{
     dfs,
@@ -1359,6 +1360,9 @@ pub fn new_test_config(
         .flow_control
         .validate()
         .expect("storage.flow-control is invalid"); // To fill optional arguments.
+    // Reset the interval of updating space usages to compatible to store heartbeat
+    // interval.
+    reset_update_storage_stats_interval(config.raft_store.pd_store_heartbeat_tick_interval.0);
     config
 }
 

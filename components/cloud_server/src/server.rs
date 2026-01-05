@@ -18,7 +18,8 @@ use grpcio::{
     ChannelBuilder, Environment, Error as GrpcError, ResourceQuota, Server as GrpcServer,
     ServerBuilder,
 };
-use grpcio_health::{create_health, HealthService, ServingStatus};
+use grpcio_health::create_health;
+use health_controller::HealthController;
 use hyper::Error as HttpError;
 use kvproto::tikvpb::*;
 use openssl::error::ErrorStack as OpenSslError;
@@ -127,6 +128,7 @@ impl From<RaftServerError> for Error {
 
 pub type Result<T> = result::Result<T, Error>;
 
+#[allow(dead_code)]
 /// The TiKV server
 ///
 /// It hosts various internal components, including gRPC, the raftstore router
@@ -149,7 +151,7 @@ pub struct Server<T: RaftStoreRouter + 'static, S: StoreAddrResolver + 'static> 
     read_pool: Option<ReadPool>,
     debug_thread_pool: Arc<Runtime>,
     scheduler_runtime: Option<ScalableTokioRuntime>,
-    health_service: HealthService,
+    health_controller: HealthController,
     timer: Handle,
 }
 
@@ -167,6 +169,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         env: Arc<Environment>,
         read_pool: ReadPool,
         debug_thread_pool: Arc<Runtime>,
+        health_controller: HealthController,
         check_leader_scheduler: Scheduler<CheckLeaderTask>,
         scheduler_runtime: Option<ScalableTokioRuntime>,
     ) -> Result<Self> {
@@ -187,6 +190,12 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             cfg.value().heavy_load_threshold,
         ));
 
+        let health_feedback_interval = if cfg.value().health_feedback_interval.0.is_zero() {
+            None
+        } else {
+            Some(cfg.value().health_feedback_interval.0)
+        };
+
         let proxy = Proxy::new(security_mgr.clone(), &env, Arc::new(cfg.value().clone()));
         let kv_service = KvService::new(
             store_id,
@@ -198,6 +207,8 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             cfg.value().enable_request_batch,
             proxy,
             check_leader_scheduler,
+            health_controller.clone(),
+            health_feedback_interval,
         );
 
         let addr = SocketAddr::from_str(&cfg.value().addr)?;
@@ -216,12 +227,11 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             .default_compression_algorithm(cfg.value().grpc_compression_algorithm(false))
             .default_gzip_compression_level(cfg.value().grpc_gzip_compression_level)
             .build_args();
-        let health_service = HealthService::default();
         let builder = {
             let mut sb = ServerBuilder::new(Arc::clone(&env))
                 .channel_args(channel_args)
                 .register_service(create_tikv(kv_service))
-                .register_service(create_health(health_service.clone()));
+                .register_service(create_health(health_controller.get_grpc_health_service()));
             sb = security_mgr.bind(sb, &ip, addr.port());
             Either::Left(sb)
         };
@@ -237,7 +247,6 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         let raft_client = RaftClient::new(conn_builder);
 
         let trans = ServerTransport::new(raft_client);
-        health_service.set_serving_status("", ServingStatus::NotServing);
 
         let svr = Server {
             env: Arc::clone(&env),
@@ -251,7 +260,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             read_pool: Some(read_pool),
             debug_thread_pool,
             scheduler_runtime,
-            health_service,
+            health_controller,
             timer: GLOBAL_TIMER_HANDLE.clone(),
         };
 
@@ -351,8 +360,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
                 option_env!("TIKV_BUILD_GIT_HASH").unwrap_or("None"),
             ])
             .set(startup_ts as i64);
-        self.health_service
-            .set_serving_status("", ServingStatus::Serving);
+        self.health_controller.set_is_serving(true);
 
         info!("TiKV is ready to serve");
         Ok(())
@@ -370,8 +378,7 @@ impl<T: RaftStoreRouter + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             read_pool.shutdown();
         }
         self.scheduler_runtime.take();
-        self.health_service
-            .set_serving_status("", ServingStatus::NotServing);
+        self.health_controller.set_is_serving(false);
         Ok(())
     }
 

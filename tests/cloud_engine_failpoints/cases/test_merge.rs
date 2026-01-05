@@ -409,3 +409,76 @@ fn test_rfstore_node_multiple_rollback_merge() {
         assert_eq!(pd_client.get_region(b"k1").unwrap().get_id(), left.get_id());
     }
 }
+
+#[test]
+fn test_async_io_apply_before_leader_persist_merge() {
+    let mut cluster = new_node_cluster(0, 3);
+    configure_for_merge(&mut cluster.cfg);
+    cluster.cfg.raft_store.cmd_batch_concurrent_ready_max_count = 0;
+    cluster.cfg.raft_store.store_io_pool_size = 1;
+    cluster.cfg.raft_store.max_apply_unpersisted_log_limit = 10000;
+    let pd_client = Arc::clone(&cluster.pd_client);
+    pd_client.disable_default_operator();
+
+    cluster.run();
+
+    let region = pd_client.get_region(b"k1").unwrap();
+    let split_key = Key::from_raw(b"k2");
+    cluster.must_split(&region, split_key.as_encoded());
+    let left = pd_client.get_region(b"k1").unwrap();
+    let right = pd_client.get_region(b"k3").unwrap();
+
+    let peer_1 = find_peer(&left, 1).cloned().unwrap();
+    let peer_2 = find_peer(&right, 1).cloned().unwrap();
+    cluster.must_transfer_leader(left.get_id(), peer_1.clone());
+
+    cluster.must_put(b"k1", b"v1");
+    cluster.must_put(b"k3", b"v3");
+
+    let raft_before_save_on_store_1_fp = "rfstore_before_save_on_store_1";
+    // Skip persisting to simulate raft log persist lag but not block node restart.
+    fail::cfg(raft_before_save_on_store_1_fp, "return").unwrap();
+
+    let schedule_merge_fp = "on_schedule_merge";
+    fail::cfg(schedule_merge_fp, "return()").unwrap();
+
+    // Propose merge on leader will fail with timeout due to not persist.
+    let req = cluster.new_prepare_merge(left.get_id(), right.get_id());
+    cluster
+        .call_command_on_leader(req, Duration::from_secs(1))
+        .unwrap_err();
+
+    cluster.shutdown();
+    let state = cluster
+        .region_local_state(peer_1.get_id(), peer_1.get_store_id())
+        .unwrap();
+    assert_eq!(state.get_state(), PeerState::Normal, "{:?}", state);
+    let state = cluster
+        .region_local_state(peer_2.get_id(), peer_2.get_store_id())
+        .unwrap();
+    assert_eq!(state.get_state(), PeerState::Normal, "{:?}", state);
+    fail::remove(schedule_merge_fp);
+    fail::remove(raft_before_save_on_store_1_fp);
+    cluster.start().unwrap();
+
+    // Wait till merge is finished.
+    pd_client.check_merged_timeout(left.get_id(), Duration::from_secs(5));
+
+    cluster.must_put(b"k4", b"v4");
+
+    for i in 1..4 {
+        must_get_equal(&cluster.get_engine(i), right.get_id(), b"k4", b"v4");
+        let peer = find_peer(&left, i).cloned().unwrap();
+        let state = cluster
+            .region_local_state(peer.get_id(), peer.get_store_id())
+            .unwrap();
+        assert_eq!(state.get_state(), PeerState::Tombstone, "{:?}", state);
+        let peer = find_peer(&right, i).cloned().unwrap();
+        let state = cluster
+            .region_local_state(peer.get_id(), peer.get_store_id())
+            .unwrap();
+        assert_eq!(state.get_state(), PeerState::Normal, "{:?}", state);
+        assert!(state.get_region().get_start_key().is_empty());
+        assert!(state.get_region().get_end_key().is_empty());
+    }
+}

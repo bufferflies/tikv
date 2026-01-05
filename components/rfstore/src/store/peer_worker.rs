@@ -84,6 +84,12 @@ impl PeerInbox {
         PeerMsgHandler::new(&mut peer_fsm, ctx).handle_msgs(&mut self.msgs);
         peer_fsm.peer.handle_raft_ready(ctx, None);
         if !ctx.apply_msgs.msgs.is_empty() {
+            // Update the statistics of applied unpersisted logs.
+            let apply_ahead_delta = peer_fsm
+                .peer
+                .last_applying_idx
+                .saturating_sub(peer_fsm.peer.raft_group.raft.r.raft_log.persisted);
+            STORE_RAFT_APPLY_AHEAD_PERSIST_HISTOGRAM.observe(apply_ahead_delta as f64);
             let msgs = mem::take(&mut ctx.apply_msgs.msgs);
             maybe_send_apply(
                 &self.peer.apply_task_state,
@@ -677,8 +683,14 @@ impl IoWorker {
         trans: Box<dyn Transport>,
         max_batch_size: usize,
         min_write_duration: Duration,
+        io_notify_capacity: usize,
     ) -> (Self, Sender<Option<IoWorkerTask>>) {
-        let (sender, receiver) = tikv_util::mpsc::bounded(1024);
+        let (sender, receiver) = if io_notify_capacity == 0 {
+            // Represents that there is no limit for io notification channel.
+            tikv_util::mpsc::unbounded()
+        } else {
+            tikv_util::mpsc::bounded(io_notify_capacity)
+        };
         (
             Self {
                 store_id,

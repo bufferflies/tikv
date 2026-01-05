@@ -5,6 +5,7 @@ mod test_conf_change;
 mod test_joint_consensus;
 mod test_lease_read;
 mod test_merge;
+mod test_pd;
 mod test_prevote;
 mod test_region_heartbeat;
 mod test_split_region;

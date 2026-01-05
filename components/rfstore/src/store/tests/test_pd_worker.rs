@@ -12,6 +12,7 @@ use std::{
 use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use futures::executor::block_on;
+use health_controller::HealthController;
 use kvproto::pdpb::RegionHeartbeatResponse;
 use pd_client::{Error, PdClient, PdFuture};
 use security::GetSecurityManager;
@@ -22,7 +23,10 @@ use txn_types::{ClusterGcStates, GcState, NULL_KEYSPACE_ID};
 use yatp::task::future;
 
 use crate::{
-    store::{tests::new_test_engines, CpuUtilCollector, Engines, PdRunner, PdTask},
+    store::{
+        tests::new_test_engines, Config as RfStoreConfig, CpuUtilCollector, Engines, PdRunner,
+        PdTask,
+    },
     RaftRouter,
 };
 
@@ -47,16 +51,19 @@ impl TestPdRunnerSuite {
 
         let (engine, temp_dir) = new_test_engines();
 
+        let rfstore_cfg = RfStoreConfig::default();
+
         let pd_runner = PdRunner::new(
+            &rfstore_cfg,
             1,
             pd_client,
             router,
             pd_worker.scheduler(),
-            Duration::from_secs(1),
             ConcurrencyManager::new(1.into()),
             yatp_pool.remote().clone(),
             engine.kv.clone(),
             CpuUtilCollector::new("test-pd-".into()),
+            HealthController::default(),
         );
 
         pd_worker.start(pd_runner);

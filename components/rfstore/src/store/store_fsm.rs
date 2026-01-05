@@ -20,7 +20,13 @@ use std::{
 
 use api_version::ApiV2;
 use concurrency_manager::ConcurrencyManager;
+use engine_traits::MiscExt;
 use fail::fail_point;
+use health_controller::{
+    space_usage::{get_update_storage_stats_interval, DiskUsageChecker},
+    types::InspectFactor,
+    HealthController,
+};
 use kvproto::{
     metapb::{self, Region, RegionEpoch},
     pdpb,
@@ -28,7 +34,10 @@ use kvproto::{
     raft_cmdpb::RaftCmdRequest,
     raft_serverpb::{ExtraMessageType, PeerState, RaftMessage, RegionLocalState},
 };
-use pd_client::PdClient;
+use pd_client::{
+    metrics::{STORE_ENGINE_MEM_SIZE_GAUGE_VEC, STORE_ENGINE_SIZE_GAUGE_VEC, STORE_SIZE_GAUGE_VEC},
+    PdClient,
+};
 use protobuf::Message;
 use raft::{eraftpb::ConfChangeType, StateRole};
 use raftstore::{
@@ -53,10 +62,10 @@ use tikv_util::{
     mpsc::{Receiver, Sender},
     slow_log,
     store::{find_peer, is_learner},
-    sys::thread::StdThreadBuildWrapper,
+    sys::{disk, path_in_diff_mount_point, thread::StdThreadBuildWrapper},
     time::{duration_to_sec, Instant as TiInstant, SlowTimer},
     warn,
-    worker::{Builder, LazyWorker, Scheduler},
+    worker::{Builder, LazyWorker, Scheduler, Worker},
     RingQueue, GLOBAL_SERVER_READINESS,
 };
 use time::Timespec;
@@ -64,7 +73,11 @@ use trace_event::types::TraceContext;
 
 use super::{get_max_apply_pool_size, Config, *};
 use crate::{
-    store::{config_manager::RfstoreConfigManager, metrics::*, worker::ReadRunner},
+    store::{
+        config_manager::RfstoreConfigManager,
+        metrics::*,
+        worker::{DiskCheckRunner, DiskCheckTask, ReadRunner},
+    },
     RaftRouter, RaftStoreRouter, Result,
 };
 
@@ -129,12 +142,60 @@ impl RaftBatchSystem {
         trans: Box<dyn Transport>,
         pd_client: Arc<dyn PdClient>,
         pd_worker: LazyWorker<PdTask>,
+        background_worker: Worker,
         store_meta: Arc<Mutex<StoreMeta>>,
         mut coprocessor_host: CoprocessorHost<kvengine::Engine>,
         importer: Arc<SstImporter>,
+        health_controller: HealthController,
         concurrency_manager: ConcurrencyManager,
     ) -> Result<()> {
         assert!(self.workers.is_none());
+
+        let (kvdb_dir, kvdb_wal_dir) = (engines.kv.db_dir(), engines.kv.wal_dir());
+        assert!(kvdb_dir.is_some() && kvdb_wal_dir.is_none());
+        let kvdb_dir_str = kvdb_dir.unwrap().to_str().unwrap();
+        let (rfdb_dir, rf_wal_dir) = (engines.raft.db_dir(), engines.raft.wal_dir());
+        assert!(rfdb_dir.is_some() && rf_wal_dir.is_some());
+        let (rfdb_dir_str, rf_wal_dir_str) = (
+            rfdb_dir.unwrap().to_str().unwrap(),
+            rf_wal_dir.unwrap().to_str().unwrap(),
+        );
+
+        // Optimize Rfstore configurations if necessary.
+        {
+            self.conf
+                .update(|conf| {
+                    conf.optimize_for(rf_wal_dir_str, rfdb_dir_str, kvdb_dir_str);
+                    Ok::<(), ()>(())
+                })
+                .unwrap();
+        }
+        // Create schedulers for inspecting latency jitters of disk I/O operations.
+        let mut disk_check_schedulers = HashMap::new();
+        {
+            // Inspect disks of rfengine.
+            let disk_check_runner = if path_in_diff_mount_point(rfdb_dir_str, rf_wal_dir_str) {
+                DiskCheckRunner::new_multi(vec![
+                    rfdb_dir.unwrap().to_path_buf(),
+                    rf_wal_dir.unwrap().to_path_buf(),
+                ])
+            } else {
+                DiskCheckRunner::new(rfdb_dir.unwrap().to_path_buf())
+            };
+            let disk_check_scheduler =
+                background_worker.start("raft-disk-check-worker", disk_check_runner);
+            disk_check_schedulers.insert(InspectFactor::RaftDisk as u8, disk_check_scheduler);
+            // Inspect disk of kvengine if necessary.
+            let kvengine_independent_with_rfengine =
+                path_in_diff_mount_point(rfdb_dir_str, kvdb_dir_str)
+                    && path_in_diff_mount_point(rf_wal_dir_str, kvdb_dir_str);
+            if kvengine_independent_with_rfengine {
+                let disk_check_runner = DiskCheckRunner::new(kvdb_dir.unwrap().to_path_buf());
+                let disk_check_scheduler =
+                    background_worker.start("kvdb-disk-check-worker", disk_check_runner);
+                disk_check_schedulers.insert(InspectFactor::KvDisk as u8, disk_check_scheduler);
+            }
+        }
         // TODO: we can get cluster meta regularly too later.
 
         // TODO load coprocessors from configuration
@@ -177,7 +238,7 @@ impl RaftBatchSystem {
         let pd_scheduler = workers.pd_worker.scheduler();
         let ctx = GlobalContext {
             cfg: self.conf.clone(),
-            engines,
+            engines: engines.clone(),
             store: meta,
             readers: store_meta.lock().unwrap().readers.clone(),
             router: self.router.clone(),
@@ -188,6 +249,7 @@ impl RaftBatchSystem {
             read_scheduler,
             coprocessor_host,
             importer,
+            disk_check_schedulers: Arc::new(disk_check_schedulers),
             destroying: HashSet::default(),
             engine_total_bytes_written: Arc::new(AtomicU64::new(0)),
             engine_total_keys_written: Arc::new(AtomicU64::new(0)),
@@ -214,15 +276,16 @@ impl RaftBatchSystem {
         let raft_cpu_util_collector = CpuUtilCollector::new("rfstore".to_string());
         let cpu_util_ref = raft_cpu_util_collector.get_cpu_util_ref();
         let pd_runner = PdRunner::new(
+            &ctx.cfg.value(),
             store_id,
             pd_client,
             self.router.clone(),
             workers.pd_worker.scheduler(),
-            ctx.cfg.value().pd_store_heartbeat_tick_interval.into(),
             concurrency_manager,
             workers.pd_worker.remote(),
             ctx.engines.kv.clone(),
             raft_cpu_util_collector,
+            health_controller,
         );
         assert!(workers.pd_worker.start(pd_runner));
         self.workers = Some(workers);
@@ -276,6 +339,7 @@ impl RaftBatchSystem {
             ctx.trans.clone(),
             ctx.cfg.value().raft_worker_max_batch_size.0 as usize,
             ctx.cfg.value().io_worker_min_write_duration.0,
+            ctx.cfg.value().store_io_notify_capacity,
         );
         self.io_sender = Some(io_sender.clone());
         let props = tikv_util::thread_group::current_properties();
@@ -314,6 +378,9 @@ impl RaftBatchSystem {
         for region_id in region_ids {
             self.router.send(region_id, PeerMsg::Start);
         }
+        // Spawn statistics task in background worker to periodically update
+        // metrics of storage usage
+        self.init_store_usage_stats_task(engines, background_worker, &self.conf.value());
         Ok(())
     }
 
@@ -421,6 +488,150 @@ impl RaftBatchSystem {
             });
             rwb.truncate_raft_log(peer_id, region_id, TRUNCATE_ALL_INDEX);
         }
+    }
+
+    fn init_store_usage_stats_task(&self, engines: Engines, bg_worker: Worker, config: &Config) {
+        let config_disk_capacity: u64 = config.capacity.0;
+        let reserve_space = disk::get_disk_reserved_space();
+        let reserve_raft_space = disk::get_raft_disk_reserved_space();
+        let need_update_disk_status = reserve_space != 0 || reserve_raft_space != 0;
+        if !need_update_disk_status {
+            info!("ignore updating disk status as no reserve space is set");
+        }
+        let kvdb_data_dir = engines.kv.db_dir().unwrap().to_str().unwrap();
+        let (rfdb_data_dir, rfdb_wal_dir) = (
+            engines.raft.db_dir().unwrap().to_str().unwrap(),
+            engines.raft.wal_dir().unwrap().to_str().unwrap(),
+        );
+        let separated_raft_mount_path = path_in_diff_mount_point(kvdb_data_dir, rfdb_data_dir);
+        let (separated_raft_auxillay_mount_path, separated_raft_auxiliary_with_kvdb) = {
+            let seperated_with_kvdb = path_in_diff_mount_point(rfdb_wal_dir, kvdb_data_dir);
+            let seperated_with_raft = path_in_diff_mount_point(rfdb_wal_dir, rfdb_data_dir);
+            (
+                seperated_with_kvdb && seperated_with_raft,
+                seperated_with_kvdb,
+            )
+        };
+        let disk_usage_checker = DiskUsageChecker::new(
+            kvdb_data_dir.to_string(),
+            rfdb_data_dir.to_string(),
+            Some(rfdb_wal_dir.to_string()),
+            separated_raft_mount_path,
+            separated_raft_auxillay_mount_path,
+            separated_raft_auxiliary_with_kvdb,
+            reserve_space,
+            reserve_raft_space,
+            config_disk_capacity,
+        );
+        let router = self.router.clone();
+        bg_worker
+            .spawn_interval_task(get_update_storage_stats_interval(), move || {
+                let kv_size = engines.kv.get_engine_used_size().expect("kvengine");
+                let raft_size = engines
+                    .raft
+                    .get_engine_stats().disk_size;
+                let used_size = kv_size + raft_size;
+                // Check the disk usage and update the disk usage status.
+                let (cur_disk_status, cur_kv_disk_status, raft_disk_status, capacity, available) = disk_usage_checker.inspect(used_size, raft_size);
+                let prev_disk_status = disk::get_disk_status(0); //0 no need care about failpoint.
+                if prev_disk_status != cur_disk_status {
+                    warn!(
+                        "disk usage {:?}->{:?} (rfengine usage: {:?}, kvengine usage: {:?}), seperated raft mount={}, kv available={}, kv={}, raft={}, capacity={}",
+                        prev_disk_status,
+                        cur_disk_status,
+                        raft_disk_status,
+                        cur_kv_disk_status,
+                        separated_raft_mount_path,
+                        available,
+                        kv_size,
+                        raft_size,
+                        capacity
+                    );
+                }
+                // Update disk status if disk space checker is enabled.
+                if need_update_disk_status {
+                    disk::set_disk_status(cur_disk_status);
+                    // TODO: update disk full status to global context to enable the checking of disk-full.
+                }
+                // Update disk capacity, used size and available size.
+                disk::set_disk_capacity(capacity);
+                disk::set_disk_used_size(used_size);
+                disk::set_disk_available_size(available);
+                // Update the avalable size for kvengine.
+                engines.kv.set_available_space(available);
+
+                // Get statistics of all shards.
+                let kv_all_shard_stats = engines.kv.get_all_shard_stats();
+                kvengine::Engine::update_region_huge_table_bytes_metrics(
+                    &kv_all_shard_stats,
+                    engines.kv.opts.max_mem_table_size,
+                );
+                let kv_engine_stats = kvengine::Engine::get_engine_stats(kv_all_shard_stats);
+                engines.kv.notify_memtables_size(kv_engine_stats.mem_tables_size);
+                if let kvengine::context::IaCtx::Enabled(mgr, _) = engines.kv.ia_ctx() {
+                    mgr.notify_total_data_size(kv_engine_stats.ia.data_size);
+                }
+                for &id_ver in &kv_engine_stats.ready_destroy_range_shards {
+                    if let Ok(shard) = engines
+                        .kv
+                        .get_shard_with_ver(id_ver.id, id_ver.ver)
+                    {
+                        // If the shard is not active, no need to trigger compact.
+                        if !shard.is_active() {
+                            continue;
+                        }
+                        // Send trigger refresh states to peer.
+                        router.send(
+                            shard.id,
+                            PeerMsg::CasualMessage(CasualMessage::TriggerRefreshShardStates),
+                        );
+                    }
+                }
+
+                // Update metrics of this node.
+                STORE_SIZE_GAUGE_VEC
+                    .with_label_values(&["capacity", "", "", ""])
+                    .set(capacity as i64);
+                STORE_SIZE_GAUGE_VEC
+                    .with_label_values(&["available", "", "", ""])
+                    .set(available as i64);
+                STORE_SIZE_GAUGE_VEC
+                    .with_label_values(&["all_used", "", "", ""])
+                    .set(used_size as i64);
+                // Update metrics of kvengine.
+                for (cf, level_size) in kv_engine_stats.cf_level_sizes.iter().enumerate() {
+                    STORE_ENGINE_SIZE_GAUGE_VEC
+                        .with_label_values(&["kv", kvengine::CF_NAMES[cf]])
+                        .set(level_size.iter().sum::<u64>() as i64);
+                }
+                STORE_ENGINE_MEM_SIZE_GAUGE_VEC
+                    .with_label_values(&["kv", "memtable"])
+                    .set(kv_engine_stats.mem_tables_size as i64);
+                STORE_ENGINE_MEM_SIZE_GAUGE_VEC
+                    .with_label_values(&["kv", "block_cache"])
+                    .set(engines.kv.get_cache_size() as i64);
+                STORE_ENGINE_MEM_SIZE_GAUGE_VEC
+                    .with_label_values(&["kv", "block_index"])
+                    .set(kv_engine_stats.in_mem_index_size as i64);
+                STORE_ENGINE_MEM_SIZE_GAUGE_VEC
+                    .with_label_values(&["kv", "table_filter"])
+                    .set(kv_engine_stats.in_mem_filter_size as i64);
+
+                STORE_ENGINE_SIZE_GAUGE_VEC
+                    .with_label_values(&["kv", "ia"])
+                    .set(kv_engine_stats.ia.data_size as i64);
+                STORE_ENGINE_SIZE_GAUGE_VEC
+                    .with_label_values(&["kv", "ia_kv"])
+                    .set(kv_engine_stats.ia.kv_size as i64);
+
+                let rf_engine_stats = engines.raft.get_engine_stats();
+                STORE_ENGINE_SIZE_GAUGE_VEC
+                    .with_label_values(&["raft", "raft"])
+                    .set(rf_engine_stats.disk_size as i64);
+                STORE_ENGINE_MEM_SIZE_GAUGE_VEC
+                    .with_label_values(&["raft", ""])
+                    .set(rf_engine_stats.total_mem_size as i64);
+            });
     }
 }
 
@@ -706,6 +917,7 @@ pub(crate) struct GlobalContext {
     pub(crate) read_scheduler: Scheduler<crate::store::worker::ReadTask>,
     pub(crate) coprocessor_host: CoprocessorHost<kvengine::Engine>,
     pub(crate) importer: Arc<SstImporter>,
+    pub(crate) disk_check_schedulers: Arc<HashMap<u8, Scheduler<DiskCheckTask>>>, /* key is InspectFacor. */
     /// Saves destroying regions in one loop. It's used to solve the race
     /// between peer gc and split, i.e., split won't create a destroying
     /// region if they are in the same loop with checking it.
@@ -988,6 +1200,31 @@ impl<'a> StoreMsgHandler<'a> {
             StoreMsg::CheckMerge(region_id) => {
                 tikv_util::set_current_region_thread_local(region_id);
                 self.on_check_merge(region_id);
+            }
+            StoreMsg::LatencyInspect {
+                factor,
+                send_time,
+                mut inspector,
+            } => {
+                inspector.record_wait_duration(send_time.saturating_elapsed());
+                // Send LatencyInspector to disk_check_scheduler to inspect latency.
+                if let Some(scheduler) = self.ctx.global.disk_check_schedulers.get(&(factor as u8))
+                {
+                    if let Err(e) = scheduler.schedule(DiskCheckTask::InspectLatency { inspector })
+                    {
+                        warn!(
+                            "failed to schedule disk check task";
+                            "error" => ?e,
+                            "factor" => ?factor,
+                            "store_id" => self.store.id
+                        );
+                    }
+                } else {
+                    debug!(
+                        "invalid or uninialized factor for inspector, factor: {:?}",
+                        factor
+                    );
+                }
             }
             StoreMsg::Stop => {
                 self.store.stopped = true;
@@ -1919,6 +2156,9 @@ impl<'a> StoreMsgHandler<'a> {
 
         // Mark itself as pending_remove
         peer_fsm.peer.pending_remove = true;
+
+        // try to decrease the RAFT_ENABLE_UNPERSISTED_APPLY_GAUGE count.
+        peer_fsm.peer.disable_apply_unpersisted_log(0);
 
         let peer_store = peer_fsm.peer.get_store();
         if let Some(parent_id) = peer_store.parent_id() {

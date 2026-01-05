@@ -4,12 +4,13 @@ mod test_pd_worker;
 mod test_peer_fsm;
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{atomic::AtomicU64, Arc, Mutex},
 };
 
 use cloud_encryption::MasterKey;
 use file_system::IoRateLimiter;
+use health_controller::types::InspectFactor;
 use kvengine::limiter::StoreLimiter;
 use kvproto::{
     kvrpcpb::ApiVersion,
@@ -163,6 +164,22 @@ fn new_test_raft_ctx(
         "test-read-worker",
         crate::store::worker::ReadRunner::new(engines.raft.clone(), router.clone()),
     );
+    let background_worker = tikv_util::worker::Worker::new("test-background-worker");
+
+    // Create schedulers for inspecting latency jitters of disk I/O operations.
+    // Since under testing env, the mount path for kvengine and rfengine should
+    // be same root path, it's no need to inspect latency jitters of kvengine.
+    let mut disk_check_schedulers = HashMap::new();
+    {
+        // Inspect disks of rfengine.
+        let (rfdb_dir, rf_wal_dir) = (engines.raft.db_dir(), engines.raft.wal_dir());
+        assert!(rfdb_dir.is_some() && rf_wal_dir.is_some());
+        let mut disk_check_runner = DiskCheckRunner::new(rfdb_dir.unwrap().to_path_buf());
+        disk_check_runner.bind_background_worker(background_worker.clone());
+        let disk_check_scheduler =
+            background_worker.start("raft-disk-check-worker", disk_check_runner);
+        disk_check_schedulers.insert(InspectFactor::RaftDisk as u8, disk_check_scheduler);
+    }
 
     let trans = MockTransport::new();
 
@@ -179,6 +196,7 @@ fn new_test_raft_ctx(
         read_scheduler,
         coprocessor_host: CoprocessorHost::default(),
         importer,
+        disk_check_schedulers: Arc::new(disk_check_schedulers),
         destroying: HashSet::default(),
         engine_total_bytes_written: Arc::new(AtomicU64::new(0)),
         engine_total_keys_written: Arc::new(AtomicU64::new(0)),

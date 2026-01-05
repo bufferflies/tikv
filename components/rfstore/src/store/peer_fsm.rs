@@ -64,12 +64,14 @@ use crate::{
         peer::{Peer, StaleState},
         peer_storage::RaftlogFetchResult,
         schema::{schema_file_is_matched_with_meta, shard_is_matched_with_meta},
-        util as _util, ApplyMetrics, ApplyMsg, CasualMessage, Config, CustomBuilder, Engines,
-        MsgApplyResult, MsgRegistration, PdTask, PeerMsg, PersistReady, RaftApplyState,
-        RaftCommand, RaftContext, ReadIndexContext, SignificantMsg, SnapState, StoreMeta, StoreMsg,
-        Ticker, TrimOverBoundParameter, PEER_TICK_CHECK_LONG, PEER_TICK_PD_HEARTBEAT,
-        PEER_TICK_RAFT, PEER_TICK_RAFT_LOG_GC, PEER_TICK_SPLIT_CHECK,
-        PEER_TICK_SWITCH_MEM_TABLE_CHECK, RAFT_INIT_LOG_INDEX,
+        util as _util,
+        util::KeysInfoFormatter,
+        ApplyMetrics, ApplyMsg, CasualMessage, Config, CustomBuilder, Engines, MsgApplyResult,
+        MsgRegistration, PdTask, PeerMsg, PersistReady, RaftApplyState, RaftCommand, RaftContext,
+        ReadIndexContext, SignificantMsg, SnapState, StoreMeta, StoreMsg, Ticker,
+        TrimOverBoundParameter, PEER_TICK_CHECK_LONG, PEER_TICK_PD_HEARTBEAT, PEER_TICK_RAFT,
+        PEER_TICK_RAFT_LOG_GC, PEER_TICK_SPLIT_CHECK, PEER_TICK_SWITCH_MEM_TABLE_CHECK,
+        RAFT_INIT_LOG_INDEX,
     },
     DiscardReason, Error, RaftStoreRouter, Result, MERGE_REGION_WITH_TXN_FILE_LOCKS_ERR_MSG,
     MERGE_REGION_WITH_UNCONVERTED_L0S_ERR_MSG,
@@ -1474,7 +1476,7 @@ impl<'a> PeerMsgHandler<'a> {
                 "prepare split error";
                 "tag" => self.peer.tag(),
                 "peer_id" => self.fsm.peer_id(),
-                "split_keys" => %util::KeysInfoFormatter(split_keys.iter()),
+                "split_keys" => %KeysInfoFormatter(split_keys.iter()),
                 "source" => source,
                 "error" => ?e,
             );
@@ -1486,7 +1488,7 @@ impl<'a> PeerMsgHandler<'a> {
             "on split";
             "tag" => self.peer.tag(),
             "peer_id" => self.fsm.peer_id(),
-            "split_keys" => %util::KeysInfoFormatter(split_keys.iter()),
+            "split_keys" => %KeysInfoFormatter(split_keys.iter()),
             "source" => source,
         );
         let task = PdTask::AskBatchSplit {

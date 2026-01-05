@@ -130,6 +130,7 @@ fn test_serde_custom_tikv_config() {
         simplify_metrics: false,
         push_metrics_addr: String::default(),
         push_metrics_interval: ReadableDuration::secs(10),
+        ..Default::default()
     };
     value.readpool = ReadPoolConfig {
         unified: UnifiedReadPoolConfig {

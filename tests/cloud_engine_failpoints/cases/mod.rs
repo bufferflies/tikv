@@ -8,6 +8,7 @@ mod gc;
 mod test_async_fetch;
 mod test_async_io;
 mod test_compaction;
+mod test_disk_usage;
 mod test_load_data;
 mod test_merge;
 mod test_native_br;

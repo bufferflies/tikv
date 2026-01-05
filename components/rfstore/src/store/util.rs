@@ -523,6 +523,42 @@ impl CpuUtilRef {
     }
 }
 
+pub struct KeysInfoFormatter<
+    'a,
+    T: 'a + AsRef<[u8]>,
+    I: std::iter::DoubleEndedIterator<Item = &'a T>
+        + std::iter::ExactSizeIterator<Item = &'a T>
+        + Clone,
+>(pub I);
+
+impl<
+    'a,
+    T: 'a + AsRef<[u8]>,
+    I: std::iter::DoubleEndedIterator<Item = &'a T>
+        + std::iter::ExactSizeIterator<Item = &'a T>
+        + Clone,
+> fmt::Display for KeysInfoFormatter<'a, T, I>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut it = self.0.clone();
+        match it.len() {
+            0 => write!(f, "(no key)"),
+            1 => write!(
+                f,
+                "key {}",
+                log_wrappers::Value::key(it.next().unwrap().as_ref())
+            ),
+            _ => write!(
+                f,
+                "{} keys range from {} to {}",
+                it.len(),
+                log_wrappers::Value::key(it.next().unwrap().as_ref()),
+                log_wrappers::Value::key(it.next_back().unwrap().as_ref())
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tikv_util::sys::thread::StdThreadBuildWrapper;

@@ -1,7 +1,10 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -16,6 +19,7 @@ use grpcio::{
     ClientStreamingSink, DuplexSink, Error as GrpcError, RequestStream, Result as GrpcResult,
     RpcContext, RpcStatus, RpcStatusCode, ServerStreamingSink, UnarySink, WriteFlags,
 };
+use health_controller::HealthController;
 use kvproto::{
     coprocessor::*,
     kvrpcpb::*,
@@ -93,6 +97,11 @@ pub struct Service<T: RaftStoreRouter, L: LockManager, F: KvFormat> {
 
     // For handling `CheckLeader` request.
     check_leader_scheduler: Scheduler<CheckLeaderTask>,
+
+    // For returning health status to clients.
+    health_controller: HealthController,
+    health_feedback_interval: Option<Duration>,
+    health_feedback_seq: Arc<AtomicU64>,
 }
 
 impl<T: RaftStoreRouter + Clone + 'static, L: LockManager + Clone, F: KvFormat + Clone> Clone
@@ -109,6 +118,9 @@ impl<T: RaftStoreRouter + Clone + 'static, L: LockManager + Clone, F: KvFormat +
             grpc_thread_load: self.grpc_thread_load.clone(),
             proxy: self.proxy.clone(),
             check_leader_scheduler: self.check_leader_scheduler.clone(),
+            health_controller: self.health_controller.clone(),
+            health_feedback_seq: self.health_feedback_seq.clone(),
+            health_feedback_interval: self.health_feedback_interval,
         }
     }
 }
@@ -125,7 +137,13 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Service<T, L, F>
         enable_req_batch: bool,
         proxy: Proxy,
         check_leader_scheduler: Scheduler<CheckLeaderTask>,
+        health_controller: HealthController,
+        health_feedback_interval: Option<Duration>,
     ) -> Self {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         Service {
             store_id,
             storage,
@@ -136,6 +154,9 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Service<T, L, F>
             grpc_thread_load,
             proxy,
             check_leader_scheduler,
+            health_controller,
+            health_feedback_interval,
+            health_feedback_seq: Arc::new(AtomicU64::new(now_unix)),
         }
     }
 }
@@ -777,6 +798,12 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
         let copr_v2 = self.copr_v2.clone();
         let pool_size = storage.get_normal_pool_size();
         let batch_builder = BatcherBuilder::new(self.enable_req_batch, pool_size);
+        let mut health_feedback_attacher = HealthFeedbackAttacher::new(
+            self.store_id,
+            self.health_controller.clone(),
+            self.health_feedback_seq.clone(),
+            self.health_feedback_interval,
+        );
         let request_handler = stream.try_for_each(move |mut req| {
             let request_ids = req.take_request_ids();
             let requests: Vec<_> = req.take_requests().into();
@@ -828,6 +855,7 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             let mut r = item.batch_resp;
             GRPC_RESP_BATCH_COMMANDS_SIZE.observe(r.request_ids.len() as f64);
             r.set_transport_layer_load(grpc_thread_load.total_load() as u64);
+            health_feedback_attacher.attach_if_needed(&mut r);
             GrpcResult::<(BatchCommandsResponse, WriteFlags)>::Ok((
                 r,
                 WriteFlags::default().buffer_hint(false),
@@ -940,6 +968,30 @@ impl<T: RaftStoreRouter + 'static, L: LockManager, F: KvFormat> Tikv for Service
             warn!("call dump_wait_for_entries failed"; "err" => ?e);
         })
         .map(|_| ());
+        ctx.spawn(task);
+    }
+
+    fn get_health_feedback(
+        &mut self,
+        ctx: RpcContext<'_>,
+        _request: GetHealthFeedbackRequest,
+        sink: UnarySink<GetHealthFeedbackResponse>,
+    ) {
+        let attacher = HealthFeedbackAttacher::new(
+            self.store_id,
+            self.health_controller.clone(),
+            self.health_feedback_seq.clone(),
+            self.health_feedback_interval,
+        );
+
+        let mut resp = GetHealthFeedbackResponse::default();
+        resp.set_health_feedback(attacher.gen_health_feedback_pb());
+        let task = sink
+            .success(resp)
+            .map_err(|e| {
+                warn!("get_health_feedback failed"; "err" => ?e);
+            })
+            .map(|_| ());
         ctx.spawn(task);
     }
 
@@ -1477,6 +1529,27 @@ fn handle_batch_commands_request<L: LockManager, F: KvFormat>(
                 GrpcTypeKind::invalid,
             );
         }
+        Some(batch_commands_request::request::Cmd::GetHealthFeedback(_req)) => {
+            let begin_instant = Instant::now();
+            // The response is empty at this place, and will be filled when collected to
+            // the batch response. See `HealthFeedbackAttacher::attach_if_needed`.
+            let resp =
+                std::future::ready(Ok(GetHealthFeedbackResponse::default())).map_ok(|resp| {
+                    batch_commands_response::Response {
+                        cmd: Some(batch_commands_response::response::Cmd::GetHealthFeedback(
+                            resp,
+                        )),
+                        ..Default::default()
+                    }
+                });
+            response_batch_commands_request(
+                id,
+                resp,
+                tx.clone(),
+                begin_instant,
+                GrpcTypeKind::get_health_feedback,
+            );
+        }
         Some(batch_commands_request::request::Cmd::Import(_)) => panic!("not implemented"),
         _ => panic!("not implemented"),
     }
@@ -1958,6 +2031,89 @@ fn collect_batch_resp(v: &mut MeasuredBatchResponse, mut e: MeasuredSingleRespon
     v.measures.push(e.measure);
 }
 
+struct HealthFeedbackAttacher {
+    store_id: u64,
+    health_controller: HealthController,
+    last_feedback_time: Option<Instant>,
+    seq: Arc<AtomicU64>,
+    feedback_interval: Option<Duration>,
+}
+
+impl HealthFeedbackAttacher {
+    fn new(
+        store_id: u64,
+        health_controller: HealthController,
+        seq: Arc<AtomicU64>,
+        feedback_interval: Option<Duration>,
+    ) -> Self {
+        Self {
+            store_id,
+            health_controller,
+            last_feedback_time: None,
+            seq,
+            feedback_interval,
+        }
+    }
+
+    fn attach_if_needed(&mut self, resp: &mut BatchCommandsResponse) {
+        let mut requested_feedback = None;
+
+        for r in resp.responses.iter_mut().flat_map(|r| &mut r.cmd) {
+            if let BatchCommandsResponse_Response_oneof_cmd::GetHealthFeedback(r) = r {
+                if requested_feedback.is_none() {
+                    requested_feedback = Some(self.gen_health_feedback_pb());
+                }
+                r.set_health_feedback(requested_feedback.clone().unwrap());
+            }
+        }
+
+        // If there's any explicit request for health feedback information, attach it
+        // to the BatchCommandsResponse no matter how it's configured.
+        if let Some(feedback) = requested_feedback {
+            self.attach_with(resp, Instant::now_coarse(), feedback);
+            return;
+        }
+
+        let feedback_interval = match self.feedback_interval {
+            Some(i) => i,
+            None => return,
+        };
+
+        let now = Instant::now_coarse();
+
+        if let Some(last_feedback_time) = self.last_feedback_time
+            && now - last_feedback_time < feedback_interval
+        {
+            return;
+        }
+
+        self.attach(resp, now);
+    }
+
+    fn attach(&mut self, resp: &mut BatchCommandsResponse, now: Instant) {
+        self.attach_with(resp, now, self.gen_health_feedback_pb())
+    }
+
+    fn attach_with(
+        &mut self,
+        resp: &mut BatchCommandsResponse,
+        now: Instant,
+        health_feedback_pb: HealthFeedback,
+    ) {
+        self.last_feedback_time = Some(now);
+        resp.set_health_feedback(health_feedback_pb);
+    }
+
+    fn gen_health_feedback_pb(&self) -> HealthFeedback {
+        let mut feedback = HealthFeedback::default();
+        feedback.set_store_id(self.store_id);
+        feedback.set_feedback_seq_no(self.seq.fetch_add(1, Ordering::Relaxed));
+        feedback.set_slow_score(self.health_controller.get_rfstore_slow_score() as i32);
+        // TODO: set network slow score?
+        feedback
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
@@ -2012,5 +2168,113 @@ mod tests {
         };
         poll_future_notify(task);
         assert_eq!(block_on(rx1).unwrap(), 200);
+    }
+
+    #[test]
+    fn test_health_feedback_attacher() {
+        let health_controller = HealthController::new();
+        let test_reporter = health_controller::reporters::TestReporter::new(&health_controller);
+        let seq = Arc::new(AtomicU64::new(1));
+
+        let mut a = HealthFeedbackAttacher::new(1, health_controller.clone(), seq.clone(), None);
+        let mut resp = BatchCommandsResponse::default();
+        a.attach_if_needed(&mut resp);
+        assert!(!resp.has_health_feedback());
+
+        let mut a =
+            HealthFeedbackAttacher::new(1, health_controller, seq, Some(Duration::from_secs(1)));
+        resp = BatchCommandsResponse::default();
+        a.attach_if_needed(&mut resp);
+        assert!(resp.has_health_feedback());
+        assert_eq!(resp.get_health_feedback().get_store_id(), 1);
+        assert_eq!(resp.get_health_feedback().get_feedback_seq_no(), 1);
+        assert_eq!(resp.get_health_feedback().get_slow_score(), 1);
+
+        // Skips attaching feedback because last attaching was just done.
+        test_reporter.set_rfstore_slow_score(50.);
+        resp = BatchCommandsResponse::default();
+        a.attach_if_needed(&mut resp);
+        assert!(!resp.has_health_feedback());
+
+        // Simulate elapsing enough time by changing the recorded last update time.
+        *a.last_feedback_time.as_mut().unwrap() -= Duration::from_millis(1001);
+        a.attach_if_needed(&mut resp);
+        assert!(resp.has_health_feedback());
+        assert_eq!(resp.get_health_feedback().get_store_id(), 1);
+        // seq_no increased.
+        assert_eq!(resp.get_health_feedback().get_feedback_seq_no(), 2);
+        assert_eq!(resp.get_health_feedback().get_slow_score(), 50);
+
+        // Do not skip if feedback info is explicitly requested, i.e.
+        // `GetHealthFeedback` request is received from the client.
+        let resp_with_get_health_feedback = || {
+            let mut resp = BatchCommandsResponse::default();
+            let mut resp_item = BatchCommandsResponseResponse::default();
+            resp_item.cmd = Some(BatchCommandsResponse_Response_oneof_cmd::GetHealthFeedback(
+                GetHealthFeedbackResponse::default(),
+            ));
+            resp.responses.push(resp_item);
+            resp.request_ids.push(1);
+            resp
+        };
+        resp = resp_with_get_health_feedback();
+        a.attach_if_needed(&mut resp);
+        assert!(resp.has_health_feedback());
+        assert_eq!(resp.get_health_feedback().get_store_id(), 1);
+        assert_eq!(resp.get_health_feedback().get_feedback_seq_no(), 3);
+        assert_eq!(resp.get_health_feedback().get_slow_score(), 50);
+        // And the `GetHealthFeedbackResponse` will also be filled with the feedback
+        // info.
+        fn get_feedback_in_response(resp: &BatchCommandsResponseResponse) -> &HealthFeedback {
+            match resp.cmd {
+                Some(BatchCommandsResponse_Response_oneof_cmd::GetHealthFeedback(ref f)) => {
+                    assert!(!f.has_region_error());
+                    f.get_health_feedback()
+                }
+                _ => panic!("unexpected response body: {:?}", resp),
+            }
+        }
+        assert_eq!(
+            get_feedback_in_response(&resp.get_responses()[0]),
+            resp.get_health_feedback()
+        );
+
+        // If requested, it attaches the feedback info even `feedback_interval` is not
+        // given, which means never attaching.
+        a.feedback_interval = None;
+        a.last_feedback_time = None;
+        resp = BatchCommandsResponse::default();
+        a.attach_if_needed(&mut resp);
+        assert!(!resp.has_health_feedback());
+        resp = resp_with_get_health_feedback();
+        a.attach_if_needed(&mut resp);
+        assert!(resp.has_health_feedback());
+        assert_eq!(resp.get_health_feedback().get_store_id(), 1);
+        assert_eq!(resp.get_health_feedback().get_feedback_seq_no(), 4);
+        assert_eq!(resp.get_health_feedback().get_slow_score(), 50);
+        assert_eq!(
+            get_feedback_in_response(&resp.get_responses()[0]),
+            resp.get_health_feedback()
+        );
+
+        // It also works when there are multiple `GetHealthFeedbackResponse` in the
+        // batch, and each single `GetHealthFeedback` call gets the same result.
+        test_reporter.set_rfstore_slow_score(80.);
+        resp = resp_with_get_health_feedback();
+        resp.responses.push(resp.responses[0].clone());
+        resp.request_ids.push(2);
+        a.attach_if_needed(&mut resp);
+        assert!(resp.has_health_feedback());
+        assert_eq!(resp.get_health_feedback().get_store_id(), 1);
+        assert_eq!(resp.get_health_feedback().get_feedback_seq_no(), 5);
+        assert_eq!(resp.get_health_feedback().get_slow_score(), 80);
+        for i in 0..2 {
+            assert_eq!(
+                get_feedback_in_response(&resp.get_responses()[i]),
+                resp.get_health_feedback(),
+                "{}-th response in BatchCommandsResponse mismatches",
+                i
+            );
+        }
     }
 }

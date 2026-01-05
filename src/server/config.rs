@@ -236,6 +236,12 @@ pub struct Config {
     #[online_config(skip)]
     pub push_metrics_interval: ReadableDuration,
 
+    #[doc(hidden)]
+    #[online_config(skip)]
+    /// Minimum interval to send health feedback information in each
+    /// `BatchCommands` gRPC stream. 0 to disable sending health feedback.
+    pub health_feedback_interval: ReadableDuration,
+
     // Server labels to specify some attributes about this server.
     #[online_config(skip)]
     pub labels: HashMap<String, String>,
@@ -320,6 +326,7 @@ impl Default for Config {
             // Go tikv client uses 4 as well.
             forward_max_connections_per_address: 4,
             simplify_metrics: false,
+            health_feedback_interval: ReadableDuration::secs(1),
             push_metrics_addr: "".to_owned(),
             push_metrics_interval: ReadableDuration::secs(30),
         }

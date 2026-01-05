@@ -9,6 +9,7 @@ use std::{
 use cloud_server::{node::Node, server::Result as ServerResult};
 use collections::HashSet;
 use concurrency_manager::ConcurrencyManager;
+use health_controller::HealthController;
 use kvproto::{raft_cmdpb::*, raft_serverpb::RaftMessage};
 use raftstore::coprocessor::CoprocessorHost;
 use rfstore::{
@@ -151,6 +152,7 @@ impl Simulator for NodeCluster {
             Arc::new(Mutex::new(store_meta)),
             coprocessor_host,
             importer,
+            HealthController::default(),
             cm,
         )?;
         assert!(node_id == 0 || node_id == node.id());

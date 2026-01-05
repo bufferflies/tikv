@@ -35,6 +35,7 @@ use file_system::{
 use fs2::FileExt;
 use futures::executor::block_on;
 use grpcio::{EnvBuilder, Environment};
+use health_controller::HealthController;
 use kvengine::{
     dfs::Dfs,
     limiter::{LimiterOptions, StoreLimiter},
@@ -101,8 +102,7 @@ use tikv_util::{
     mpsc,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
     sys::{
-        disk::get_disk_capacity,
-        register_memory_usage_high_water,
+        disk, register_memory_usage_high_water,
         thread::{StdThreadBuildWrapper, ThreadBuildWrapper},
         SysQuota,
     },
@@ -800,6 +800,7 @@ impl TikvServer {
             Box::new(overload_cfg_manager),
         );
 
+        let health_controller = HealthController::new();
         let storage_read_pool_handle = unified_read_pool.handle();
 
         // Build scheduler pool based on configuration
@@ -864,16 +865,6 @@ impl TikvServer {
 
         let server_config = Arc::new(VersionTrack::new(self.config.server.clone()));
 
-        self.config
-            .raft_store
-            .validate(
-                self.config.coprocessor.region_split_size,
-                self.config.coprocessor.region_split_keys,
-                self.config.coprocessor.enable_region_bucket,
-                self.config.coprocessor.region_bucket_size,
-            )
-            .unwrap_or_else(|e| fatal!("failed to validate raftstore config {}", e));
-
         let mut node = Node::new(
             self.system.take().unwrap(),
             &server_config.value().clone(),
@@ -933,6 +924,7 @@ impl TikvServer {
             self.env.clone(),
             unified_read_pool,
             debug_thread_pool,
+            health_controller.clone(),
             check_leader_scheduler,
             scheduler_runtime,
         )
@@ -999,6 +991,7 @@ impl TikvServer {
             engines.store_meta.clone(),
             self.coprocessor_host.clone().unwrap(),
             importer.clone(),
+            health_controller,
             self.concurrency_manager.clone(),
         )
         .unwrap_or_else(|e| panic!("failed to start node: {:?}", e));
@@ -1507,7 +1500,7 @@ impl TikvServer {
             return;
         }
         let data_path = PathBuf::from(data_dir);
-        match get_disk_capacity(&data_path) {
+        match disk::get_capacity(&data_path) {
             Ok(cap) => {
                 if cap < K8S_MIN_DISK_CAPACITY {
                     fatal!(

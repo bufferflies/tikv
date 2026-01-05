@@ -64,6 +64,7 @@ make_auto_flush_static_metric! {
         read_index,
         check_leader,
         batch_commands,
+        get_health_feedback,
     }
 
     pub label_enum GcCommandKind {

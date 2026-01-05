@@ -7,6 +7,7 @@ use std::{
 };
 
 use concurrency_manager::ConcurrencyManager;
+use health_controller::HealthController;
 use kvengine::dfs::Dfs;
 use kvproto::metapb;
 use online_config::{ConfigManager, ConfigValue};
@@ -21,7 +22,7 @@ use test_rfstore::{
 };
 use tikv_util::{
     config::{ReadableDuration, VersionTrack},
-    worker::LazyWorker,
+    worker::{Builder, LazyWorker},
 };
 
 #[test]
@@ -61,7 +62,9 @@ fn test_rfstore_online_config() {
     let trans = ChannelTransport::default();
     let simulate_trans = SimulateTransport::new(trans);
     let pd_worker = LazyWorker::new("test-pd-worker");
+    let bg_worker = Builder::new("test-bg-worker").thread_count(1).create();
     let coprocessor_host = CoprocessorHost::default();
+    let health_controller = HealthController::new();
     let cm = ConcurrencyManager::new(1.into());
     let importer = {
         let dir = dir.path().join("import-sst");
@@ -75,9 +78,11 @@ fn test_rfstore_online_config() {
             Box::new(simulate_trans),
             pd_client,
             pd_worker,
+            bg_worker,
             store_meta,
             coprocessor_host,
             importer,
+            health_controller,
             cm,
         )
         .unwrap();

@@ -23,6 +23,7 @@ crossbeam = "0.8"
 derive_more = "0.99.3"
 error_code = { workspace = true }
 fail = "0.5"
+fs2 = "0.4"
 futures = { version = "0.3", features = ["compat", "thread-pool"] }
 futures-util = { version = "0.3", default-features = false, features = ["io"] }
 grpcio = { workspace = true }

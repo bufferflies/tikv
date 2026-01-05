@@ -9030,8 +9030,8 @@ def BackupLog() -> RowPanel:
     return layout.row_panel
 
 
-def SlowTrendStatistics() -> RowPanel:
-    layout = Layout(title="Slow Trend Statistics")
+def SlowNodeStatistics() -> RowPanel:
+    layout = Layout(title="Slow Node Statistics")
     layout.row(
         [
             graph_panel(
@@ -9042,11 +9042,21 @@ def SlowTrendStatistics() -> RowPanel:
                     target(
                         expr=expr_histogram_quantile(
                             0.99,
-                            "tikv_raftstore_inspect_duration_seconds",
+                            "store_inspect_disk_duration_seconds",
                             by_labels=["instance", "type"],
                             is_optional_quantile=True,
                         ),
-                        legend_format="{{instance}}-{{type}}-"
+                        legend_format="disk-{{instance}}-{{type}}-"
+                        + OPTIONAL_QUANTILE_INPUT,
+                    ),
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "store_inspect_network_duration_seconds",
+                            by_labels=["instance", "target"],
+                            is_optional_quantile=True,
+                        ),
+                        legend_format="network-{{instance}}-{{target}}-"
                         + OPTIONAL_QUANTILE_INPUT,
                     ),
                 ],
@@ -9057,62 +9067,8 @@ def SlowTrendStatistics() -> RowPanel:
                 targets=[
                     target(
                         expr=expr_sum(
-                            "tikv_raftstore_slow_score",
+                            "store_slow_score",
                             by_labels=["instance", "type"],
-                        ),
-                    ),
-                ],
-            ),
-        ]
-    )
-    layout.row(
-        [
-            graph_panel(
-                title="Slow Trend",
-                description="The changing trend of the slowness on I/O operations. 'value > 0' means the related store might have a slow trend.",
-                targets=[
-                    target(
-                        expr=expr_sum(
-                            "tikv_raftstore_slow_trend",
-                        ),
-                    ),
-                ],
-            ),
-            graph_panel(
-                title="QPS Changing Trend",
-                description="The changing trend of QPS on each store. 'value < 0' means the QPS has a dropping trend.",
-                targets=[
-                    target(
-                        expr=expr_sum(
-                            "tikv_raftstore_slow_trend_result",
-                        ),
-                    ),
-                ],
-            ),
-        ]
-    )
-    layout.row(
-        [
-            graph_panel(
-                title="AVG Sampling Latency",
-                description="The sampling latency of recent queries. A larger value indicates that the store is more likely to be the slowest store.",
-                yaxes=yaxes(left_format=UNITS.MICRO_SECONDS),
-                targets=[
-                    target(
-                        expr=expr_sum(
-                            "tikv_raftstore_slow_trend_l0",
-                        ),
-                    ),
-                ],
-            ),
-            graph_panel(
-                title="QPS of each store",
-                description="The QPS of each store.",
-                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
-                targets=[
-                    target(
-                        expr=expr_sum(
-                            "tikv_raftstore_slow_trend_result_value",
                         ),
                     ),
                 ],
@@ -9240,7 +9196,7 @@ dashboard = Dashboard(
         # Background Tasks
         Task(),
         PD(),
-        SlowTrendStatistics(),
+        SlowNodeStatistics(),
         Snapshot(),
         # Tools
         ResolvedTS(),
