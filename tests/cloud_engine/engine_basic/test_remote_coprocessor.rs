@@ -1983,6 +1983,45 @@ fn test_output_counts(#[case] enable_ia: bool) {
     assert_eq!(resp.get_output_counts(), &[rows.len() as i64]);
 }
 
+#[test]
+fn test_deadline() {
+    test_util::init_log_for_test();
+    let product = ProductTable::new();
+    let mut dag_test = DagTest::new(&product);
+    dag_test.insert_rows(10000);
+
+    let select_key_range = dag_test.get_key_range_all();
+    let snapshot = dag_test.fetch_snapshot(dag_test.get_ts().into_inner(), vec![select_key_range]);
+
+    let mut req = {
+        DagSelect::from(&product)
+            .output_offsets(Some(vec![0, 1, 2]))
+            .key_ranges(vec![dag_test.get_key_range_all()])
+            .start_ts(dag_test.get_ts())
+            .build()
+    };
+    // set a long max execution duration to avoid being affected by other deadline
+    // mechanism.
+    req.mut_context().set_max_execution_duration_ms(60 * 1000);
+
+    let quota_limiter = Arc::new(QuotaLimiter::default());
+    quota_limiter.set_read_bandwidth_limit(ReadableSize::mb(1), true);
+
+    dag_test.max_handle_duration = Duration::from_millis(1);
+    match dag_test.execute(snapshot.clone(), quota_limiter.clone(), req.clone()) {
+        Err(tikv::coprocessor::Error::DeadlineExceeded) => {
+            info!("got expected deadline exceeded error")
+        }
+        Ok(_) | Err(_) => panic!("expected to fail due to deadline exceeded"),
+    }
+
+    dag_test.max_handle_duration = Duration::from_secs(1);
+    match dag_test.execute(snapshot, quota_limiter, req) {
+        Ok(_) => {}
+        Err(e) => panic!("unexpected error: {:?}", e),
+    }
+}
+
 pub(crate) struct RowCache<'a>(&'a Table, Vec<BTreeMap<i64, Datum>>);
 
 impl<'a> RowCache<'a> {
@@ -2367,6 +2406,7 @@ pub(crate) struct DagTest<'a> {
     pub client: ClusterClient,
     pub ctx: DagTestContext,
     snap_ctx: SnapCtx,
+    pub max_handle_duration: Duration,
 }
 
 impl<'a> DagTest<'a> {
@@ -2424,6 +2464,7 @@ impl<'a> DagTest<'a> {
             client,
             ctx,
             snap_ctx,
+            max_handle_duration: Duration::from_secs(1),
         }
     }
 
@@ -2635,7 +2676,7 @@ impl<'a> DagTest<'a> {
             tikv::coprocessor::parse_request_and_handle_remote_cop::<RegionSnapshot>(
                 req,
                 None,
-                std::time::Duration::new(1, 0),
+                self.max_handle_duration,
                 u64::MAX,
                 quota_limiter,
                 snap,

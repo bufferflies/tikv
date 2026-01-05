@@ -1228,7 +1228,8 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
         }
         tp => return Err(Error::Other(format!("unsupported tp {}", tp))),
     };
-    let mut resp = handler.handle_request().await?;
+    let deadline = Deadline::from_now(max_handle_duration);
+    let mut resp = check_deadline(handler.handle_request(), deadline).await??;
 
     let mut exec_summary = ExecSummary::default();
     handler.collect_scan_summary(&mut exec_summary);
