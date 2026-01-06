@@ -522,7 +522,7 @@ impl IndexData {
     }
 
     pub fn is_in_mem(&self) -> bool {
-        match self.file_data {
+        match &self.file_data {
             MmapData::Local(_) => false,
             MmapData::InMem(_) => true,
             MmapData::AlignedInMem(_) => true,

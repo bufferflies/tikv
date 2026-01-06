@@ -15,7 +15,7 @@ use crate::{
     ia::ia_file::IaFile,
     metrics::ENGINE_STORAGE_CLASS_TRANSITION_COUNTER,
     table::{
-        file::{File, MmapData},
+        file::{File, FileMmapGuard, MmapData},
         Result,
     },
 };
@@ -150,8 +150,20 @@ impl File for IaAutoFile {
         unimplemented!()
     }
 
+    fn mmap2(&self) -> Result<Bytes> {
+        unimplemented!()
+    }
+
     async fn mmap_async(&self) -> Result<MmapData> {
         self.ia_file.mmap_async().await
+    }
+
+    async fn mmap_range(&self, offset: u64, length: usize) -> Result<(Bytes, FileMmapGuard)> {
+        if let Some(local_file) = self.local_file() {
+            local_file.mmap_range(offset, length).await
+        } else {
+            <IaFile as File>::mmap_range(&self.ia_file, offset, length).await
+        }
     }
 
     fn storage_class(&self) -> StorageClass {

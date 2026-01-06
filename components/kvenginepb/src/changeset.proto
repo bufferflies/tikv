@@ -14,6 +14,8 @@
 // Use ./gen.sh to generate .pb.go files.
 syntax = "proto3";
 
+import "./fts.proto";
+
 package enginepb;
 
 message ChangeSet {
@@ -47,6 +49,7 @@ message ChangeSet {
   // Used for shard meta persist by diff.
   Snapshot snapshot_diff = 27;
   ClearColumnar clear_columnar_with_restore_version = 28;
+  FtsUpdate fts_update = 29;
 }
 
 // A set of small changesets of the same peer.
@@ -124,6 +127,15 @@ message Snapshot {
   repeated VectorIndex vector_indexes = 16;
   repeated int64 columnar_table_ids = 17;
   uint64 columnar_l2_snap_version = 18;
+
+  // Below are FTS related fields
+  repeated TableIndexId fts_indexes = 40;
+  uint64 fts_l0_snap_version = 41;
+  // Columnar L0 ids that still need incremental FTS processing after merge.
+  repeated uint64 fts_pending_l0_ids = 42;
+  repeated FtsPackedFileInfo fts_l0_files = 45;
+  repeated FtsPackedFileInfo fts_l1_files = 46;
+  repeated FtsDedFileInfo fts_l2_files = 47;
 }
 
 message L0Create {
@@ -162,6 +174,7 @@ message ColumnarCreate {
   bytes smallest = 3;
   bytes biggest = 4;
   uint32 meta_offset = 5;
+  uint64 snap_version = 6;
 }
 
 message ColumnarDelete {
@@ -230,6 +243,7 @@ message Schema {
   repeated bytes columns = 2;
   repeated int64 pk_col_ids = 3;
   repeated VectorIndexDef vector_indexes = 4;
+  repeated FullTextIndexDef fulltext_indexes = 10;
   repeated string keys = 5;
   repeated bytes values = 6;
   repeated Partition partitions = 7;
@@ -272,8 +286,50 @@ message VectorIndexDef {
   repeated bytes spec_values = 5;
 }
 
+message FtsPackedFileInfo {
+  uint64 id = 1;
+  uint32 meta_offset = 2;
+
+  bytes smallest = 3;
+  bytes biggest = 4;
+
+  // Only available for FTS L0 files.
+  uint64 snap_version = 5;
+}
+
+message FtsDedFileInfo {
+  uint64 id = 1;
+  uint32 meta_offset = 2;
+
+  // Row key range covered by this file.
+  bytes smallest = 3;
+  bytes biggest = 4;
+}
+
+message FtsUpdate {
+  // Optional watermark update
+  uint64 set_snap_version = 1;
+  // Addition - add new indexes to existing configuration
+  repeated TableIndexId add_tracked_indexes = 2;
+  // Addition - add new FTS L0 files
+  repeated FtsPackedFileInfo l0_add_files = 3;
+  // Removal - remove old FTS L0 files
+  repeated uint64 l0_remove_files = 4;
+  // Addition - add new FTS L1 files
+  repeated FtsPackedFileInfo l1_add_files = 5;
+  // Removal - remove old FTS L1 files
+  repeated uint64 l1_remove_files = 6;
+  // Addition - add new FTS L2 dedicated files
+  repeated FtsDedFileInfo l2_add_files = 7;
+  // Removal - remove old FTS L2 dedicated files
+  repeated uint64 l2_remove_files = 8;
+  // Clear all tracked FTS indexes and files
+  bool clear_all = 9;
+  // Removal - remove pending columnar l0 files which are now indexed
+  // (this field allows ids even not in pending list, they will be skipped)
+  repeated uint64 pending_columnar_l0_remove_files = 10;
+}
+
 message ClearColumnar { uint64 restore_version = 1; }
 
-message MetaPackHeader {
-  uint32 version = 1;
-}
+message MetaPackHeader { uint32 version = 1; }

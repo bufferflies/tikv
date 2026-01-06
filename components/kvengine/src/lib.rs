@@ -1,5 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
+#![feature(pointer_is_aligned)]
 #![feature(hash_extract_if)]
 #![feature(is_sorted)]
 #![feature(core_intrinsics)]
@@ -15,6 +16,7 @@
 extern crate test;
 
 pub mod apply;
+pub mod codecutil;
 pub mod compaction;
 mod concat_iterator;
 pub mod config;

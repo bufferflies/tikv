@@ -25,7 +25,7 @@ pub struct IndexReader {
 }
 
 impl IndexReader {
-    fn new(directory: impl tantivy::Directory) -> Result<Self> {
+    pub fn new(directory: impl tantivy::Directory + Clone) -> Result<Self> {
         let mut index = tantivy::Index::open(directory)?;
         index.set_tokenizers(crate::tokenizer::TOKENIZERS.clone());
         Self::from_tantivy_index(index)

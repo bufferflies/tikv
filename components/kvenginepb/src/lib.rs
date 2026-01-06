@@ -5,6 +5,8 @@
 pub mod changeset;
 pub use changeset::*;
 
+pub mod fts;
+
 pub fn get_any_snap_from_changeset(cs: &ChangeSet) -> Option<&Snapshot> {
     if cs.has_snapshot() {
         Some(cs.get_snapshot())

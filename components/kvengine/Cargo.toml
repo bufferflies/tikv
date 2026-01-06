@@ -32,7 +32,7 @@ bitflags = "1.0.1"
 bstr = "0.2"
 bytemuck = "1.14.3"
 byteorder = "1.2"
-bytes = "1.0"
+bytes = "1.10.1"
 clara_fts = { path = "../clara_fts" }
 cloud_encryption = { workspace = true }
 codec = { workspace = true }
@@ -52,6 +52,7 @@ fs2 = "0.4"
 fslock = "0.1.7"
 futures = { version = "0.3", features = ["thread-pool"] }
 hex = "0.4"
+hexhex = "1.1.1"
 http = "0.2"
 hyper = "0.14"
 hyper-rustls = "0.24.2"
@@ -93,6 +94,8 @@ slog = { version = "2.3", features = [
 ] }
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 slog-term = "2.4"
+stable_deref_trait = "1.2.0"
+tantivy = "0.22.1"
 tempfile = "3.0"
 thiserror = "1.0"
 tidb_query_common = { path = "../tidb_query_common", default-features = false }

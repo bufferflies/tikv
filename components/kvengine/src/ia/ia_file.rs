@@ -22,14 +22,14 @@ use crate::{
     dfs::{Dfs, FileType},
     ia::{
         manager::{IaManager, ReadAt},
-        types::{FileSegmentIdent, TABLE_META_LOCAL_FILE_SUFFIX},
+        types::{FileSegmentIdent, FileSegmentPosition, TABLE_META_LOCAL_FILE_SUFFIX},
     },
     metrics::{ENGINE_IA_SYNC_READ_COUNTER, PREPARE_COUNTER_VEC},
     new_blob_filename, new_columnar_filename, new_sst_filename, new_vector_index_filename,
     table::{
         blobtable::{self, blobtable::BlobTable},
         columnar::{ColumnarFileFooter, TableMeta, TableOffsets},
-        file::{File, InMemFile, MmapData},
+        file::{File, FileMmapGuard, InMemFile, MmapData},
         search, sstable,
         sstable::{Index, SsTable},
         tiny_meta::{SstTinyMeta, TypedTinyMeta},
@@ -422,6 +422,49 @@ impl IaFile {
     pub(crate) fn table_meta_file(&self) -> &Arc<dyn File> {
         &self.table_meta_file
     }
+
+    /// Mmaps part of a remote file.
+    ///
+    /// WARNING: The returned byte slice does not have any alignment guarantees
+    /// because we will actually read by segments. However If your requested
+    /// offset is properly aligned within a segment, then the returned slice
+    /// will be properly aligned.
+    ///
+    /// WARNING: As a IaFile, the returned bytes may either be in-memory or
+    /// on-disk. The returned bytes is always accessible. However it is not
+    /// wise to keep the returned bytes for a long time, because data may
+    /// be moved from memory into disk. If you keep the returned bytes,
+    /// then the memory is always pinned in memory, which may cause
+    /// OOM. Also, the data may be evicted on disk, but the disk space
+    /// will not be released while bytes are still kept.
+    /// For this reason, a `IaMmapSource` is additionally returned, so that
+    /// you can check whether the returned bytes shall be dropped to free
+    /// the underlying resource.
+    pub async fn mmap_range(&self, offset: u64, length: usize) -> Result<(Bytes, IaMmapSource)> {
+        let ident = self.align_to_segment(offset, offset + length as u64)?;
+        let segment_handle = self.mgr.get_segment_handle(ident, self.ftype, None).await?;
+
+        // The file here may be in-memory or on-disk. It will be never remote.
+        let segment_file = segment_handle.into_inner();
+        let mmap = segment_file.mmap2()?;
+
+        // This is unexpected, possibly caused by wrong segment offsets.
+        if offset < ident.start_off || offset + length as u64 > ident.end_off {
+            return Err(Error::IaMgr(format!(
+                "{} mmap segment: out of range: offset {}, length {}, ident {}",
+                self.id, offset, length, ident
+            )));
+        }
+
+        let offset_in_segment = (offset - ident.start_off) as usize;
+        let sliced = mmap.slice(offset_in_segment..(offset_in_segment + length));
+        let source = IaMmapSource {
+            ident,
+            mgr: self.mgr.clone(),
+            is_source_in_memory: segment_file.path().is_none(),
+        };
+        Ok((sliced, source))
+    }
 }
 
 #[async_trait]
@@ -506,6 +549,10 @@ impl File for IaFile {
         unimplemented!()
     }
 
+    fn mmap2(&self) -> Result<Bytes> {
+        unimplemented!()
+    }
+
     async fn mmap_async(&self) -> Result<MmapData> {
         let file_size = self.size();
         if file_size == 0 {
@@ -523,6 +570,11 @@ impl File for IaFile {
 
         let file = segment_handle.into_inner();
         Ok(file.mmap()?.to_aligned())
+    }
+
+    async fn mmap_range(&self, offset: u64, length: usize) -> Result<(Bytes, FileMmapGuard)> {
+        let (data, guard) = IaFile::mmap_range(self, offset, length).await?;
+        Ok((data, FileMmapGuard::Ia(guard)))
     }
 
     fn get_remote_segments(
@@ -567,6 +619,27 @@ impl File for IaFile {
 
     fn mem_size(&self) -> u64 {
         self.table_meta_file.size() + self.segment_offsets.len() as u64 * 8 + 8 * 3 + 1
+    }
+}
+
+/// Used to indicate whether the underlying entity of mmapped bytes from IaFile
+/// are not valid any more. When the underlying entity is not valid, the mmapped
+/// bytes is still accessible, but is encouraged to be dropped in order to free
+/// memory or free file handle.
+#[derive(Clone)]
+pub struct IaMmapSource {
+    ident: FileSegmentIdent,
+    mgr: IaManager,
+    is_source_in_memory: bool,
+}
+
+impl IaMmapSource {
+    pub fn is_valid(&self) -> bool {
+        match self.mgr.segment_cached_position(self.ident) {
+            FileSegmentPosition::InMem => self.is_source_in_memory,
+            FileSegmentPosition::InStore => !self.is_source_in_memory,
+            FileSegmentPosition::NotExist => false,
+        }
     }
 }
 

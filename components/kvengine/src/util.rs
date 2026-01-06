@@ -439,6 +439,14 @@ impl TxnFileLocks {
     }
 }
 
+/// Unsafe function to extend lifetime
+/// # Safety
+/// Usually you should only use this for creating self-referencing structs, that
+/// bound the actual lifetime to self.
+pub unsafe fn extend_lifetime<'b, T: ?Sized>(r: &'b T) -> &'static T {
+    std::mem::transmute::<&'b T, &'static T>(r)
+}
+
 pub fn estimated_entries_by_table_count(table_count: usize) -> u64 {
     table_count as u64 * 100_000
 }

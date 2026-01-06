@@ -186,19 +186,32 @@ pub fn encode_row_key_prefix(table_id: i64) -> Vec<u8> {
     key
 }
 
+/// `append_row_key` appends the table record key to an existing buffer.
+/// This is useful for reusing buffers to avoid allocations.
+pub fn append_row_key(buf: &mut Vec<u8>, table_id: i64, handle: i64) -> Result<()> {
+    buf.append_table_record_prefix(table_id)?;
+    buf.write_i64(handle).map_err(Error::from)
+}
+
 /// `encode_row_key` encodes the table id and record handle into a byte array.
 pub fn encode_row_key(table_id: i64, handle: i64) -> Vec<u8> {
     let mut key = Vec::with_capacity(RECORD_ROW_KEY_LEN);
-    // can't panic
-    key.append_table_record_prefix(table_id).unwrap();
-    key.write_i64(handle).unwrap();
+    append_row_key(&mut key, table_id, handle).unwrap();
     key
+}
+
+/// `append_common_handle_row_key` appends the table record key with common
+/// handle to an existing buffer. This is useful for reusing buffers to avoid
+/// allocations.
+pub fn append_common_handle_row_key(buf: &mut Vec<u8>, table_id: i64, handle: &[u8]) -> Result<()> {
+    buf.append_table_record_prefix(table_id)?;
+    buf.extend_from_slice(handle);
+    Ok(())
 }
 
 pub fn encode_common_handle_row_key(table_id: i64, handle: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(PREFIX_LEN + handle.len());
-    key.append_table_record_prefix(table_id).unwrap();
-    key.extend(handle);
+    append_common_handle_row_key(&mut key, table_id, handle).unwrap();
     key
 }
 

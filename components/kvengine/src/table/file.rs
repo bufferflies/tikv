@@ -17,7 +17,51 @@ use memmap2::Mmap;
 use quick_cache::sync::GuardResult;
 use schema::schema::StorageClass;
 
-use crate::{error::IoContext, ia::types::FileSegmentIdent, table::table};
+use crate::{
+    error::IoContext,
+    ia::{ia_file::IaMmapSource, types::FileSegmentIdent},
+    table::table,
+};
+
+/// A guard that describes whether the underlying entity of a mmapped `Bytes`
+/// slice is still the expected one.
+///
+/// For non-IA files this is always [`FileMmapGuard::None`].
+///
+/// For IA files, the returned `Bytes` may pin in-memory data or local segment
+/// files (via mmap). If you keep the returned `Bytes` (or any slices derived
+/// from them) for a long time (e.g. storing into a cache, or building a
+/// Tantivy directory/index reader and then caching it), you **must** keep the
+/// corresponding [`FileMmapGuard`] alongside and proactively drop the cached
+/// value once [`FileMmapGuard::is_valid`] becomes `false`. Otherwise IA may
+/// unlink/evict segment files while the mmap is still alive, and the disk
+/// space (inode/blocks) will not be reclaimed until the last `Bytes` reference
+/// is dropped.
+#[derive(Clone)]
+pub enum FileMmapGuard {
+    None,
+    Ia(IaMmapSource),
+    #[cfg(test)]
+    Test(Arc<std::sync::atomic::AtomicBool>),
+}
+
+impl FileMmapGuard {
+    /// Returns whether the mmapped bytes are still backed by the expected
+    /// underlying entity.
+    ///
+    /// Note: even when this returns `false`, previously returned `Bytes` are
+    /// still readable. Callers should drop them as soon as possible to release
+    /// pinned memory or disk space (inode/blocks).
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        match self {
+            FileMmapGuard::None => true,
+            FileMmapGuard::Ia(source) => source.is_valid(),
+            #[cfg(test)]
+            FileMmapGuard::Test(valid) => valid.load(Relaxed),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 pub trait File: std::any::Any + Sync + Send {
@@ -75,11 +119,25 @@ pub trait File: std::any::Any + Sync + Send {
         self.read_at(buf, offset)
     }
 
+    /// Deprecated. Recommend to use mmap2 instead.
     fn mmap(&self) -> table::Result<MmapData>;
 
+    /// Create a memory-map of the whole file.
+    /// The memory-map is valid even if the file is dropped, closed or removed.
+    fn mmap2(&self) -> table::Result<Bytes>;
+
+    /// TODO: Remove. We should provide this method on `IaFile` only.
     async fn mmap_async(&self) -> table::Result<MmapData> {
         unimplemented!()
     }
+
+    /// Mmaps a range of this file, returning both the `Bytes` and a guard.
+    ///
+    /// Callers that keep the returned `Bytes` for a long time must keep the
+    /// returned [`FileMmapGuard`] alongside and use it to invalidate/drop the
+    /// cached value when needed.
+    async fn mmap_range(&self, offset: u64, length: usize)
+    -> table::Result<(Bytes, FileMmapGuard)>;
 
     /// `get_remote_segments` returns the remote segments of the file. Used for
     /// prefetching. Available for IA files only.
@@ -110,7 +168,13 @@ pub trait File: std::any::Any + Sync + Send {
 }
 
 pub enum MmapData {
-    Local(Arc<Mmap>),
+    /// Data backed by a memory-mapped local file.
+    ///
+    /// Note: this variant is **not** considered "in-memory" for cache
+    /// invalidation and cache weight calculation. The OS pages the data in/out
+    /// on demand.
+    Local(Bytes),
+    /// Data backed by an in-memory buffer.
     InMem(Bytes),
     AlignedInMem(AVec<u8, ConstAlign<8>>),
 }
@@ -126,7 +190,7 @@ impl Deref for MmapData {
 
     fn deref(&self) -> &[u8] {
         match self {
-            MmapData::Local(mmap) => mmap.deref(),
+            MmapData::Local(data) => data.deref(),
             MmapData::InMem(data) => data.deref(),
             MmapData::AlignedInMem(data) => data.deref(),
         }
@@ -150,7 +214,7 @@ pub struct LocalFile {
     id: u64,
     size: u64,
     path: PathBuf,
-    mmap: Mutex<Option<Arc<Mmap>>>,
+    mmap_bytes: Mutex<Option<Bytes>>,
     fd_cache: FdCache,
 }
 
@@ -190,21 +254,24 @@ impl LocalFile {
             id,
             size,
             path,
-            mmap: Mutex::new(None),
+            mmap_bytes: Mutex::new(None),
             fd_cache,
         };
         Ok(local_file)
     }
 
     pub fn from_file(id: u64, path: PathBuf, file: Arc<std::fs::File>) -> table::Result<LocalFile> {
-        let meta = std::fs::metadata(&path).table_ctx(id, "local.from_file.metadata")?;
+        // The file may have been unlinked after it was opened (e.g. due to cache
+        // eviction), while the file descriptor is still valid. Use fd metadata
+        // instead of path metadata to avoid spurious ENOENT.
+        let meta = file.metadata().table_ctx(id, "local.from_file.metadata")?;
         let fd_cache = FdCache::new(2);
         fd_cache.insert(id, file);
         let local_file = LocalFile {
             id,
             size: meta.size(),
             path,
-            mmap: Mutex::new(None),
+            mmap_bytes: Mutex::new(None),
             fd_cache,
         };
         Ok(local_file)
@@ -213,8 +280,21 @@ impl LocalFile {
     fn get_file(&self) -> table::Result<Arc<std::fs::File>> {
         self.fd_cache.get(self.id, self.path.as_path())
     }
+
+    fn mmap_cached(&self) -> table::Result<Bytes> {
+        let mut guard = self.mmap_bytes.lock().unwrap();
+        if let Some(bytes) = guard.as_ref() {
+            return Ok(bytes.clone());
+        }
+        let fd = self.get_file()?;
+        let mmap = unsafe { Mmap::map(&fd).table_ctx(self.id(), "local.mmap")? };
+        let bytes = Bytes::from_owner(mmap);
+        *guard = Some(bytes.clone());
+        Ok(bytes)
+    }
 }
 
+#[async_trait::async_trait]
 impl File for LocalFile {
     fn id(&self) -> u64 {
         self.id
@@ -244,14 +324,34 @@ impl File for LocalFile {
     }
 
     fn mmap(&self) -> table::Result<MmapData> {
-        let mut guard = self.mmap.lock().unwrap();
-        if guard.is_none() {
-            let fd = self.get_file()?;
-            let mmap = unsafe { Mmap::map(&fd).table_ctx(self.id(), "local.mmap")? };
-            *guard = Some(Arc::new(mmap));
+        let bytes = self.mmap_cached()?;
+        Ok(MmapData::Local(bytes))
+    }
+
+    fn mmap2(&self) -> table::Result<Bytes> {
+        self.mmap_cached()
+    }
+
+    async fn mmap_range(
+        &self,
+        offset: u64,
+        length: usize,
+    ) -> table::Result<(Bytes, FileMmapGuard)> {
+        if offset
+            .checked_add(length as u64)
+            .map_or(true, |end| end > self.size)
+        {
+            return Err(table::Error::InvalidFileSize);
         }
-        let mmap = guard.as_ref().unwrap().clone();
-        Ok(MmapData::Local(mmap))
+
+        if length == 0 {
+            return Ok((Bytes::new(), FileMmapGuard::None));
+        }
+
+        let bytes = self.mmap_cached()?;
+        let slice = bytes.slice(offset as usize..offset as usize + length);
+
+        Ok((slice, FileMmapGuard::None))
     }
 
     fn storage_class(&self) -> StorageClass {
@@ -291,7 +391,7 @@ impl InMemFile {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testexport"))]
     pub async fn new_async(id: u64, data: Bytes) -> Self {
         let size = data.len() as u64;
         Self {
@@ -364,6 +464,30 @@ impl File for InMemFile {
         Ok(MmapData::InMem(self.data.clone()))
     }
 
+    fn mmap2(&self) -> table::Result<Bytes> {
+        Ok(self.data.clone())
+    }
+
+    async fn mmap_range(
+        &self,
+        offset: u64,
+        length: usize,
+    ) -> table::Result<(Bytes, FileMmapGuard)> {
+        if offset
+            .checked_add(length as u64)
+            .map_or(true, |end| end > self.size)
+        {
+            return Err(table::Error::InvalidFileSize);
+        }
+        let data = if length == 0 {
+            Bytes::new()
+        } else {
+            let off_usize = offset as usize;
+            self.data.slice(off_usize..off_usize + length)
+        };
+        Ok((data, FileMmapGuard::None))
+    }
+
     fn storage_class(&self) -> StorageClass {
         StorageClass::Unspecified
     }
@@ -396,7 +520,10 @@ impl<T> TtlCache<T> {
         }
     }
 
-    pub fn get(&self, init: impl FnOnce() -> table::Result<T>) -> table::Result<Arc<T>> {
+    pub fn get<E>(
+        &self,
+        init: impl FnOnce() -> std::result::Result<T, E>,
+    ) -> std::result::Result<Arc<T>, E> {
         let now_ns = time::precise_time_ns();
         self.access_ns.store(now_ns, Relaxed);
         let mut guard = self.data.lock().unwrap();
@@ -549,7 +676,7 @@ mod tests {
     fn test_ttl_cache() {
         let cache: TtlCache<Vec<u8>> = TtlCache::default();
         assert!(!cache.is_loaded());
-        let data = cache.get(|| Ok(vec![1, 2, 3, 4])).unwrap();
+        let data = cache.get(|| Ok::<_, ()>(vec![1, 2, 3, 4])).unwrap();
         assert_eq!(data.deref(), &[1, 2, 3, 4]);
         assert!(cache.is_loaded());
         cache.expire(1);
@@ -564,7 +691,7 @@ mod tests {
         let cache: TtlCache<u64> = TtlCache::default();
         b.iter(|| {
             for _ in 0..1000 {
-                black_box(cache.get(|| Ok(1)).unwrap());
+                black_box(cache.get(|| Ok::<_, ()>(1)).unwrap());
             }
         });
     }

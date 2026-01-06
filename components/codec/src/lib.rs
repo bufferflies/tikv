@@ -12,7 +12,7 @@ extern crate tikv_alloc;
 
 pub mod buffer;
 pub mod byte;
-mod convert;
+pub mod convert;
 mod error;
 pub mod number;
 

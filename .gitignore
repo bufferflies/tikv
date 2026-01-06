@@ -45,6 +45,7 @@ core.*
 *.log
 
 .claude/
+.codex/
 
 # Coverage directory
 coverage/

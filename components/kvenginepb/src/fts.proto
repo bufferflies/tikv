@@ -1,0 +1,168 @@
+// Copyright 2025-present PingCAP, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package enginepb;
+
+message FullTextIndexDef {
+  int64 index_id = 1;
+  int64 col_id = 2;
+
+  string parser_type = 10;
+}
+
+// ----------------- PackedFile -----------------
+message PackedFileIndexBlock {
+  repeated bytes data_block_start_keys = 1;
+
+  // The absolute offset of the data block in the packed file.
+  // Contains N+1 offsets, where offsets[i] is the start offset of the i-th data
+  // block, and offsets[N] is the end offset of the last data block (i.e. the
+  // start offset of the metadata section).
+  //
+  // Each data block range [offsets[i], offsets[i+1]) can be mmap'd directly.
+  // All offsets are guaranteed to be 8-byte aligned to support IA segmented
+  // mmap and zero-copy `u64` parsing.
+  repeated uint32 data_block_offsets = 2;
+}
+
+message PackedFilePropBlock {
+  // Smallest LogicalPartitionKey in the file.
+  // Used to quickly filter out LPs
+  bytes smallest_lp_key = 1;
+  // Largest LogicalPartitionKey in the file.
+  // Used to quickly filter out LPs
+  bytes largest_lp_key = 2;
+  // Total number of logical partitions
+  uint32 total_lps = 3;
+  // Total number of bytes of Tantivy indexes
+  uint32 total_index_bytes = 4;
+  // Total number of bytes of all Primary Keys
+  uint32 total_keys_bytes = 5;
+  // Smallest row key in the file (across all tables/LPs)
+  // Used for key range filtering similar to vector index
+  bytes smallest_key = 6;
+  // Biggest row key in the file (across all tables/LPs)
+  // Used for key range filtering similar to vector index
+  bytes biggest_key = 7;
+  // All table IDs contained in this file (sorted, deduplicated)
+  // Used for efficient table filtering - O(log n) lookup
+  repeated int64 table_ids = 8;
+  // Total number of primary key versions (including multi-version data)
+  uint64 pk_total = 9;
+  // Number of unique primary keys present in this file
+  uint64 pk_live_unique = 10;
+
+  // Lexicographically smallest (table_id, index_id) pair covered by this file.
+  TableIndexId smallest_table_index = 11;
+  // Lexicographically largest (table_id, index_id) pair covered by this file.
+  TableIndexId largest_table_index = 12;
+  // L0 snap version associated with this packed file. Only available for L0
+  // files.
+  uint64 snap_version = 13;
+}
+
+// Properties for a single logical partition entry within a PackedFile
+message PackedFileLpProps {
+  // Number of primary keys (includes multi-version)
+  uint32 n_pk = 1;
+  // Whether the primary key is of integer type (int handle)
+  bool is_int_handle = 2;
+  // Table ID that this logical partition belongs to
+  int64 table_id = 3;
+  // Index ID that this logical partition belongs to
+  int64 index_id = 4;
+  // Location information of all Tantivy files within the LP entry.
+  TantivyIndexLayout tantivy_layout = 5;
+}
+
+message TableIndexId {
+  int64 table_id = 1;
+  int64 index_id = 2;
+}
+// ----------------- PackedFile -----------------
+
+// ----------------- DedicatedFile -----------------
+
+message OffsetSize {
+  uint64 offset = 1;
+  uint64 size = 2;
+}
+
+// Describes the locations of various Tantivy index file components within the
+// a data block. (always starts at offset == 0)
+message TantivyIndexLayout {
+  OffsetSize meta = 1;      // meta.json
+  OffsetSize managed = 2;   // .managed.json
+  OffsetSize term = 3;      // .term
+  OffsetSize idx = 4;       // .idx
+  OffsetSize pos = 5;       // .pos
+  OffsetSize store = 6;     // .store
+  OffsetSize fast = 7;      // .fast
+  OffsetSize fieldnorm = 8; // .fieldnorm
+}
+
+// Handle Index Block
+// Used to quickly locate the Handle Block that a handle (PK) resides in.
+message DedFileIBlock {
+  // The start primary key of each Handle Block.
+  // Note: the number of start_keys here is one less than the number of offsets.
+  repeated bytes hblock_start_key = 1;
+
+  // The absolute offset of each Handle Block in the file.
+  // Contains N+1 elements, where the last element is the end offset of the last
+  // block.
+  repeated uint64 hblock_offsets = 2;
+
+  // Start doc id of each Handle Block. Contains N+1 elements: the first N
+  // entries correspond to the inclusive start doc id of every block, and the
+  // last entry is the exclusive end doc id (total number of docs).
+  repeated uint32 hblock_start_docid = 3;
+
+  // The stride of the handle rank. Must be greater than 0.
+  // Every stride of handles maps to the recorded handle block range.
+  uint32 hblock_handle_rank_stride = 4;
+
+  // Handle rank entries; always has X+1 elements where the last value is the
+  // exclusive end block index.
+  repeated uint32 hblock_handle_rank = 5;
+}
+
+// Property Block
+message DedFilePropBlock {
+  // The LogicalPartitionKey that this file serves.
+  bytes lp_key = 1;
+  // Whether the primary key is of integer type (int handle).
+  bool is_int_handle = 2;
+  // Table ID that this logical partition belongs to
+  int64 table_id = 3;
+  // Index ID that this logical partition belongs to
+  int64 index_id = 4;
+
+  // Total number of primary key versions stored in this file
+  uint64 pk_total = 10;
+  // Number of unique primary keys present in this file
+  uint64 pk_live_unique = 11;
+
+  // Smallest row key in the file
+  // Used for key range filtering similar to vector index
+  bytes smallest_key = 20;
+  // Biggest row key in the file
+  // Used for key range filtering similar to vector index
+  bytes biggest_key = 21;
+
+  // Location information of all Tantivy index files within the Data Block.
+  TantivyIndexLayout tantivy_layout = 30;
+}
+// ----------------- DedicatedFile -----------------

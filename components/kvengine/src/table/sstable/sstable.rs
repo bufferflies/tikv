@@ -656,7 +656,7 @@ impl SsTableCore {
             .get(|| {
                 let filter_data = self.read_filter_data_from_file()?;
                 let filter = self.decode_filter(&filter_data)?;
-                Ok(filter)
+                Ok::<_, Error>(filter)
             })
             .expect("load filter")
     }

@@ -3,6 +3,7 @@
 pub mod blobtable;
 pub mod columnar;
 pub mod file;
+pub mod fts;
 pub mod fts_index;
 pub mod memtable;
 pub mod merge_iterator;

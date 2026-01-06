@@ -54,6 +54,7 @@ pub struct ChangeSet {
     pub clear_columnar: bool,
     pub snapshot_diff: ::protobuf::SingularPtrField<Snapshot>,
     pub clear_columnar_with_restore_version: ::protobuf::SingularPtrField<ClearColumnar>,
+    pub fts_update: ::protobuf::SingularPtrField<FtsUpdate>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -772,6 +773,39 @@ impl ChangeSet {
     pub fn take_clear_columnar_with_restore_version(&mut self) -> ClearColumnar {
         self.clear_columnar_with_restore_version.take().unwrap_or_else(|| ClearColumnar::new())
     }
+
+    // .enginepb.FtsUpdate fts_update = 29;
+
+
+    pub fn get_fts_update(&self) -> &FtsUpdate {
+        self.fts_update.as_ref().unwrap_or_else(|| FtsUpdate::default_instance())
+    }
+    pub fn clear_fts_update(&mut self) {
+        self.fts_update.clear();
+    }
+
+    pub fn has_fts_update(&self) -> bool {
+        self.fts_update.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_fts_update(&mut self, v: FtsUpdate) {
+        self.fts_update = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_fts_update(&mut self) -> &mut FtsUpdate {
+        if self.fts_update.is_none() {
+            self.fts_update.set_default();
+        }
+        self.fts_update.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_fts_update(&mut self) -> FtsUpdate {
+        self.fts_update.take().unwrap_or_else(|| FtsUpdate::new())
+    }
 }
 
 impl ::protobuf::Message for ChangeSet {
@@ -857,6 +891,11 @@ impl ::protobuf::Message for ChangeSet {
             }
         };
         for v in &self.clear_columnar_with_restore_version {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.fts_update {
             if !v.is_initialized() {
                 return false;
             }
@@ -967,6 +1006,9 @@ impl ::protobuf::Message for ChangeSet {
                 28 => {
                     ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.clear_columnar_with_restore_version)?;
                 },
+                29 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.fts_update)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1068,6 +1110,10 @@ impl ::protobuf::Message for ChangeSet {
             my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
         if let Some(ref v) = self.clear_columnar_with_restore_version.as_ref() {
+            let len = v.compute_size();
+            my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        if let Some(ref v) = self.fts_update.as_ref() {
             let len = v.compute_size();
             my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
@@ -1183,6 +1229,11 @@ impl ::protobuf::Message for ChangeSet {
         }
         if let Some(ref v) = self.clear_columnar_with_restore_version.as_ref() {
             os.write_tag(28, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        if let Some(ref v) = self.fts_update.as_ref() {
+            os.write_tag(29, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         }
@@ -1353,6 +1404,11 @@ impl ::protobuf::Message for ChangeSet {
                     |m: &ChangeSet| { &m.clear_columnar_with_restore_version },
                     |m: &mut ChangeSet| { &mut m.clear_columnar_with_restore_version },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<FtsUpdate>>(
+                    "fts_update",
+                    |m: &ChangeSet| { &m.fts_update },
+                    |m: &mut ChangeSet| { &mut m.fts_update },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<ChangeSet>(
                     "ChangeSet",
                     fields,
@@ -1400,6 +1456,7 @@ impl ::protobuf::Clear for ChangeSet {
         self.clear_columnar = false;
         self.snapshot_diff.clear();
         self.clear_columnar_with_restore_version.clear();
+        self.fts_update.clear();
         self.unknown_fields.clear();
     }
 }
@@ -1434,6 +1491,7 @@ impl ::protobuf::PbPrint for ChangeSet {
         ::protobuf::PbPrint::fmt(&self.clear_columnar, "clear_columnar", buf);
         ::protobuf::PbPrint::fmt(&self.snapshot_diff, "snapshot_diff", buf);
         ::protobuf::PbPrint::fmt(&self.clear_columnar_with_restore_version, "clear_columnar_with_restore_version", buf);
+        ::protobuf::PbPrint::fmt(&self.fts_update, "fts_update", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -1469,6 +1527,7 @@ impl ::std::fmt::Debug for ChangeSet {
         ::protobuf::PbPrint::fmt(&self.clear_columnar, "clear_columnar", &mut s);
         ::protobuf::PbPrint::fmt(&self.snapshot_diff, "snapshot_diff", &mut s);
         ::protobuf::PbPrint::fmt(&self.clear_columnar_with_restore_version, "clear_columnar_with_restore_version", &mut s);
+        ::protobuf::PbPrint::fmt(&self.fts_update, "fts_update", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -3987,6 +4046,12 @@ pub struct Snapshot {
     pub vector_indexes: ::protobuf::RepeatedField<VectorIndex>,
     pub columnar_table_ids: ::std::vec::Vec<i64>,
     pub columnar_l2_snap_version: u64,
+    pub fts_indexes: ::protobuf::RepeatedField<super::fts::TableIndexId>,
+    pub fts_l0_snap_version: u64,
+    pub fts_pending_l0_ids: ::std::vec::Vec<u64>,
+    pub fts_l0_files: ::protobuf::RepeatedField<FtsPackedFileInfo>,
+    pub fts_l1_files: ::protobuf::RepeatedField<FtsPackedFileInfo>,
+    pub fts_l2_files: ::protobuf::RepeatedField<FtsDedFileInfo>,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -4370,6 +4435,146 @@ impl Snapshot {
     pub fn set_columnar_l2_snap_version(&mut self, v: u64) {
         self.columnar_l2_snap_version = v;
     }
+
+    // repeated .enginepb.TableIndexId fts_indexes = 40;
+
+
+    pub fn get_fts_indexes(&self) -> &[super::fts::TableIndexId] {
+        &self.fts_indexes
+    }
+    pub fn clear_fts_indexes(&mut self) {
+        self.fts_indexes.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_fts_indexes(&mut self, v: ::protobuf::RepeatedField<super::fts::TableIndexId>) {
+        self.fts_indexes = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_fts_indexes(&mut self) -> &mut ::protobuf::RepeatedField<super::fts::TableIndexId> {
+        &mut self.fts_indexes
+    }
+
+    // Take field
+    pub fn take_fts_indexes(&mut self) -> ::protobuf::RepeatedField<super::fts::TableIndexId> {
+        ::std::mem::replace(&mut self.fts_indexes, ::protobuf::RepeatedField::new())
+    }
+
+    // uint64 fts_l0_snap_version = 41;
+
+
+    pub fn get_fts_l0_snap_version(&self) -> u64 {
+        self.fts_l0_snap_version
+    }
+    pub fn clear_fts_l0_snap_version(&mut self) {
+        self.fts_l0_snap_version = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_fts_l0_snap_version(&mut self, v: u64) {
+        self.fts_l0_snap_version = v;
+    }
+
+    // repeated uint64 fts_pending_l0_ids = 42;
+
+
+    pub fn get_fts_pending_l0_ids(&self) -> &[u64] {
+        &self.fts_pending_l0_ids
+    }
+    pub fn clear_fts_pending_l0_ids(&mut self) {
+        self.fts_pending_l0_ids.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_fts_pending_l0_ids(&mut self, v: ::std::vec::Vec<u64>) {
+        self.fts_pending_l0_ids = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_fts_pending_l0_ids(&mut self) -> &mut ::std::vec::Vec<u64> {
+        &mut self.fts_pending_l0_ids
+    }
+
+    // Take field
+    pub fn take_fts_pending_l0_ids(&mut self) -> ::std::vec::Vec<u64> {
+        ::std::mem::replace(&mut self.fts_pending_l0_ids, ::std::vec::Vec::new())
+    }
+
+    // repeated .enginepb.FtsPackedFileInfo fts_l0_files = 45;
+
+
+    pub fn get_fts_l0_files(&self) -> &[FtsPackedFileInfo] {
+        &self.fts_l0_files
+    }
+    pub fn clear_fts_l0_files(&mut self) {
+        self.fts_l0_files.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_fts_l0_files(&mut self, v: ::protobuf::RepeatedField<FtsPackedFileInfo>) {
+        self.fts_l0_files = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_fts_l0_files(&mut self) -> &mut ::protobuf::RepeatedField<FtsPackedFileInfo> {
+        &mut self.fts_l0_files
+    }
+
+    // Take field
+    pub fn take_fts_l0_files(&mut self) -> ::protobuf::RepeatedField<FtsPackedFileInfo> {
+        ::std::mem::replace(&mut self.fts_l0_files, ::protobuf::RepeatedField::new())
+    }
+
+    // repeated .enginepb.FtsPackedFileInfo fts_l1_files = 46;
+
+
+    pub fn get_fts_l1_files(&self) -> &[FtsPackedFileInfo] {
+        &self.fts_l1_files
+    }
+    pub fn clear_fts_l1_files(&mut self) {
+        self.fts_l1_files.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_fts_l1_files(&mut self, v: ::protobuf::RepeatedField<FtsPackedFileInfo>) {
+        self.fts_l1_files = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_fts_l1_files(&mut self) -> &mut ::protobuf::RepeatedField<FtsPackedFileInfo> {
+        &mut self.fts_l1_files
+    }
+
+    // Take field
+    pub fn take_fts_l1_files(&mut self) -> ::protobuf::RepeatedField<FtsPackedFileInfo> {
+        ::std::mem::replace(&mut self.fts_l1_files, ::protobuf::RepeatedField::new())
+    }
+
+    // repeated .enginepb.FtsDedFileInfo fts_l2_files = 47;
+
+
+    pub fn get_fts_l2_files(&self) -> &[FtsDedFileInfo] {
+        &self.fts_l2_files
+    }
+    pub fn clear_fts_l2_files(&mut self) {
+        self.fts_l2_files.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_fts_l2_files(&mut self, v: ::protobuf::RepeatedField<FtsDedFileInfo>) {
+        self.fts_l2_files = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_fts_l2_files(&mut self) -> &mut ::protobuf::RepeatedField<FtsDedFileInfo> {
+        &mut self.fts_l2_files
+    }
+
+    // Take field
+    pub fn take_fts_l2_files(&mut self) -> ::protobuf::RepeatedField<FtsDedFileInfo> {
+        ::std::mem::replace(&mut self.fts_l2_files, ::protobuf::RepeatedField::new())
+    }
 }
 
 impl ::protobuf::Message for Snapshot {
@@ -4405,6 +4610,26 @@ impl ::protobuf::Message for Snapshot {
             }
         };
         for v in &self.vector_indexes {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.fts_indexes {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.fts_l0_files {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.fts_l1_files {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.fts_l2_files {
             if !v.is_initialized() {
                 return false;
             }
@@ -4484,6 +4709,28 @@ impl ::protobuf::Message for Snapshot {
                     let tmp = is.read_uint64()?;
                     self.columnar_l2_snap_version = tmp;
                 },
+                40 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.fts_indexes)?;
+                },
+                41 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.fts_l0_snap_version = tmp;
+                },
+                42 => {
+                    ::protobuf::rt::read_repeated_uint64_into(wire_type, is, &mut self.fts_pending_l0_ids)?;
+                },
+                45 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.fts_l0_files)?;
+                },
+                46 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.fts_l1_files)?;
+                },
+                47 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.fts_l2_files)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -4551,6 +4798,28 @@ impl ::protobuf::Message for Snapshot {
         if self.columnar_l2_snap_version != 0 {
             my_size += ::protobuf::rt::value_size(18, self.columnar_l2_snap_version, ::protobuf::wire_format::WireTypeVarint);
         }
+        for value in &self.fts_indexes {
+            let len = value.compute_size();
+            my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        if self.fts_l0_snap_version != 0 {
+            my_size += ::protobuf::rt::value_size(41, self.fts_l0_snap_version, ::protobuf::wire_format::WireTypeVarint);
+        }
+        for value in &self.fts_pending_l0_ids {
+            my_size += ::protobuf::rt::value_size(42, *value, ::protobuf::wire_format::WireTypeVarint);
+        };
+        for value in &self.fts_l0_files {
+            let len = value.compute_size();
+            my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        for value in &self.fts_l1_files {
+            let len = value.compute_size();
+            my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        for value in &self.fts_l2_files {
+            let len = value.compute_size();
+            my_size += 2 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -4619,6 +4888,32 @@ impl ::protobuf::Message for Snapshot {
         if self.columnar_l2_snap_version != 0 {
             os.write_uint64(18, self.columnar_l2_snap_version)?;
         }
+        for v in &self.fts_indexes {
+            os.write_tag(40, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        if self.fts_l0_snap_version != 0 {
+            os.write_uint64(41, self.fts_l0_snap_version)?;
+        }
+        for v in &self.fts_pending_l0_ids {
+            os.write_uint64(42, *v)?;
+        };
+        for v in &self.fts_l0_files {
+            os.write_tag(45, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        for v in &self.fts_l1_files {
+            os.write_tag(46, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        for v in &self.fts_l2_files {
+            os.write_tag(47, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -4741,6 +5036,36 @@ impl ::protobuf::Message for Snapshot {
                     |m: &Snapshot| { &m.columnar_l2_snap_version },
                     |m: &mut Snapshot| { &mut m.columnar_l2_snap_version },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<super::fts::TableIndexId>>(
+                    "fts_indexes",
+                    |m: &Snapshot| { &m.fts_indexes },
+                    |m: &mut Snapshot| { &mut m.fts_indexes },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "fts_l0_snap_version",
+                    |m: &Snapshot| { &m.fts_l0_snap_version },
+                    |m: &mut Snapshot| { &mut m.fts_l0_snap_version },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "fts_pending_l0_ids",
+                    |m: &Snapshot| { &m.fts_pending_l0_ids },
+                    |m: &mut Snapshot| { &mut m.fts_pending_l0_ids },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<FtsPackedFileInfo>>(
+                    "fts_l0_files",
+                    |m: &Snapshot| { &m.fts_l0_files },
+                    |m: &mut Snapshot| { &mut m.fts_l0_files },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<FtsPackedFileInfo>>(
+                    "fts_l1_files",
+                    |m: &Snapshot| { &m.fts_l1_files },
+                    |m: &mut Snapshot| { &mut m.fts_l1_files },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<FtsDedFileInfo>>(
+                    "fts_l2_files",
+                    |m: &Snapshot| { &m.fts_l2_files },
+                    |m: &mut Snapshot| { &mut m.fts_l2_files },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<Snapshot>(
                     "Snapshot",
                     fields,
@@ -4779,6 +5104,12 @@ impl ::protobuf::Clear for Snapshot {
         self.vector_indexes.clear();
         self.columnar_table_ids.clear();
         self.columnar_l2_snap_version = 0;
+        self.fts_indexes.clear();
+        self.fts_l0_snap_version = 0;
+        self.fts_pending_l0_ids.clear();
+        self.fts_l0_files.clear();
+        self.fts_l1_files.clear();
+        self.fts_l2_files.clear();
         self.unknown_fields.clear();
     }
 }
@@ -4804,6 +5135,12 @@ impl ::protobuf::PbPrint for Snapshot {
         ::protobuf::PbPrint::fmt(&self.vector_indexes, "vector_indexes", buf);
         ::protobuf::PbPrint::fmt(&self.columnar_table_ids, "columnar_table_ids", buf);
         ::protobuf::PbPrint::fmt(&self.columnar_l2_snap_version, "columnar_l2_snap_version", buf);
+        ::protobuf::PbPrint::fmt(&self.fts_indexes, "fts_indexes", buf);
+        ::protobuf::PbPrint::fmt(&self.fts_l0_snap_version, "fts_l0_snap_version", buf);
+        ::protobuf::PbPrint::fmt(&self.fts_pending_l0_ids, "fts_pending_l0_ids", buf);
+        ::protobuf::PbPrint::fmt(&self.fts_l0_files, "fts_l0_files", buf);
+        ::protobuf::PbPrint::fmt(&self.fts_l1_files, "fts_l1_files", buf);
+        ::protobuf::PbPrint::fmt(&self.fts_l2_files, "fts_l2_files", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -4830,6 +5167,12 @@ impl ::std::fmt::Debug for Snapshot {
         ::protobuf::PbPrint::fmt(&self.vector_indexes, "vector_indexes", &mut s);
         ::protobuf::PbPrint::fmt(&self.columnar_table_ids, "columnar_table_ids", &mut s);
         ::protobuf::PbPrint::fmt(&self.columnar_l2_snap_version, "columnar_l2_snap_version", &mut s);
+        ::protobuf::PbPrint::fmt(&self.fts_indexes, "fts_indexes", &mut s);
+        ::protobuf::PbPrint::fmt(&self.fts_l0_snap_version, "fts_l0_snap_version", &mut s);
+        ::protobuf::PbPrint::fmt(&self.fts_pending_l0_ids, "fts_pending_l0_ids", &mut s);
+        ::protobuf::PbPrint::fmt(&self.fts_l0_files, "fts_l0_files", &mut s);
+        ::protobuf::PbPrint::fmt(&self.fts_l1_files, "fts_l1_files", &mut s);
+        ::protobuf::PbPrint::fmt(&self.fts_l2_files, "fts_l2_files", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -6079,6 +6422,7 @@ pub struct ColumnarCreate {
     pub smallest: ::std::vec::Vec<u8>,
     pub biggest: ::std::vec::Vec<u8>,
     pub meta_offset: u32,
+    pub snap_version: u64,
     // special fields
     pub unknown_fields: ::protobuf::UnknownFields,
     pub cached_size: ::protobuf::CachedSize,
@@ -6191,6 +6535,21 @@ impl ColumnarCreate {
     pub fn set_meta_offset(&mut self, v: u32) {
         self.meta_offset = v;
     }
+
+    // uint64 snap_version = 6;
+
+
+    pub fn get_snap_version(&self) -> u64 {
+        self.snap_version
+    }
+    pub fn clear_snap_version(&mut self) {
+        self.snap_version = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_snap_version(&mut self, v: u64) {
+        self.snap_version = v;
+    }
 }
 
 impl ::protobuf::Message for ColumnarCreate {
@@ -6229,6 +6588,13 @@ impl ::protobuf::Message for ColumnarCreate {
                     let tmp = is.read_uint32()?;
                     self.meta_offset = tmp;
                 },
+                6 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.snap_version = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -6256,6 +6622,9 @@ impl ::protobuf::Message for ColumnarCreate {
         if self.meta_offset != 0 {
             my_size += ::protobuf::rt::value_size(5, self.meta_offset, ::protobuf::wire_format::WireTypeVarint);
         }
+        if self.snap_version != 0 {
+            my_size += ::protobuf::rt::value_size(6, self.snap_version, ::protobuf::wire_format::WireTypeVarint);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -6276,6 +6645,9 @@ impl ::protobuf::Message for ColumnarCreate {
         }
         if self.meta_offset != 0 {
             os.write_uint32(5, self.meta_offset)?;
+        }
+        if self.snap_version != 0 {
+            os.write_uint64(6, self.snap_version)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -6344,6 +6716,11 @@ impl ::protobuf::Message for ColumnarCreate {
                     |m: &ColumnarCreate| { &m.meta_offset },
                     |m: &mut ColumnarCreate| { &mut m.meta_offset },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "snap_version",
+                    |m: &ColumnarCreate| { &m.snap_version },
+                    |m: &mut ColumnarCreate| { &mut m.snap_version },
+                ));
                 ::protobuf::reflect::MessageDescriptor::new::<ColumnarCreate>(
                     "ColumnarCreate",
                     fields,
@@ -6371,6 +6748,7 @@ impl ::protobuf::Clear for ColumnarCreate {
         self.smallest.clear();
         self.biggest.clear();
         self.meta_offset = 0;
+        self.snap_version = 0;
         self.unknown_fields.clear();
     }
 }
@@ -6385,6 +6763,7 @@ impl ::protobuf::PbPrint for ColumnarCreate {
         ::protobuf::PbPrint::fmt(&self.smallest, "smallest", buf);
         ::protobuf::PbPrint::fmt(&self.biggest, "biggest", buf);
         ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", buf);
+        ::protobuf::PbPrint::fmt(&self.snap_version, "snap_version", buf);
         if old_len < buf.len() {
           buf.push(' ');
         }
@@ -6400,6 +6779,7 @@ impl ::std::fmt::Debug for ColumnarCreate {
         ::protobuf::PbPrint::fmt(&self.smallest, "smallest", &mut s);
         ::protobuf::PbPrint::fmt(&self.biggest, "biggest", &mut s);
         ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", &mut s);
+        ::protobuf::PbPrint::fmt(&self.snap_version, "snap_version", &mut s);
         write!(f, "{}", s)
     }
 }
@@ -8565,6 +8945,7 @@ pub struct Schema {
     pub columns: ::protobuf::RepeatedField<::std::vec::Vec<u8>>,
     pub pk_col_ids: ::std::vec::Vec<i64>,
     pub vector_indexes: ::protobuf::RepeatedField<VectorIndexDef>,
+    pub fulltext_indexes: ::protobuf::RepeatedField<super::fts::FullTextIndexDef>,
     pub keys: ::protobuf::RepeatedField<::std::string::String>,
     pub values: ::protobuf::RepeatedField<::std::vec::Vec<u8>>,
     pub partitions: ::protobuf::RepeatedField<Partition>,
@@ -8675,6 +9056,31 @@ impl Schema {
         ::std::mem::replace(&mut self.vector_indexes, ::protobuf::RepeatedField::new())
     }
 
+    // repeated .enginepb.FullTextIndexDef fulltext_indexes = 10;
+
+
+    pub fn get_fulltext_indexes(&self) -> &[super::fts::FullTextIndexDef] {
+        &self.fulltext_indexes
+    }
+    pub fn clear_fulltext_indexes(&mut self) {
+        self.fulltext_indexes.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_fulltext_indexes(&mut self, v: ::protobuf::RepeatedField<super::fts::FullTextIndexDef>) {
+        self.fulltext_indexes = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_fulltext_indexes(&mut self) -> &mut ::protobuf::RepeatedField<super::fts::FullTextIndexDef> {
+        &mut self.fulltext_indexes
+    }
+
+    // Take field
+    pub fn take_fulltext_indexes(&mut self) -> ::protobuf::RepeatedField<super::fts::FullTextIndexDef> {
+        ::std::mem::replace(&mut self.fulltext_indexes, ::protobuf::RepeatedField::new())
+    }
+
     // repeated string keys = 5;
 
 
@@ -8773,6 +9179,11 @@ impl ::protobuf::Message for Schema {
                 return false;
             }
         };
+        for v in &self.fulltext_indexes {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
         for v in &self.partitions {
             if !v.is_initialized() {
                 return false;
@@ -8800,6 +9211,9 @@ impl ::protobuf::Message for Schema {
                 },
                 4 => {
                     ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.vector_indexes)?;
+                },
+                10 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.fulltext_indexes)?;
                 },
                 5 => {
                     ::protobuf::rt::read_repeated_string_into(wire_type, is, &mut self.keys)?;
@@ -8842,6 +9256,10 @@ impl ::protobuf::Message for Schema {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         };
+        for value in &self.fulltext_indexes {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
         for value in &self.keys {
             my_size += ::protobuf::rt::string_size(5, &value);
         };
@@ -8872,6 +9290,11 @@ impl ::protobuf::Message for Schema {
         };
         for v in &self.vector_indexes {
             os.write_tag(4, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        for v in &self.fulltext_indexes {
+            os.write_tag(10, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         };
@@ -8951,6 +9374,11 @@ impl ::protobuf::Message for Schema {
                     |m: &Schema| { &m.vector_indexes },
                     |m: &mut Schema| { &mut m.vector_indexes },
                 ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<super::fts::FullTextIndexDef>>(
+                    "fulltext_indexes",
+                    |m: &Schema| { &m.fulltext_indexes },
+                    |m: &mut Schema| { &mut m.fulltext_indexes },
+                ));
                 fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
                     "keys",
                     |m: &Schema| { &m.keys },
@@ -8997,6 +9425,7 @@ impl ::protobuf::Clear for Schema {
         self.columns.clear();
         self.pk_col_ids.clear();
         self.vector_indexes.clear();
+        self.fulltext_indexes.clear();
         self.keys.clear();
         self.values.clear();
         self.partitions.clear();
@@ -9014,6 +9443,7 @@ impl ::protobuf::PbPrint for Schema {
         ::protobuf::PbPrint::fmt(&self.columns, "columns", buf);
         ::protobuf::PbPrint::fmt(&self.pk_col_ids, "pk_col_ids", buf);
         ::protobuf::PbPrint::fmt(&self.vector_indexes, "vector_indexes", buf);
+        ::protobuf::PbPrint::fmt(&self.fulltext_indexes, "fulltext_indexes", buf);
         ::protobuf::PbPrint::fmt(&self.keys, "keys", buf);
         ::protobuf::PbPrint::fmt(&self.values, "values", buf);
         ::protobuf::PbPrint::fmt(&self.partitions, "partitions", buf);
@@ -9032,6 +9462,7 @@ impl ::std::fmt::Debug for Schema {
         ::protobuf::PbPrint::fmt(&self.columns, "columns", &mut s);
         ::protobuf::PbPrint::fmt(&self.pk_col_ids, "pk_col_ids", &mut s);
         ::protobuf::PbPrint::fmt(&self.vector_indexes, "vector_indexes", &mut s);
+        ::protobuf::PbPrint::fmt(&self.fulltext_indexes, "fulltext_indexes", &mut s);
         ::protobuf::PbPrint::fmt(&self.keys, "keys", &mut s);
         ::protobuf::PbPrint::fmt(&self.values, "values", &mut s);
         ::protobuf::PbPrint::fmt(&self.partitions, "partitions", &mut s);
@@ -10332,6 +10763,1237 @@ impl ::protobuf::reflect::ProtobufValue for VectorIndexDef {
 }
 
 #[derive(PartialEq,Clone,Default)]
+pub struct FtsPackedFileInfo {
+    // message fields
+    pub id: u64,
+    pub meta_offset: u32,
+    pub smallest: ::std::vec::Vec<u8>,
+    pub biggest: ::std::vec::Vec<u8>,
+    pub snap_version: u64,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a FtsPackedFileInfo {
+    fn default() -> &'a FtsPackedFileInfo {
+        <FtsPackedFileInfo as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl FtsPackedFileInfo {
+    pub fn new() -> FtsPackedFileInfo {
+        ::std::default::Default::default()
+    }
+
+    // uint64 id = 1;
+
+
+    pub fn get_id(&self) -> u64 {
+        self.id
+    }
+    pub fn clear_id(&mut self) {
+        self.id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_id(&mut self, v: u64) {
+        self.id = v;
+    }
+
+    // uint32 meta_offset = 2;
+
+
+    pub fn get_meta_offset(&self) -> u32 {
+        self.meta_offset
+    }
+    pub fn clear_meta_offset(&mut self) {
+        self.meta_offset = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_meta_offset(&mut self, v: u32) {
+        self.meta_offset = v;
+    }
+
+    // bytes smallest = 3;
+
+
+    pub fn get_smallest(&self) -> &[u8] {
+        &self.smallest
+    }
+    pub fn clear_smallest(&mut self) {
+        self.smallest.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_smallest(&mut self, v: ::std::vec::Vec<u8>) {
+        self.smallest = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_smallest(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.smallest
+    }
+
+    // Take field
+    pub fn take_smallest(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.smallest, ::std::vec::Vec::new())
+    }
+
+    // bytes biggest = 4;
+
+
+    pub fn get_biggest(&self) -> &[u8] {
+        &self.biggest
+    }
+    pub fn clear_biggest(&mut self) {
+        self.biggest.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_biggest(&mut self, v: ::std::vec::Vec<u8>) {
+        self.biggest = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_biggest(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.biggest
+    }
+
+    // Take field
+    pub fn take_biggest(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.biggest, ::std::vec::Vec::new())
+    }
+
+    // uint64 snap_version = 5;
+
+
+    pub fn get_snap_version(&self) -> u64 {
+        self.snap_version
+    }
+    pub fn clear_snap_version(&mut self) {
+        self.snap_version = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_snap_version(&mut self, v: u64) {
+        self.snap_version = v;
+    }
+}
+
+impl ::protobuf::Message for FtsPackedFileInfo {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.id = tmp;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.meta_offset = tmp;
+                },
+                3 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.smallest)?;
+                },
+                4 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.biggest)?;
+                },
+                5 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.snap_version = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.id != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.meta_offset != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.meta_offset, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if !self.smallest.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(3, &self.smallest);
+        }
+        if !self.biggest.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(4, &self.biggest);
+        }
+        if self.snap_version != 0 {
+            my_size += ::protobuf::rt::value_size(5, self.snap_version, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.id != 0 {
+            os.write_uint64(1, self.id)?;
+        }
+        if self.meta_offset != 0 {
+            os.write_uint32(2, self.meta_offset)?;
+        }
+        if !self.smallest.is_empty() {
+            os.write_bytes(3, &self.smallest)?;
+        }
+        if !self.biggest.is_empty() {
+            os.write_bytes(4, &self.biggest)?;
+        }
+        if self.snap_version != 0 {
+            os.write_uint64(5, self.snap_version)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> FtsPackedFileInfo {
+        FtsPackedFileInfo::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "id",
+                    |m: &FtsPackedFileInfo| { &m.id },
+                    |m: &mut FtsPackedFileInfo| { &mut m.id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "meta_offset",
+                    |m: &FtsPackedFileInfo| { &m.meta_offset },
+                    |m: &mut FtsPackedFileInfo| { &mut m.meta_offset },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "smallest",
+                    |m: &FtsPackedFileInfo| { &m.smallest },
+                    |m: &mut FtsPackedFileInfo| { &mut m.smallest },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "biggest",
+                    |m: &FtsPackedFileInfo| { &m.biggest },
+                    |m: &mut FtsPackedFileInfo| { &mut m.biggest },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "snap_version",
+                    |m: &FtsPackedFileInfo| { &m.snap_version },
+                    |m: &mut FtsPackedFileInfo| { &mut m.snap_version },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<FtsPackedFileInfo>(
+                    "FtsPackedFileInfo",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static FtsPackedFileInfo {
+        static mut instance: ::protobuf::lazy::Lazy<FtsPackedFileInfo> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const FtsPackedFileInfo,
+        };
+        unsafe {
+            instance.get(FtsPackedFileInfo::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for FtsPackedFileInfo {
+    fn clear(&mut self) {
+        self.id = 0;
+        self.meta_offset = 0;
+        self.smallest.clear();
+        self.biggest.clear();
+        self.snap_version = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for FtsPackedFileInfo {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.id, "id", buf);
+        ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", buf);
+        ::protobuf::PbPrint::fmt(&self.smallest, "smallest", buf);
+        ::protobuf::PbPrint::fmt(&self.biggest, "biggest", buf);
+        ::protobuf::PbPrint::fmt(&self.snap_version, "snap_version", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for FtsPackedFileInfo {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.id, "id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", &mut s);
+        ::protobuf::PbPrint::fmt(&self.smallest, "smallest", &mut s);
+        ::protobuf::PbPrint::fmt(&self.biggest, "biggest", &mut s);
+        ::protobuf::PbPrint::fmt(&self.snap_version, "snap_version", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for FtsPackedFileInfo {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct FtsDedFileInfo {
+    // message fields
+    pub id: u64,
+    pub meta_offset: u32,
+    pub smallest: ::std::vec::Vec<u8>,
+    pub biggest: ::std::vec::Vec<u8>,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a FtsDedFileInfo {
+    fn default() -> &'a FtsDedFileInfo {
+        <FtsDedFileInfo as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl FtsDedFileInfo {
+    pub fn new() -> FtsDedFileInfo {
+        ::std::default::Default::default()
+    }
+
+    // uint64 id = 1;
+
+
+    pub fn get_id(&self) -> u64 {
+        self.id
+    }
+    pub fn clear_id(&mut self) {
+        self.id = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_id(&mut self, v: u64) {
+        self.id = v;
+    }
+
+    // uint32 meta_offset = 2;
+
+
+    pub fn get_meta_offset(&self) -> u32 {
+        self.meta_offset
+    }
+    pub fn clear_meta_offset(&mut self) {
+        self.meta_offset = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_meta_offset(&mut self, v: u32) {
+        self.meta_offset = v;
+    }
+
+    // bytes smallest = 3;
+
+
+    pub fn get_smallest(&self) -> &[u8] {
+        &self.smallest
+    }
+    pub fn clear_smallest(&mut self) {
+        self.smallest.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_smallest(&mut self, v: ::std::vec::Vec<u8>) {
+        self.smallest = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_smallest(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.smallest
+    }
+
+    // Take field
+    pub fn take_smallest(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.smallest, ::std::vec::Vec::new())
+    }
+
+    // bytes biggest = 4;
+
+
+    pub fn get_biggest(&self) -> &[u8] {
+        &self.biggest
+    }
+    pub fn clear_biggest(&mut self) {
+        self.biggest.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_biggest(&mut self, v: ::std::vec::Vec<u8>) {
+        self.biggest = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_biggest(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.biggest
+    }
+
+    // Take field
+    pub fn take_biggest(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.biggest, ::std::vec::Vec::new())
+    }
+}
+
+impl ::protobuf::Message for FtsDedFileInfo {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.id = tmp;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.meta_offset = tmp;
+                },
+                3 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.smallest)?;
+                },
+                4 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.biggest)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.id != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.id, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.meta_offset != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.meta_offset, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if !self.smallest.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(3, &self.smallest);
+        }
+        if !self.biggest.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(4, &self.biggest);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.id != 0 {
+            os.write_uint64(1, self.id)?;
+        }
+        if self.meta_offset != 0 {
+            os.write_uint32(2, self.meta_offset)?;
+        }
+        if !self.smallest.is_empty() {
+            os.write_bytes(3, &self.smallest)?;
+        }
+        if !self.biggest.is_empty() {
+            os.write_bytes(4, &self.biggest)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> FtsDedFileInfo {
+        FtsDedFileInfo::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "id",
+                    |m: &FtsDedFileInfo| { &m.id },
+                    |m: &mut FtsDedFileInfo| { &mut m.id },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                    "meta_offset",
+                    |m: &FtsDedFileInfo| { &m.meta_offset },
+                    |m: &mut FtsDedFileInfo| { &mut m.meta_offset },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "smallest",
+                    |m: &FtsDedFileInfo| { &m.smallest },
+                    |m: &mut FtsDedFileInfo| { &mut m.smallest },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                    "biggest",
+                    |m: &FtsDedFileInfo| { &m.biggest },
+                    |m: &mut FtsDedFileInfo| { &mut m.biggest },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<FtsDedFileInfo>(
+                    "FtsDedFileInfo",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static FtsDedFileInfo {
+        static mut instance: ::protobuf::lazy::Lazy<FtsDedFileInfo> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const FtsDedFileInfo,
+        };
+        unsafe {
+            instance.get(FtsDedFileInfo::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for FtsDedFileInfo {
+    fn clear(&mut self) {
+        self.id = 0;
+        self.meta_offset = 0;
+        self.smallest.clear();
+        self.biggest.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for FtsDedFileInfo {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.id, "id", buf);
+        ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", buf);
+        ::protobuf::PbPrint::fmt(&self.smallest, "smallest", buf);
+        ::protobuf::PbPrint::fmt(&self.biggest, "biggest", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for FtsDedFileInfo {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.id, "id", &mut s);
+        ::protobuf::PbPrint::fmt(&self.meta_offset, "meta_offset", &mut s);
+        ::protobuf::PbPrint::fmt(&self.smallest, "smallest", &mut s);
+        ::protobuf::PbPrint::fmt(&self.biggest, "biggest", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for FtsDedFileInfo {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+pub struct FtsUpdate {
+    // message fields
+    pub set_snap_version: u64,
+    pub add_tracked_indexes: ::protobuf::RepeatedField<super::fts::TableIndexId>,
+    pub l0_add_files: ::protobuf::RepeatedField<FtsPackedFileInfo>,
+    pub l0_remove_files: ::std::vec::Vec<u64>,
+    pub l1_add_files: ::protobuf::RepeatedField<FtsPackedFileInfo>,
+    pub l1_remove_files: ::std::vec::Vec<u64>,
+    pub l2_add_files: ::protobuf::RepeatedField<FtsDedFileInfo>,
+    pub l2_remove_files: ::std::vec::Vec<u64>,
+    pub clear_all: bool,
+    pub pending_columnar_l0_remove_files: ::std::vec::Vec<u64>,
+    // special fields
+    pub unknown_fields: ::protobuf::UnknownFields,
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a FtsUpdate {
+    fn default() -> &'a FtsUpdate {
+        <FtsUpdate as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl FtsUpdate {
+    pub fn new() -> FtsUpdate {
+        ::std::default::Default::default()
+    }
+
+    // uint64 set_snap_version = 1;
+
+
+    pub fn get_set_snap_version(&self) -> u64 {
+        self.set_snap_version
+    }
+    pub fn clear_set_snap_version(&mut self) {
+        self.set_snap_version = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_set_snap_version(&mut self, v: u64) {
+        self.set_snap_version = v;
+    }
+
+    // repeated .enginepb.TableIndexId add_tracked_indexes = 2;
+
+
+    pub fn get_add_tracked_indexes(&self) -> &[super::fts::TableIndexId] {
+        &self.add_tracked_indexes
+    }
+    pub fn clear_add_tracked_indexes(&mut self) {
+        self.add_tracked_indexes.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_add_tracked_indexes(&mut self, v: ::protobuf::RepeatedField<super::fts::TableIndexId>) {
+        self.add_tracked_indexes = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_add_tracked_indexes(&mut self) -> &mut ::protobuf::RepeatedField<super::fts::TableIndexId> {
+        &mut self.add_tracked_indexes
+    }
+
+    // Take field
+    pub fn take_add_tracked_indexes(&mut self) -> ::protobuf::RepeatedField<super::fts::TableIndexId> {
+        ::std::mem::replace(&mut self.add_tracked_indexes, ::protobuf::RepeatedField::new())
+    }
+
+    // repeated .enginepb.FtsPackedFileInfo l0_add_files = 3;
+
+
+    pub fn get_l0_add_files(&self) -> &[FtsPackedFileInfo] {
+        &self.l0_add_files
+    }
+    pub fn clear_l0_add_files(&mut self) {
+        self.l0_add_files.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_l0_add_files(&mut self, v: ::protobuf::RepeatedField<FtsPackedFileInfo>) {
+        self.l0_add_files = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_l0_add_files(&mut self) -> &mut ::protobuf::RepeatedField<FtsPackedFileInfo> {
+        &mut self.l0_add_files
+    }
+
+    // Take field
+    pub fn take_l0_add_files(&mut self) -> ::protobuf::RepeatedField<FtsPackedFileInfo> {
+        ::std::mem::replace(&mut self.l0_add_files, ::protobuf::RepeatedField::new())
+    }
+
+    // repeated uint64 l0_remove_files = 4;
+
+
+    pub fn get_l0_remove_files(&self) -> &[u64] {
+        &self.l0_remove_files
+    }
+    pub fn clear_l0_remove_files(&mut self) {
+        self.l0_remove_files.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_l0_remove_files(&mut self, v: ::std::vec::Vec<u64>) {
+        self.l0_remove_files = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_l0_remove_files(&mut self) -> &mut ::std::vec::Vec<u64> {
+        &mut self.l0_remove_files
+    }
+
+    // Take field
+    pub fn take_l0_remove_files(&mut self) -> ::std::vec::Vec<u64> {
+        ::std::mem::replace(&mut self.l0_remove_files, ::std::vec::Vec::new())
+    }
+
+    // repeated .enginepb.FtsPackedFileInfo l1_add_files = 5;
+
+
+    pub fn get_l1_add_files(&self) -> &[FtsPackedFileInfo] {
+        &self.l1_add_files
+    }
+    pub fn clear_l1_add_files(&mut self) {
+        self.l1_add_files.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_l1_add_files(&mut self, v: ::protobuf::RepeatedField<FtsPackedFileInfo>) {
+        self.l1_add_files = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_l1_add_files(&mut self) -> &mut ::protobuf::RepeatedField<FtsPackedFileInfo> {
+        &mut self.l1_add_files
+    }
+
+    // Take field
+    pub fn take_l1_add_files(&mut self) -> ::protobuf::RepeatedField<FtsPackedFileInfo> {
+        ::std::mem::replace(&mut self.l1_add_files, ::protobuf::RepeatedField::new())
+    }
+
+    // repeated uint64 l1_remove_files = 6;
+
+
+    pub fn get_l1_remove_files(&self) -> &[u64] {
+        &self.l1_remove_files
+    }
+    pub fn clear_l1_remove_files(&mut self) {
+        self.l1_remove_files.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_l1_remove_files(&mut self, v: ::std::vec::Vec<u64>) {
+        self.l1_remove_files = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_l1_remove_files(&mut self) -> &mut ::std::vec::Vec<u64> {
+        &mut self.l1_remove_files
+    }
+
+    // Take field
+    pub fn take_l1_remove_files(&mut self) -> ::std::vec::Vec<u64> {
+        ::std::mem::replace(&mut self.l1_remove_files, ::std::vec::Vec::new())
+    }
+
+    // repeated .enginepb.FtsDedFileInfo l2_add_files = 7;
+
+
+    pub fn get_l2_add_files(&self) -> &[FtsDedFileInfo] {
+        &self.l2_add_files
+    }
+    pub fn clear_l2_add_files(&mut self) {
+        self.l2_add_files.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_l2_add_files(&mut self, v: ::protobuf::RepeatedField<FtsDedFileInfo>) {
+        self.l2_add_files = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_l2_add_files(&mut self) -> &mut ::protobuf::RepeatedField<FtsDedFileInfo> {
+        &mut self.l2_add_files
+    }
+
+    // Take field
+    pub fn take_l2_add_files(&mut self) -> ::protobuf::RepeatedField<FtsDedFileInfo> {
+        ::std::mem::replace(&mut self.l2_add_files, ::protobuf::RepeatedField::new())
+    }
+
+    // repeated uint64 l2_remove_files = 8;
+
+
+    pub fn get_l2_remove_files(&self) -> &[u64] {
+        &self.l2_remove_files
+    }
+    pub fn clear_l2_remove_files(&mut self) {
+        self.l2_remove_files.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_l2_remove_files(&mut self, v: ::std::vec::Vec<u64>) {
+        self.l2_remove_files = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_l2_remove_files(&mut self) -> &mut ::std::vec::Vec<u64> {
+        &mut self.l2_remove_files
+    }
+
+    // Take field
+    pub fn take_l2_remove_files(&mut self) -> ::std::vec::Vec<u64> {
+        ::std::mem::replace(&mut self.l2_remove_files, ::std::vec::Vec::new())
+    }
+
+    // bool clear_all = 9;
+
+
+    pub fn get_clear_all(&self) -> bool {
+        self.clear_all
+    }
+    pub fn clear_clear_all(&mut self) {
+        self.clear_all = false;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_clear_all(&mut self, v: bool) {
+        self.clear_all = v;
+    }
+
+    // repeated uint64 pending_columnar_l0_remove_files = 10;
+
+
+    pub fn get_pending_columnar_l0_remove_files(&self) -> &[u64] {
+        &self.pending_columnar_l0_remove_files
+    }
+    pub fn clear_pending_columnar_l0_remove_files(&mut self) {
+        self.pending_columnar_l0_remove_files.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_pending_columnar_l0_remove_files(&mut self, v: ::std::vec::Vec<u64>) {
+        self.pending_columnar_l0_remove_files = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_pending_columnar_l0_remove_files(&mut self) -> &mut ::std::vec::Vec<u64> {
+        &mut self.pending_columnar_l0_remove_files
+    }
+
+    // Take field
+    pub fn take_pending_columnar_l0_remove_files(&mut self) -> ::std::vec::Vec<u64> {
+        ::std::mem::replace(&mut self.pending_columnar_l0_remove_files, ::std::vec::Vec::new())
+    }
+}
+
+impl ::protobuf::Message for FtsUpdate {
+    fn is_initialized(&self) -> bool {
+        for v in &self.add_tracked_indexes {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.l0_add_files {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.l1_add_files {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.l2_add_files {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.set_snap_version = tmp;
+                },
+                2 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.add_tracked_indexes)?;
+                },
+                3 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.l0_add_files)?;
+                },
+                4 => {
+                    ::protobuf::rt::read_repeated_uint64_into(wire_type, is, &mut self.l0_remove_files)?;
+                },
+                5 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.l1_add_files)?;
+                },
+                6 => {
+                    ::protobuf::rt::read_repeated_uint64_into(wire_type, is, &mut self.l1_remove_files)?;
+                },
+                7 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.l2_add_files)?;
+                },
+                8 => {
+                    ::protobuf::rt::read_repeated_uint64_into(wire_type, is, &mut self.l2_remove_files)?;
+                },
+                9 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_bool()?;
+                    self.clear_all = tmp;
+                },
+                10 => {
+                    ::protobuf::rt::read_repeated_uint64_into(wire_type, is, &mut self.pending_columnar_l0_remove_files)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.set_snap_version != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.set_snap_version, ::protobuf::wire_format::WireTypeVarint);
+        }
+        for value in &self.add_tracked_indexes {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        for value in &self.l0_add_files {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        for value in &self.l0_remove_files {
+            my_size += ::protobuf::rt::value_size(4, *value, ::protobuf::wire_format::WireTypeVarint);
+        };
+        for value in &self.l1_add_files {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        for value in &self.l1_remove_files {
+            my_size += ::protobuf::rt::value_size(6, *value, ::protobuf::wire_format::WireTypeVarint);
+        };
+        for value in &self.l2_add_files {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
+        for value in &self.l2_remove_files {
+            my_size += ::protobuf::rt::value_size(8, *value, ::protobuf::wire_format::WireTypeVarint);
+        };
+        if self.clear_all != false {
+            my_size += 2;
+        }
+        for value in &self.pending_columnar_l0_remove_files {
+            my_size += ::protobuf::rt::value_size(10, *value, ::protobuf::wire_format::WireTypeVarint);
+        };
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream) -> ::protobuf::ProtobufResult<()> {
+        if self.set_snap_version != 0 {
+            os.write_uint64(1, self.set_snap_version)?;
+        }
+        for v in &self.add_tracked_indexes {
+            os.write_tag(2, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        for v in &self.l0_add_files {
+            os.write_tag(3, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        for v in &self.l0_remove_files {
+            os.write_uint64(4, *v)?;
+        };
+        for v in &self.l1_add_files {
+            os.write_tag(5, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        for v in &self.l1_remove_files {
+            os.write_uint64(6, *v)?;
+        };
+        for v in &self.l2_add_files {
+            os.write_tag(7, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
+        for v in &self.l2_remove_files {
+            os.write_uint64(8, *v)?;
+        };
+        if self.clear_all != false {
+            os.write_bool(9, self.clear_all)?;
+        }
+        for v in &self.pending_columnar_l0_remove_files {
+            os.write_uint64(10, *v)?;
+        };
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> FtsUpdate {
+        FtsUpdate::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static mut descriptor: ::protobuf::lazy::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const ::protobuf::reflect::MessageDescriptor,
+        };
+        unsafe {
+            descriptor.get(|| {
+                let mut fields = ::std::vec::Vec::new();
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "set_snap_version",
+                    |m: &FtsUpdate| { &m.set_snap_version },
+                    |m: &mut FtsUpdate| { &mut m.set_snap_version },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<super::fts::TableIndexId>>(
+                    "add_tracked_indexes",
+                    |m: &FtsUpdate| { &m.add_tracked_indexes },
+                    |m: &mut FtsUpdate| { &mut m.add_tracked_indexes },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<FtsPackedFileInfo>>(
+                    "l0_add_files",
+                    |m: &FtsUpdate| { &m.l0_add_files },
+                    |m: &mut FtsUpdate| { &mut m.l0_add_files },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "l0_remove_files",
+                    |m: &FtsUpdate| { &m.l0_remove_files },
+                    |m: &mut FtsUpdate| { &mut m.l0_remove_files },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<FtsPackedFileInfo>>(
+                    "l1_add_files",
+                    |m: &FtsUpdate| { &m.l1_add_files },
+                    |m: &mut FtsUpdate| { &mut m.l1_add_files },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "l1_remove_files",
+                    |m: &FtsUpdate| { &m.l1_remove_files },
+                    |m: &mut FtsUpdate| { &mut m.l1_remove_files },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<FtsDedFileInfo>>(
+                    "l2_add_files",
+                    |m: &FtsUpdate| { &m.l2_add_files },
+                    |m: &mut FtsUpdate| { &mut m.l2_add_files },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "l2_remove_files",
+                    |m: &FtsUpdate| { &m.l2_remove_files },
+                    |m: &mut FtsUpdate| { &mut m.l2_remove_files },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
+                    "clear_all",
+                    |m: &FtsUpdate| { &m.clear_all },
+                    |m: &mut FtsUpdate| { &mut m.clear_all },
+                ));
+                fields.push(::protobuf::reflect::accessor::make_vec_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                    "pending_columnar_l0_remove_files",
+                    |m: &FtsUpdate| { &m.pending_columnar_l0_remove_files },
+                    |m: &mut FtsUpdate| { &mut m.pending_columnar_l0_remove_files },
+                ));
+                ::protobuf::reflect::MessageDescriptor::new::<FtsUpdate>(
+                    "FtsUpdate",
+                    fields,
+                    file_descriptor_proto()
+                )
+            })
+        }
+    }
+
+    fn default_instance() -> &'static FtsUpdate {
+        static mut instance: ::protobuf::lazy::Lazy<FtsUpdate> = ::protobuf::lazy::Lazy {
+            lock: ::protobuf::lazy::ONCE_INIT,
+            ptr: 0 as *const FtsUpdate,
+        };
+        unsafe {
+            instance.get(FtsUpdate::new)
+        }
+    }
+}
+
+impl ::protobuf::Clear for FtsUpdate {
+    fn clear(&mut self) {
+        self.set_snap_version = 0;
+        self.add_tracked_indexes.clear();
+        self.l0_add_files.clear();
+        self.l0_remove_files.clear();
+        self.l1_add_files.clear();
+        self.l1_remove_files.clear();
+        self.l2_add_files.clear();
+        self.l2_remove_files.clear();
+        self.clear_all = false;
+        self.pending_columnar_l0_remove_files.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::protobuf::PbPrint for FtsUpdate {
+    #[allow(unused_variables)]
+    fn fmt(&self, name: &str, buf: &mut String) {
+        ::protobuf::push_message_start(name, buf);
+        let old_len = buf.len();
+        ::protobuf::PbPrint::fmt(&self.set_snap_version, "set_snap_version", buf);
+        ::protobuf::PbPrint::fmt(&self.add_tracked_indexes, "add_tracked_indexes", buf);
+        ::protobuf::PbPrint::fmt(&self.l0_add_files, "l0_add_files", buf);
+        ::protobuf::PbPrint::fmt(&self.l0_remove_files, "l0_remove_files", buf);
+        ::protobuf::PbPrint::fmt(&self.l1_add_files, "l1_add_files", buf);
+        ::protobuf::PbPrint::fmt(&self.l1_remove_files, "l1_remove_files", buf);
+        ::protobuf::PbPrint::fmt(&self.l2_add_files, "l2_add_files", buf);
+        ::protobuf::PbPrint::fmt(&self.l2_remove_files, "l2_remove_files", buf);
+        ::protobuf::PbPrint::fmt(&self.clear_all, "clear_all", buf);
+        ::protobuf::PbPrint::fmt(&self.pending_columnar_l0_remove_files, "pending_columnar_l0_remove_files", buf);
+        if old_len < buf.len() {
+          buf.push(' ');
+        }
+        buf.push('}');
+    }
+}
+impl ::std::fmt::Debug for FtsUpdate {
+    #[allow(unused_variables)]
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = String::new();
+        ::protobuf::PbPrint::fmt(&self.set_snap_version, "set_snap_version", &mut s);
+        ::protobuf::PbPrint::fmt(&self.add_tracked_indexes, "add_tracked_indexes", &mut s);
+        ::protobuf::PbPrint::fmt(&self.l0_add_files, "l0_add_files", &mut s);
+        ::protobuf::PbPrint::fmt(&self.l0_remove_files, "l0_remove_files", &mut s);
+        ::protobuf::PbPrint::fmt(&self.l1_add_files, "l1_add_files", &mut s);
+        ::protobuf::PbPrint::fmt(&self.l1_remove_files, "l1_remove_files", &mut s);
+        ::protobuf::PbPrint::fmt(&self.l2_add_files, "l2_add_files", &mut s);
+        ::protobuf::PbPrint::fmt(&self.l2_remove_files, "l2_remove_files", &mut s);
+        ::protobuf::PbPrint::fmt(&self.clear_all, "clear_all", &mut s);
+        ::protobuf::PbPrint::fmt(&self.pending_columnar_l0_remove_files, "pending_columnar_l0_remove_files", &mut s);
+        write!(f, "{}", s)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for FtsUpdate {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+        ::protobuf::reflect::ProtobufValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
 pub struct ClearColumnar {
     // message fields
     pub restore_version: u64,
@@ -10686,7 +12348,7 @@ impl ::protobuf::reflect::ProtobufValue for MetaPackHeader {
 }
 
 static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x0fchangeset.proto\x12\x08enginepb\"\xf6\x07\n\tChangeSet\x12\x11\n\
+    \n\x0fchangeset.proto\x12\x08enginepb\"\xa1\x08\n\tChangeSet\x12\x11\n\
     \x07shardID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08shardVer\x18\x02\x20\
     \x01(\x04B\0\x12*\n\ncompaction\x18\x04\x20\x01(\x0b2\x14.enginepb.Compa\
     ctionB\0\x12\x20\n\x05flush\x18\x05\x20\x01(\x0b2\x0f.enginepb.FlushB\0\
@@ -10709,27 +12371,28 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     dex\x18\x19\x20\x01(\x0b2\x1b.enginepb.UpdateVectorIndexB\0\x12\x18\n\
     \x0eclear_columnar\x18\x1a\x20\x01(\x08B\0\x12+\n\rsnapshot_diff\x18\x1b\
     \x20\x01(\x0b2\x12.enginepb.SnapshotB\0\x12F\n#clear_columnar_with_resto\
-    re_version\x18\x1c\x20\x01(\x0b2\x17.enginepb.ClearColumnarB\0:\0\":\n\n\
-    ChangeSets\x12*\n\x0bchange_sets\x18\x01\x20\x03(\x0b2\x13.enginepb.Chan\
-    geSetB\0:\0\"\xcd\x01\n\nCompaction\x12\x0c\n\x02cf\x18\x01\x20\x01(\x05\
-    B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12-\n\x0ctableCreates\x18\
-    \x03\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x14\n\ntopDeletes\x18\
-    \x04\x20\x03(\x04B\0\x12\x17\n\rbottomDeletes\x18\x05\x20\x03(\x04B\0\
-    \x12\x14\n\nconflicted\x18\x06\x20\x01(\x08B\0\x12*\n\nblobTables\x18\
-    \x07\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0:\0\"\xc4\x01\n\x0fMajorCom\
-    paction\x12.\n\rsstableChange\x18\x01\x20\x01(\x0b2\x15.enginepb.TableCh\
-    angeB\0\x12-\n\rnewBlobTables\x18\x02\x20\x03(\x0b2\x14.enginepb.BlobCre\
-    ateB\0\x12\x17\n\roldBlobTables\x18\x03\x20\x03(\x04B\0\x12\x14\n\nconfl\
-    icted\x18\x04\x20\x01(\x08B\0\x12!\n\x17update_inner_key_offset\x18\x05\
-    \x20\x01(\x08B\0:\0\"f\n\nSchemaMeta\x12\x15\n\x0bkeyspace_id\x18\x01\
-    \x20\x01(\rB\0\x12\x11\n\x07file_id\x18\x02\x20\x01(\x04B\0\x12\x11\n\
-    \x07version\x18\x03\x20\x01(\x03B\0\x12\x19\n\x0frestore_version\x18\x04\
-    \x20\x01(\x04B\0:\0\"\xf6\x01\n\x12ColumnarCompaction\x120\n\x0fcolumnar\
-    _change\x18\x01\x20\x01(\x0b2\x15.enginepb.TableChangeB\0\x12\x16\n\x0cs\
-    nap_version\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07row_l0s\x18\x03\x20\x03\
-    (\x04B\0\x12\x16\n\x0ctarget_level\x18\x04\x20\x01(\rB\0\x12\x1c\n\x12co\
-    lumnar_table_ids\x18\x05\x20\x03(\x03B\0\x12%\n\x1bcolumnar_table_ids_to\
-    _clear\x18\x06\x20\x03(\x03B\0\x12$\n\x1ais_manual_major_compaction\x18\
+    re_version\x18\x1c\x20\x01(\x0b2\x17.enginepb.ClearColumnarB\0\x12)\n\nf\
+    ts_update\x18\x1d\x20\x01(\x0b2\x13.enginepb.FtsUpdateB\0:\0\":\n\nChang\
+    eSets\x12*\n\x0bchange_sets\x18\x01\x20\x03(\x0b2\x13.enginepb.ChangeSet\
+    B\0:\0\"\xcd\x01\n\nCompaction\x12\x0c\n\x02cf\x18\x01\x20\x01(\x05B\0\
+    \x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12-\n\x0ctableCreates\x18\x03\
+    \x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\x14\n\ntopDeletes\x18\x04\
+    \x20\x03(\x04B\0\x12\x17\n\rbottomDeletes\x18\x05\x20\x03(\x04B\0\x12\
+    \x14\n\nconflicted\x18\x06\x20\x01(\x08B\0\x12*\n\nblobTables\x18\x07\
+    \x20\x03(\x0b2\x14.enginepb.BlobCreateB\0:\0\"\xc4\x01\n\x0fMajorCompact\
+    ion\x12.\n\rsstableChange\x18\x01\x20\x01(\x0b2\x15.enginepb.TableChange\
+    B\0\x12-\n\rnewBlobTables\x18\x02\x20\x03(\x0b2\x14.enginepb.BlobCreateB\
+    \0\x12\x17\n\roldBlobTables\x18\x03\x20\x03(\x04B\0\x12\x14\n\nconflicte\
+    d\x18\x04\x20\x01(\x08B\0\x12!\n\x17update_inner_key_offset\x18\x05\x20\
+    \x01(\x08B\0:\0\"f\n\nSchemaMeta\x12\x15\n\x0bkeyspace_id\x18\x01\x20\
+    \x01(\rB\0\x12\x11\n\x07file_id\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07ver\
+    sion\x18\x03\x20\x01(\x03B\0\x12\x19\n\x0frestore_version\x18\x04\x20\
+    \x01(\x04B\0:\0\"\xf6\x01\n\x12ColumnarCompaction\x120\n\x0fcolumnar_cha\
+    nge\x18\x01\x20\x01(\x0b2\x15.enginepb.TableChangeB\0\x12\x16\n\x0csnap_\
+    version\x18\x02\x20\x01(\x04B\0\x12\x11\n\x07row_l0s\x18\x03\x20\x03(\
+    \x04B\0\x12\x16\n\x0ctarget_level\x18\x04\x20\x01(\rB\0\x12\x1c\n\x12col\
+    umnar_table_ids\x18\x05\x20\x03(\x03B\0\x12%\n\x1bcolumnar_table_ids_to_\
+    clear\x18\x06\x20\x03(\x03B\0\x12$\n\x1ais_manual_major_compaction\x18\
     \x07\x20\x01(\x08B\0:\0\"\xa6\x01\n\x11UpdateVectorIndex\x12\x12\n\x08ta\
     ble_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\
     \x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\x12*\n\x05added\x18\
@@ -10739,7 +12402,7 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     enginepb.L0CreateB\0\x12*\n\nproperties\x18\x02\x20\x01(\x0b2\x14.engine\
     pb.PropertiesB\0\x12\x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x10\n\
     \x06max_ts\x18\x05\x20\x01(\x04B\0\x12'\n\tl0Creates\x18\x06\x20\x03(\
-    \x0b2\x12.enginepb.L0CreateB\0:\0\"\xb4\x04\n\x08Snapshot\x12\x15\n\x0bo\
+    \x0b2\x12.enginepb.L0CreateB\0:\0\"\xbc\x06\n\x08Snapshot\x12\x15\n\x0bo\
     uter_start\x18\x01\x20\x01(\x0cB\0\x12\x13\n\touter_end\x18\x02\x20\x01(\
     \x0cB\0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.Properties\
     B\0\x12'\n\tl0Creates\x18\x05\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12\
@@ -10753,66 +12416,89 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     ted_l0s\x18\x0f\x20\x03(\x04B\0\x12/\n\x0evector_indexes\x18\x10\x20\x03\
     (\x0b2\x15.enginepb.VectorIndexB\0\x12\x1c\n\x12columnar_table_ids\x18\
     \x11\x20\x03(\x03B\0\x12\"\n\x18columnar_l2_snap_version\x18\x12\x20\x01\
-    (\x04B\0:\0\"Q\n\x08L0Create\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\
-    \x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\
-    \x20\x01(\x0cB\0\x12\x0e\n\x04size\x18\x04\x20\x01(\rB\0:\0\"Z\n\nBlobCr\
-    eate\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\
-    \x02\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0\x12\
-    \x15\n\x0bmeta_offset\x18\x04\x20\x01(\rB\0:\0\"z\n\x0bTableCreate\x12\
+    (\x04B\0\x12-\n\x0bfts_indexes\x18(\x20\x03(\x0b2\x16.enginepb.TableInde\
+    xIdB\0\x12\x1d\n\x13fts_l0_snap_version\x18)\x20\x01(\x04B\0\x12\x1c\n\
+    \x12fts_pending_l0_ids\x18*\x20\x03(\x04B\0\x123\n\x0cfts_l0_files\x18-\
+    \x20\x03(\x0b2\x1b.enginepb.FtsPackedFileInfoB\0\x123\n\x0cfts_l1_files\
+    \x18.\x20\x03(\x0b2\x1b.enginepb.FtsPackedFileInfoB\0\x120\n\x0cfts_l2_f\
+    iles\x18/\x20\x03(\x0b2\x18.enginepb.FtsDedFileInfoB\0:\0\"Q\n\x08L0Crea\
+    te\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\
+    \x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0\x12\x0e\n\
+    \x04size\x18\x04\x20\x01(\rB\0:\0\"Z\n\nBlobCreate\x12\x0c\n\x02ID\x18\
+    \x01\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x02\x20\x01(\x0cB\0\x12\
+    \x11\n\x07biggest\x18\x03\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\x18\
+    \x04\x20\x01(\rB\0:\0\"z\n\x0bTableCreate\x12\x0c\n\x02ID\x18\x01\x20\
+    \x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02CF\
+    \x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\x04\x20\x01(\x0cB\0\
+    \x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\
+    \x18\x07\x20\x01(\rB\0:\0\"<\n\x0bTableDelete\x12\x0c\n\x02ID\x18\x01\
+    \x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\x0c\n\x02C\
+    F\x18\x03\x20\x01(\x05B\0:\0\"\x87\x01\n\x0eColumnarCreate\x12\x0c\n\x02\
+    ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0\x12\
+    \x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\
+    \x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\x18\x05\x20\x01(\rB\0\x12\x16\
+    \n\x0csnap_version\x18\x06\x20\x01(\x04B\0:\0\"1\n\x0eColumnarDelete\x12\
     \x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\
-    \rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0\x12\x12\n\x08smallest\x18\
-    \x04\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x05\x20\x01(\x0cB\0\x12\
-    \x15\n\x0bmeta_offset\x18\x07\x20\x01(\rB\0:\0\"<\n\x0bTableDelete\x12\
-    \x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\x01(\
-    \rB\0\x12\x0c\n\x02CF\x18\x03\x20\x01(\x05B\0:\0\"o\n\x0eColumnarCreate\
-    \x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\x12\x0f\n\x05level\x18\x02\x20\
-    \x01(\rB\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07bi\
-    ggest\x18\x04\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\x18\x05\x20\x01(\
-    \rB\0:\0\"1\n\x0eColumnarDelete\x12\x0c\n\x02ID\x18\x01\x20\x01(\x04B\0\
-    \x12\x0f\n\x05level\x18\x02\x20\x01(\rB\0:\0\"D\n\x05Split\x12)\n\tnewSh\
-    ards\x18\x01\x20\x03(\x0b2\x14.enginepb.PropertiesB\0\x12\x0e\n\x04Keys\
-    \x18\x03\x20\x03(\x0cB\0:\0\"\xd2\x01\n\x0bIngestFiles\x12'\n\tl0Creates\
-    \x18\x01\x20\x03(\x0b2\x12.enginepb.L0CreateB\0\x12-\n\x0ctableCreates\
-    \x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12*\n\nproperties\
-    \x18\x03\x20\x01(\x0b2\x14.enginepb.PropertiesB\0\x12+\n\x0bBlobCreates\
-    \x18\x04\x20\x03(\x0b2\x14.enginepb.BlobCreateB\0\x12\x10\n\x06max_ts\
-    \x18\x05\x20\x01(\x04B\0:\0\"C\n\nProperties\x12\x11\n\x07shardID\x18\
-    \x01\x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\
-    \x06values\x18\x03\x20\x03(\x0cB\0:\0\"\xef\x01\n\x0bTableChange\x12-\n\
-    \x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.enginepb.TableDeleteB\0\x12-\
-    \n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.TableCreateB\0\x12\
-    \x16\n\x0cfile_ids_map\x18\x03\x20\x03(\x04B\0\x123\n\x0fcolumnarDeletes\
-    \x18\x04\x20\x03(\x0b2\x18.enginepb.ColumnarDeleteB\0\x123\n\x0fcolumnar\
-    Creates\x18\x05\x20\x03(\x0b2\x18.enginepb.ColumnarCreateB\0:\0\">\n\x0b\
-    TxnFileRefs\x12-\n\rtxn_file_refs\x18\x01\x20\x03(\x0b2\x14.enginepb.Txn\
-    FileRefB\0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\n\x08start_ts\x18\x01\x20\
-    \x01(\x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\x03(\x04B\0\x12\x11\n\x07v\
-    ersion\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuser_meta\x18\x04\x20\x01(\x0c\
-    B\0\x12\x19\n\x0flock_val_prefix\x18\x05\x20\x01(\x0cB\0\x12\x13\n\tshar\
-    d_ver\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11inner_lower_bound\x18\x07\x20\
-    \x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\x18\x08\x20\x01(\x0cB\0:\0\"\
-    \xde\x01\n\x06Schema\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\
-    \x11\n\x07columns\x18\x02\x20\x03(\x0cB\0\x12\x14\n\npk_col_ids\x18\x03\
-    \x20\x03(\x03B\0\x122\n\x0evector_indexes\x18\x04\x20\x03(\x0b2\x18.engi\
-    nepb.VectorIndexDefB\0\x12\x0e\n\x04keys\x18\x05\x20\x03(\tB\0\x12\x10\n\
-    \x06values\x18\x06\x20\x03(\x0cB\0\x12)\n\npartitions\x18\x07\x20\x03(\
-    \x0b2\x13.enginepb.PartitionB\0\x12\x14\n\nmax_col_id\x18\x08\x20\x01(\
-    \x03B\0:\0\"=\n\tPartition\x12\x0c\n\x02id\x18\x01\x20\x01(\x03B\0\x12\
-    \x0e\n\x04keys\x18\x02\x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03\
-    (\x0cB\0:\0\"\x8d\x01\n\x0bVectorIndex\x12\x12\n\x08table_id\x18\x01\x20\
-    \x01(\x03B\0\x12\x12\n\x08index_id\x18\x02\x20\x01(\x03B\0\x12\x10\n\x06\
-    col_id\x18\x03\x20\x01(\x03B\0\x12*\n\x05files\x18\x04\x20\x03(\x0b2\x19\
-    .enginepb.VectorIndexFileB\0\x12\x16\n\x0csnap_version\x18\x05\x20\x01(\
-    \x04B\0:\0\"w\n\x0fVectorIndexFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\
-    \0\x12\x16\n\x0csnap_version\x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smalle\
-    st\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0\
-    \x12\x15\n\x0bmeta_offset\x18\x06\x20\x01(\rB\0:\0\"z\n\x0eVectorIndexDe\
-    f\x12\x12\n\x08index_id\x18\x01\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\
-    \x02\x20\x01(\x03B\0\x12\x14\n\nindex_kind\x18\x03\x20\x01(\tB\0\x12\x13\
-    \n\tspec_keys\x18\x04\x20\x03(\tB\0\x12\x15\n\x0bspec_values\x18\x05\x20\
-    \x03(\x0cB\0:\0\",\n\rClearColumnar\x12\x19\n\x0frestore_version\x18\x01\
-    \x20\x01(\x04B\0:\0\"%\n\x0eMetaPackHeader\x12\x11\n\x07version\x18\x01\
-    \x20\x01(\rB\0:\0B\0b\x06proto3\
+    \rB\0:\0\"D\n\x05Split\x12)\n\tnewShards\x18\x01\x20\x03(\x0b2\x14.engin\
+    epb.PropertiesB\0\x12\x0e\n\x04Keys\x18\x03\x20\x03(\x0cB\0:\0\"\xd2\x01\
+    \n\x0bIngestFiles\x12'\n\tl0Creates\x18\x01\x20\x03(\x0b2\x12.enginepb.L\
+    0CreateB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.enginepb.Tab\
+    leCreateB\0\x12*\n\nproperties\x18\x03\x20\x01(\x0b2\x14.enginepb.Proper\
+    tiesB\0\x12+\n\x0bBlobCreates\x18\x04\x20\x03(\x0b2\x14.enginepb.BlobCre\
+    ateB\0\x12\x10\n\x06max_ts\x18\x05\x20\x01(\x04B\0:\0\"C\n\nProperties\
+    \x12\x11\n\x07shardID\x18\x01\x20\x01(\x04B\0\x12\x0e\n\x04keys\x18\x02\
+    \x20\x03(\tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"\xef\x01\
+    \n\x0bTableChange\x12-\n\x0ctableDeletes\x18\x01\x20\x03(\x0b2\x15.engin\
+    epb.TableDeleteB\0\x12-\n\x0ctableCreates\x18\x02\x20\x03(\x0b2\x15.engi\
+    nepb.TableCreateB\0\x12\x16\n\x0cfile_ids_map\x18\x03\x20\x03(\x04B\0\
+    \x123\n\x0fcolumnarDeletes\x18\x04\x20\x03(\x0b2\x18.enginepb.ColumnarDe\
+    leteB\0\x123\n\x0fcolumnarCreates\x18\x05\x20\x03(\x0b2\x18.enginepb.Col\
+    umnarCreateB\0:\0\">\n\x0bTxnFileRefs\x12-\n\rtxn_file_refs\x18\x01\x20\
+    \x03(\x0b2\x14.enginepb.TxnFileRefB\0:\0\"\xc9\x01\n\nTxnFileRef\x12\x12\
+    \n\x08start_ts\x18\x01\x20\x01(\x04B\0\x12\x13\n\tchunk_ids\x18\x02\x20\
+    \x03(\x04B\0\x12\x11\n\x07version\x18\x03\x20\x01(\x04B\0\x12\x13\n\tuse\
+    r_meta\x18\x04\x20\x01(\x0cB\0\x12\x19\n\x0flock_val_prefix\x18\x05\x20\
+    \x01(\x0cB\0\x12\x13\n\tshard_ver\x18\x06\x20\x01(\x04B\0\x12\x1b\n\x11i\
+    nner_lower_bound\x18\x07\x20\x01(\x0cB\0\x12\x1b\n\x11inner_upper_bound\
+    \x18\x08\x20\x01(\x0cB\0:\0\"\x96\x02\n\x06Schema\x12\x12\n\x08table_id\
+    \x18\x01\x20\x01(\x03B\0\x12\x11\n\x07columns\x18\x02\x20\x03(\x0cB\0\
+    \x12\x14\n\npk_col_ids\x18\x03\x20\x03(\x03B\0\x122\n\x0evector_indexes\
+    \x18\x04\x20\x03(\x0b2\x18.enginepb.VectorIndexDefB\0\x126\n\x10fulltext\
+    _indexes\x18\n\x20\x03(\x0b2\x1a.enginepb.FullTextIndexDefB\0\x12\x0e\n\
+    \x04keys\x18\x05\x20\x03(\tB\0\x12\x10\n\x06values\x18\x06\x20\x03(\x0cB\
+    \0\x12)\n\npartitions\x18\x07\x20\x03(\x0b2\x13.enginepb.PartitionB\0\
+    \x12\x14\n\nmax_col_id\x18\x08\x20\x01(\x03B\0:\0\"=\n\tPartition\x12\
+    \x0c\n\x02id\x18\x01\x20\x01(\x03B\0\x12\x0e\n\x04keys\x18\x02\x20\x03(\
+    \tB\0\x12\x10\n\x06values\x18\x03\x20\x03(\x0cB\0:\0\"\x8d\x01\n\x0bVect\
+    orIndex\x12\x12\n\x08table_id\x18\x01\x20\x01(\x03B\0\x12\x12\n\x08index\
+    _id\x18\x02\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x03\x20\x01(\x03B\0\
+    \x12*\n\x05files\x18\x04\x20\x03(\x0b2\x19.enginepb.VectorIndexFileB\0\
+    \x12\x16\n\x0csnap_version\x18\x05\x20\x01(\x04B\0:\0\"w\n\x0fVectorInde\
+    xFile\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x16\n\x0csnap_version\
+    \x18\x02\x20\x01(\x04B\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\
+    \x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0\x12\x15\n\x0bmeta_offset\
+    \x18\x06\x20\x01(\rB\0:\0\"z\n\x0eVectorIndexDef\x12\x12\n\x08index_id\
+    \x18\x01\x20\x01(\x03B\0\x12\x10\n\x06col_id\x18\x02\x20\x01(\x03B\0\x12\
+    \x14\n\nindex_kind\x18\x03\x20\x01(\tB\0\x12\x13\n\tspec_keys\x18\x04\
+    \x20\x03(\tB\0\x12\x15\n\x0bspec_values\x18\x05\x20\x03(\x0cB\0:\0\"y\n\
+    \x11FtsPackedFileInfo\x12\x0c\n\x02id\x18\x01\x20\x01(\x04B\0\x12\x15\n\
+    \x0bmeta_offset\x18\x02\x20\x01(\rB\0\x12\x12\n\x08smallest\x18\x03\x20\
+    \x01(\x0cB\0\x12\x11\n\x07biggest\x18\x04\x20\x01(\x0cB\0\x12\x16\n\x0cs\
+    nap_version\x18\x05\x20\x01(\x04B\0:\0\"^\n\x0eFtsDedFileInfo\x12\x0c\n\
+    \x02id\x18\x01\x20\x01(\x04B\0\x12\x15\n\x0bmeta_offset\x18\x02\x20\x01(\
+    \rB\0\x12\x12\n\x08smallest\x18\x03\x20\x01(\x0cB\0\x12\x11\n\x07biggest\
+    \x18\x04\x20\x01(\x0cB\0:\0\"\x8e\x03\n\tFtsUpdate\x12\x1a\n\x10set_snap\
+    _version\x18\x01\x20\x01(\x04B\0\x125\n\x13add_tracked_indexes\x18\x02\
+    \x20\x03(\x0b2\x16.enginepb.TableIndexIdB\0\x123\n\x0cl0_add_files\x18\
+    \x03\x20\x03(\x0b2\x1b.enginepb.FtsPackedFileInfoB\0\x12\x19\n\x0fl0_rem\
+    ove_files\x18\x04\x20\x03(\x04B\0\x123\n\x0cl1_add_files\x18\x05\x20\x03\
+    (\x0b2\x1b.enginepb.FtsPackedFileInfoB\0\x12\x19\n\x0fl1_remove_files\
+    \x18\x06\x20\x03(\x04B\0\x120\n\x0cl2_add_files\x18\x07\x20\x03(\x0b2\
+    \x18.enginepb.FtsDedFileInfoB\0\x12\x19\n\x0fl2_remove_files\x18\x08\x20\
+    \x03(\x04B\0\x12\x13\n\tclear_all\x18\t\x20\x01(\x08B\0\x12*\n\x20pendin\
+    g_columnar_l0_remove_files\x18\n\x20\x03(\x04B\0:\0\",\n\rClearColumnar\
+    \x12\x19\n\x0frestore_version\x18\x01\x20\x01(\x04B\0:\0\"%\n\x0eMetaPac\
+    kHeader\x12\x11\n\x07version\x18\x01\x20\x01(\rB\0:\0B\0b\x06proto3\
 ";
 
 static mut file_descriptor_proto_lazy: ::protobuf::lazy::Lazy<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::lazy::Lazy {

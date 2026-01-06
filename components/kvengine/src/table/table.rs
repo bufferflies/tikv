@@ -558,6 +558,25 @@ where
     i
 }
 
+/// Simple rewrite of golang sort.Search
+/// Return i, f(x) == false when x in [0, i), f(x) == true when x in [i, n)
+pub fn try_search<E>(
+    n: usize,
+    f: impl Fn(usize) -> std::result::Result<bool, E>,
+) -> std::result::Result<usize, E> {
+    let mut i = 0;
+    let mut j = n;
+    while i < j {
+        let h = (i + j) / 2;
+        if !f(h)? {
+            i = h + 1;
+        } else {
+            j = h;
+        }
+    }
+    Ok(i)
+}
+
 pub(crate) fn parse_prop_data(mut prop_data: &[u8]) -> (&[u8], &[u8], &[u8]) {
     let key_len = LittleEndian::read_u16(prop_data) as usize;
     prop_data = &prop_data[2..];
