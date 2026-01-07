@@ -380,7 +380,7 @@ slog = { version = "2.3", features = ["max_level_trace", "release_max_level_debu
 slog-global = { version = "0.1", git = "https://github.com/breeswish/slog-global.git", rev = "d592f88e4dbba5eb439998463054f1a44fbf17b9" }
 tipb = { git = "https://github.com/pingcap/tipb.git" }
 tikv-client = { version = "0.3.0", git = "https://github.com/tikv/client-rust.git", branch = "cse", default-features = false }
-kvproto = { git = "https://github.com/pingcap/kvproto.git", rev = "8eeada0a8a035926955f8d8610a27a03da8f1eaa" }
+kvproto = { git = "https://github.com/pingcap/kvproto.git", rev = "438649d89ee7940cacfefef830ad8222e0c5dfac" }
 yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
 tokio-timer = { git = "https://github.com/tikv/tokio", branch = "tokio-timer-hotfix" }
 

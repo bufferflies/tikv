@@ -206,6 +206,24 @@ impl Default for BucketStat {
     }
 }
 
+impl From<&metapb::BucketMeta> for BucketMeta {
+    fn from(bucket_meta: &metapb::BucketMeta) -> Self {
+        let mut bm = BucketMeta::default();
+        bm.version = bucket_meta.get_version();
+        bm.keys = bucket_meta.get_keys().to_vec();
+        bm
+    }
+}
+
+impl From<&BucketMeta> for metapb::BucketMeta {
+    fn from(bucket_meta: &BucketMeta) -> Self {
+        let mut bm = metapb::BucketMeta::default();
+        bm.set_version(bucket_meta.version);
+        bm.set_keys(bucket_meta.keys.clone().into());
+        bm
+    }
+}
+
 impl BucketStat {
     pub fn new(meta: Arc<BucketMeta>, stats: metapb::BucketStats) -> Self {
         Self {
@@ -473,6 +491,7 @@ pub trait PdClient: GetSecurityManager + Send + Sync {
         _leader: metapb::Peer,
         _region_stat: RegionStat,
         _replication_status: Option<RegionReplicationStatus>,
+        _bucket_meta: Option<metapb::BucketMeta>,
     ) -> PdFuture<()> {
         unimplemented!();
     }
@@ -796,4 +815,25 @@ const SPLIT_REGIONS_REQUEST_TIMEOUT_PER_KEY: Duration = Duration::from_millis(50
 fn request_timeout_for_split_regions(keys_count: usize) -> Duration {
     (SPLIT_REGIONS_REQUEST_TIMEOUT_PER_KEY * keys_count as u32)
         .max(Duration::from_secs(REQUEST_TIMEOUT))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bucket_meta_convert() {
+        let keys: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
+        let mut bm1 = BucketMeta::default();
+        bm1.version = 1;
+        bm1.keys = keys;
+
+        let meta = metapb::BucketMeta::from(&bm1);
+        assert_eq!(meta.get_version(), 1);
+        assert_eq!(meta.get_keys(), &keys);
+
+        let mut bm2 = BucketMeta::from(&meta);
+        assert_eq!(bm1.version, bm2.version);
+        assert_eq!(bm1.keys, bm2.keys);
+    }
 }

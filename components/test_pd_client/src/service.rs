@@ -210,6 +210,7 @@ impl PdMocker for Service {
             req.get_leader().clone(),
             region_stat,
             replication_status,
+            None,
         )) {
             Ok(_) => {}
             Err(e) => {

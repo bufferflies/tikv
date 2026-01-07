@@ -38,7 +38,8 @@ use kvproto::{
     },
 };
 use pd_client::{
-    BucketStat, Error, FeatureGate, Key, PdClient, PdFuture, RegionInfo, RegionStat, Result,
+    BucketMeta, BucketStat, Error, FeatureGate, Key, PdClient, PdFuture, RegionInfo, RegionStat,
+    Result,
 };
 use raft::eraftpb::ConfChangeType;
 use security::GetSecurityManager;
@@ -826,6 +827,7 @@ impl PdCluster {
         leader: metapb::Peer,
         region_stat: RegionStat,
         replication_status: Option<RegionReplicationStatus>,
+        bucket_meta: Option<metapb::BucketMeta>,
     ) -> Result<pdpb::RegionHeartbeatResponse> {
         for peer in region.get_peers() {
             self.down_peers.remove(&peer.get_id());
@@ -836,6 +838,30 @@ impl PdCluster {
         }
         for p in region_stat.pending_peers {
             self.pending_peers.insert(p.get_id(), p);
+        }
+        if let Some(bucket) = bucket_meta {
+            self.buckets
+                .entry(region.get_id())
+                .and_modify(|current| {
+                    if current.meta.version < bucket.version {
+                        let mut meta = BucketMeta::from(bucket);
+                        meta.region_id = region.get_id();
+                        meta.region_epoch = region.get_region_epoch().clone();
+                        *current = BucketStat {
+                            meta,
+                            ..current.clone()
+                        }
+                    }
+                })
+                .or_insert_with(|| {
+                    let mut meta = BucketMeta::from(bucket);
+                    meta.region_id = region.get_id();
+                    meta.region_epoch = region.get_region_epoch().clone();
+                    *current = BucketStat {
+                        meta,
+                        ..current.clone()
+                    }
+                });
         }
         self.leaders.insert(region.get_id(), leader.clone());
 
@@ -1688,6 +1714,7 @@ impl PdClient for TestPdClient {
         leader: metapb::Peer,
         region_stat: RegionStat,
         replication_status: Option<RegionReplicationStatus>,
+        bucket_meta: Option<metapb::BucketMeta>,
     ) -> PdFuture<()> {
         if let Err(e) = self.check_bootstrap() {
             return Box::pin(err(e));
@@ -1698,6 +1725,7 @@ impl PdClient for TestPdClient {
             leader.clone(),
             region_stat,
             replication_status,
+            bucket_meta,
         );
         match resp {
             Ok(resp) => {

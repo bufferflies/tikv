@@ -1799,7 +1799,7 @@ impl ReplicationWorker {
         stats.approximate_kv_size = 100 * 1024 * 1024;
         stats.approximate_keys = 1000000;
         stats.approximate_size = 100 * 1024 * 1024;
-        let resp = rep_pd_cli.region_heartbeat(1, region, leader, stats, None);
+        let resp = rep_pd_cli.region_heartbeat(1, region, leader, stats, None, None);
         tokio::spawn(async move {
             if let Err(err) = resp.await {
                 warn!("{} report_region_to_rep_pd failed", tag; "err" => ?err);
