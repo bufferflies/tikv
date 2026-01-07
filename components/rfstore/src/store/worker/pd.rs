@@ -1588,6 +1588,7 @@ impl Runnable for PdRunner {
                     };
                 let bucket_meta = hb_task
                     .bucket_stat
+                    .as_ref()
                     .map(|stat| -> metapb::BucketMeta { stat.meta.as_ref().into() });
                 self.handle_heartbeat(
                     hb_task.term,

@@ -183,13 +183,13 @@ impl ::protobuf::Message for FullTextIndexDef {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -255,7 +255,7 @@ impl ::protobuf::Clear for FullTextIndexDef {
 
 impl ::protobuf::PbPrint for FullTextIndexDef {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.index_id, "index_id", buf);
@@ -270,7 +270,7 @@ impl ::protobuf::PbPrint for FullTextIndexDef {
 impl ::std::fmt::Debug for FullTextIndexDef {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.index_id, "index_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.col_id, "col_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.parser_type, "parser_type", &mut s);
@@ -279,7 +279,7 @@ impl ::std::fmt::Debug for FullTextIndexDef {
 }
 
 impl ::protobuf::reflect::ProtobufValue for FullTextIndexDef {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -417,13 +417,13 @@ impl ::protobuf::Message for PackedFileIndexBlock {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -483,7 +483,7 @@ impl ::protobuf::Clear for PackedFileIndexBlock {
 
 impl ::protobuf::PbPrint for PackedFileIndexBlock {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.data_block_start_keys, "data_block_start_keys", buf);
@@ -497,7 +497,7 @@ impl ::protobuf::PbPrint for PackedFileIndexBlock {
 impl ::std::fmt::Debug for PackedFileIndexBlock {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.data_block_start_keys, "data_block_start_keys", &mut s);
         ::protobuf::PbPrint::fmt(&self.data_block_offsets, "data_block_offsets", &mut s);
         write!(f, "{}", s)
@@ -505,7 +505,7 @@ impl ::std::fmt::Debug for PackedFileIndexBlock {
 }
 
 impl ::protobuf::reflect::ProtobufValue for PackedFileIndexBlock {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -1028,13 +1028,13 @@ impl ::protobuf::Message for PackedFilePropBlock {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -1160,7 +1160,7 @@ impl ::protobuf::Clear for PackedFilePropBlock {
 
 impl ::protobuf::PbPrint for PackedFilePropBlock {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.smallest_lp_key, "smallest_lp_key", buf);
@@ -1185,7 +1185,7 @@ impl ::protobuf::PbPrint for PackedFilePropBlock {
 impl ::std::fmt::Debug for PackedFilePropBlock {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.smallest_lp_key, "smallest_lp_key", &mut s);
         ::protobuf::PbPrint::fmt(&self.largest_lp_key, "largest_lp_key", &mut s);
         ::protobuf::PbPrint::fmt(&self.total_lps, "total_lps", &mut s);
@@ -1204,7 +1204,7 @@ impl ::std::fmt::Debug for PackedFilePropBlock {
 }
 
 impl ::protobuf::reflect::ProtobufValue for PackedFilePropBlock {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -1439,13 +1439,13 @@ impl ::protobuf::Message for PackedFileLpProps {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -1523,7 +1523,7 @@ impl ::protobuf::Clear for PackedFileLpProps {
 
 impl ::protobuf::PbPrint for PackedFileLpProps {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.n_pk, "n_pk", buf);
@@ -1540,7 +1540,7 @@ impl ::protobuf::PbPrint for PackedFileLpProps {
 impl ::std::fmt::Debug for PackedFileLpProps {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.n_pk, "n_pk", &mut s);
         ::protobuf::PbPrint::fmt(&self.is_int_handle, "is_int_handle", &mut s);
         ::protobuf::PbPrint::fmt(&self.table_id, "table_id", &mut s);
@@ -1551,7 +1551,7 @@ impl ::std::fmt::Debug for PackedFileLpProps {
 }
 
 impl ::protobuf::reflect::ProtobufValue for PackedFileLpProps {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -1677,13 +1677,13 @@ impl ::protobuf::Message for TableIndexId {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -1743,7 +1743,7 @@ impl ::protobuf::Clear for TableIndexId {
 
 impl ::protobuf::PbPrint for TableIndexId {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.table_id, "table_id", buf);
@@ -1757,7 +1757,7 @@ impl ::protobuf::PbPrint for TableIndexId {
 impl ::std::fmt::Debug for TableIndexId {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.table_id, "table_id", &mut s);
         ::protobuf::PbPrint::fmt(&self.index_id, "index_id", &mut s);
         write!(f, "{}", s)
@@ -1765,7 +1765,7 @@ impl ::std::fmt::Debug for TableIndexId {
 }
 
 impl ::protobuf::reflect::ProtobufValue for TableIndexId {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -1891,13 +1891,13 @@ impl ::protobuf::Message for OffsetSize {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -1957,7 +1957,7 @@ impl ::protobuf::Clear for OffsetSize {
 
 impl ::protobuf::PbPrint for OffsetSize {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.offset, "offset", buf);
@@ -1971,7 +1971,7 @@ impl ::protobuf::PbPrint for OffsetSize {
 impl ::std::fmt::Debug for OffsetSize {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.offset, "offset", &mut s);
         ::protobuf::PbPrint::fmt(&self.size, "size", &mut s);
         write!(f, "{}", s)
@@ -1979,7 +1979,7 @@ impl ::std::fmt::Debug for OffsetSize {
 }
 
 impl ::protobuf::reflect::ProtobufValue for OffsetSize {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -2455,13 +2455,13 @@ impl ::protobuf::Message for TantivyIndexLayout {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -2557,7 +2557,7 @@ impl ::protobuf::Clear for TantivyIndexLayout {
 
 impl ::protobuf::PbPrint for TantivyIndexLayout {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.meta, "meta", buf);
@@ -2577,7 +2577,7 @@ impl ::protobuf::PbPrint for TantivyIndexLayout {
 impl ::std::fmt::Debug for TantivyIndexLayout {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.meta, "meta", &mut s);
         ::protobuf::PbPrint::fmt(&self.managed, "managed", &mut s);
         ::protobuf::PbPrint::fmt(&self.term, "term", &mut s);
@@ -2591,7 +2591,7 @@ impl ::std::fmt::Debug for TantivyIndexLayout {
 }
 
 impl ::protobuf::reflect::ProtobufValue for TantivyIndexLayout {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -2828,13 +2828,13 @@ impl ::protobuf::Message for DedFileIBlock {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -2912,7 +2912,7 @@ impl ::protobuf::Clear for DedFileIBlock {
 
 impl ::protobuf::PbPrint for DedFileIBlock {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.hblock_start_key, "hblock_start_key", buf);
@@ -2929,7 +2929,7 @@ impl ::protobuf::PbPrint for DedFileIBlock {
 impl ::std::fmt::Debug for DedFileIBlock {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.hblock_start_key, "hblock_start_key", &mut s);
         ::protobuf::PbPrint::fmt(&self.hblock_offsets, "hblock_offsets", &mut s);
         ::protobuf::PbPrint::fmt(&self.hblock_start_docid, "hblock_start_docid", &mut s);
@@ -2940,7 +2940,7 @@ impl ::std::fmt::Debug for DedFileIBlock {
 }
 
 impl ::protobuf::reflect::ProtobufValue for DedFileIBlock {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }
@@ -3312,13 +3312,13 @@ impl ::protobuf::Message for DedFilePropBlock {
         &mut self.unknown_fields
     }
 
-    fn as_any(&self) -> &dyn (::std::any::Any) {
-        self as &dyn (::std::any::Any)
+    fn as_any(&self) -> &dyn ::std::any::Any {
+        self as &dyn ::std::any::Any
     }
-    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
-        self as &mut dyn (::std::any::Any)
+    fn as_any_mut(&mut self) -> &mut dyn ::std::any::Any {
+        self as &mut dyn ::std::any::Any
     }
-    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+    fn into_any(self: Box<Self>) -> ::std::boxed::Box<dyn ::std::any::Any> {
         self
     }
 
@@ -3420,7 +3420,7 @@ impl ::protobuf::Clear for DedFilePropBlock {
 
 impl ::protobuf::PbPrint for DedFilePropBlock {
     #[allow(unused_variables)]
-    fn fmt(&self, name: &str, buf: &mut String) {
+    fn fmt(&self, name: &str, buf: &mut ::std::string::String) {
         ::protobuf::push_message_start(name, buf);
         let old_len = buf.len();
         ::protobuf::PbPrint::fmt(&self.lp_key, "lp_key", buf);
@@ -3441,7 +3441,7 @@ impl ::protobuf::PbPrint for DedFilePropBlock {
 impl ::std::fmt::Debug for DedFilePropBlock {
     #[allow(unused_variables)]
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let mut s = String::new();
+        let mut s = ::std::string::String::new();
         ::protobuf::PbPrint::fmt(&self.lp_key, "lp_key", &mut s);
         ::protobuf::PbPrint::fmt(&self.is_int_handle, "is_int_handle", &mut s);
         ::protobuf::PbPrint::fmt(&self.table_id, "table_id", &mut s);
@@ -3456,7 +3456,7 @@ impl ::std::fmt::Debug for DedFilePropBlock {
 }
 
 impl ::protobuf::reflect::ProtobufValue for DedFilePropBlock {
-    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef {
+    fn as_ref(&self) -> ::protobuf::reflect::ProtobufValueRef<'_> {
         ::protobuf::reflect::ProtobufValueRef::Message(self)
     }
 }

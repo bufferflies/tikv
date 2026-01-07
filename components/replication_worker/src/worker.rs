@@ -1409,7 +1409,7 @@ impl ReplicationWorker {
                 stats.approximate_keys = 1000000;
                 stats.approximate_size = 100 * 1024 * 1024;
                 let res = rep_pd_cli
-                    .region_heartbeat(1, region, leader, stats, None)
+                    .region_heartbeat(1, region, leader, stats, None, None)
                     .await;
                 if let Err(err) = res {
                     if kv.get_keyspace_shards(keyspace_id).is_none() {

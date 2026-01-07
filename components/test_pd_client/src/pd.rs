@@ -840,27 +840,23 @@ impl PdCluster {
             self.pending_peers.insert(p.get_id(), p);
         }
         if let Some(bucket) = bucket_meta {
+            let mut meta = BucketMeta::from(&bucket);
+            meta.region_id = region.get_id();
+            meta.region_epoch = region.get_region_epoch().clone();
+
             self.buckets
                 .entry(region.get_id())
                 .and_modify(|current| {
-                    if current.meta.version < bucket.version {
-                        let mut meta = BucketMeta::from(bucket);
-                        meta.region_id = region.get_id();
-                        meta.region_epoch = region.get_region_epoch().clone();
+                    if current.meta.version < meta.version {
                         *current = BucketStat {
-                            meta,
+                            meta: Arc::new(meta.clone()),
                             ..current.clone()
                         }
                     }
                 })
-                .or_insert_with(|| {
-                    let mut meta = BucketMeta::from(bucket);
-                    meta.region_id = region.get_id();
-                    meta.region_epoch = region.get_region_epoch().clone();
-                    *current = BucketStat {
-                        meta,
-                        ..current.clone()
-                    }
+                .or_insert(BucketStat {
+                    meta: Arc::new(meta),
+                    ..Default::default()
                 });
         }
         self.leaders.insert(region.get_id(), leader.clone());

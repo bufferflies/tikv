@@ -826,13 +826,13 @@ mod tests {
         let keys: Vec<Vec<u8>> = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
         let mut bm1 = BucketMeta::default();
         bm1.version = 1;
-        bm1.keys = keys;
+        bm1.keys = keys.clone();
 
         let meta = metapb::BucketMeta::from(&bm1);
         assert_eq!(meta.get_version(), 1);
         assert_eq!(meta.get_keys(), &keys);
 
-        let mut bm2 = BucketMeta::from(&meta);
+        let bm2 = BucketMeta::from(&meta);
         assert_eq!(bm1.version, bm2.version);
         assert_eq!(bm1.keys, bm2.keys);
     }
