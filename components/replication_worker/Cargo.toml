@@ -60,3 +60,4 @@ tikv_util = { workspace = true }
 tokio = { version = "1.12", features = ["full"] }
 toml = { version = "0.5", optional = true }
 txn_types = { workspace = true }
+url = "2"

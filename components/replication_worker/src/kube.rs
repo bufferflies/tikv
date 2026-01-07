@@ -377,6 +377,7 @@ impl KubeApi {
 }
 
 #[test]
+#[ignore] // Require K8S env. For manual testing only
 fn test_sts_create() {
     test_util::init_log_for_test();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -410,6 +411,7 @@ fn test_sts_create() {
 }
 
 #[test]
+#[ignore] // Require K8S env. For manual testing only
 fn test_sts_delete() {
     test_util::init_log_for_test();
     let rt = tokio::runtime::Runtime::new().unwrap();
