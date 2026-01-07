@@ -490,8 +490,12 @@ impl ReplicationWorker {
                 let res = self.handle_load_keyspace_shard_metas(keyspace_id);
                 cb(res);
             }
-            CdcMsg::RemoveKeyspace { keyspace_id, cb } => {
-                self.handle_remove_keyspace_service(keyspace_id, cb);
+            CdcMsg::RemoveKeyspace {
+                keyspace_id,
+                force,
+                cb,
+            } => {
+                self.handle_remove_keyspace_service(keyspace_id, force, cb);
             }
             CdcMsg::NewTask {
                 keyspace_id,
@@ -2050,9 +2054,13 @@ impl ReplicationWorker {
             .map_err(Into::into)
     }
 
+    // Use force with caution: it should only be used after confirming TiCDC has
+    // no changefeeds for this keyspace. This is a workaround for states becoming
+    // inconsistent between replication worker and TiCDC.
     fn handle_remove_keyspace_service(
         &mut self,
         keyspace_id: u32,
+        force: bool,
         cb: Box<dyn FnOnce(Result<()>) + Send>,
     ) {
         info!("remove_keyspace"; "keyspace" => keyspace_id);
@@ -2066,8 +2074,17 @@ impl ReplicationWorker {
             HashMapEntry::Occupied(e) => {
                 let svc = &e.get().service;
                 if !svc.get_states().feeds.is_empty() {
-                    cb(Err(Error::OtherError("changefeeds not empty".into())));
-                    return;
+                    let feed_keys: Vec<String> = svc.get_states().feeds.keys().cloned().collect();
+                    warn!(
+                        "remove_keyspace: changefeeds not empty";
+                        "keyspace" => keyspace_id,
+                        "feeds" => ?feed_keys
+                    );
+
+                    if !force {
+                        cb(Err(Error::OtherError("changefeeds not empty".into())));
+                        return;
+                    }
                 }
                 e.remove()
             }

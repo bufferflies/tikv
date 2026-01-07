@@ -1,6 +1,6 @@
 // Copyright 2025 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
 
 use bytes::{Buf, Bytes};
 use http::{HeaderMap, HeaderValue};
@@ -113,12 +113,21 @@ impl ReplicationScheduler {
     }
 
     pub async fn handle_http_request(&self, req: Request<Body>) -> Result<Response<Body>> {
-        if *req.method() == Method::GET && req.uri().path() == "/cdc/keyspace" {
+        let (parts, body) = req.into_parts();
+        let method = &parts.method;
+        let uri = &parts.uri;
+        let path = uri.path();
+        let headers = parts.headers;
+
+        if *method == Method::GET && path == "/cdc/keyspace" {
             return Ok(self.handle_get_keyspaces().await);
         }
 
+        let query = uri.query().unwrap_or("");
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+
         let keyspace_id = {
-            if let Some(keyspace_str) = extract_param(req.uri(), "keyspace_id") {
+            if let Some(keyspace_str) = query_pairs.get("keyspace_id").map(|v| v.as_ref()) {
                 match keyspace_str.parse::<u32>() {
                     Ok(keyspace_id) => keyspace_id,
                     Err(_) => {
@@ -138,12 +147,6 @@ impl ReplicationScheduler {
             }
         };
 
-        let (parts, body) = req.into_parts();
-        let method = &parts.method;
-        let uri = &parts.uri;
-        let path = uri.path();
-        let headers = parts.headers;
-
         let response = match (method, path) {
             (&Method::POST, "/cdc/api/v2/changefeeds") => {
                 let body_bytes = hyper::body::to_bytes(body).await?;
@@ -153,7 +156,13 @@ impl ReplicationScheduler {
                 let body_bytes = hyper::body::to_bytes(body).await?;
                 self.handle_add_keyspace(keyspace_id, &body_bytes).await
             }
-            (&Method::DELETE, "/cdc/keyspace") => self.handle_remove_keyspace(keyspace_id).await,
+            (&Method::DELETE, "/cdc/keyspace") => {
+                let force = match extract_bool_param(&query_pairs, "force") {
+                    Ok(force) => force,
+                    Err(err) => return Ok(err),
+                };
+                self.handle_remove_keyspace(keyspace_id, force).await
+            }
             (&Method::DELETE, path) if path.starts_with("/cdc/api/v2/changefeeds/") => {
                 self.handle_delete_changefeed(keyspace_id, path).await?
             }
@@ -347,10 +356,14 @@ impl ReplicationScheduler {
             .unwrap()
     }
 
-    async fn handle_remove_keyspace(&self, keyspace_id: u32) -> Response<Body> {
-        info!("handle remove keyspace");
+    async fn handle_remove_keyspace(&self, keyspace_id: u32, force: bool) -> Response<Body> {
+        info!("handle remove keyspace"; "keyspace" => keyspace_id, "force" => force);
         let (cb, fut) = paired_future_callback();
-        self.schedule(CdcMsg::RemoveKeyspace { keyspace_id, cb });
+        self.schedule(CdcMsg::RemoveKeyspace {
+            keyspace_id,
+            force,
+            cb,
+        });
         let res = fut.await.unwrap();
         if let Err(err) = res {
             return Self::error_response(
@@ -392,12 +405,20 @@ pub struct KeyspacesResp {
     pub keyspace_ids: Vec<u32>,
 }
 
-fn extract_param<'a>(uri: &'a hyper::Uri, key: &str) -> Option<&'a str> {
-    uri.query().and_then(|q| {
-        q.split('&')
-            .find(|p| p.starts_with(key))
-            .map(|p| p.split('=').nth(1).unwrap_or(""))
-    })
+fn extract_bool_param(
+    query_pairs: &HashMap<Cow<'_, str>, Cow<'_, str>>,
+    key: &str,
+) -> std::result::Result<bool, Response<Body>> {
+    match query_pairs.get(key).map(|v| v.as_ref()) {
+        None => Ok(false),
+        Some("") | Some("0") | Some("false") => Ok(false),
+        Some("1") | Some("true") => Ok(true),
+        Some(_) => Err(ReplicationScheduler::error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Invalid boolean param \"{key}\""),
+            "CDC:ErrInvalidParam",
+        )),
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
@@ -437,15 +458,86 @@ pub(crate) async fn get_cdc_status(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use hyper::http::request;
 
     use super::*;
 
+    const VALID_CHANGEFEED_STATES: [&str; 6] =
+        ["all", "normal", "stopped", "error", "failed", "finished"];
+
+    fn parse_query(uri: &Uri) -> HashMap<Cow<'_, str>, Cow<'_, str>> {
+        let query = uri.query().unwrap_or("");
+        url::form_urlencoded::parse(query.as_bytes()).collect()
+    }
+
+    fn test_cdc_addr() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let make_svc = hyper::service::make_service_fn(|_| async {
+            Ok::<_, hyper::Error>(hyper::service::service_fn(|req| async move {
+                let path = req.uri().path();
+                let query_pairs = parse_query(req.uri());
+                let status = if let Some(suffix) = path.strip_prefix("/api/v2/changefeeds/") {
+                    if suffix.is_empty() {
+                        StatusCode::BAD_REQUEST
+                    } else {
+                        StatusCode::OK
+                    }
+                } else if path == "/api/v2/changefeeds" {
+                    if let Some(state) = query_pairs.get("state")
+                        && !VALID_CHANGEFEED_STATES.contains(&state.as_ref())
+                    {
+                        StatusCode::BAD_REQUEST
+                    } else {
+                        StatusCode::OK
+                    }
+                } else {
+                    StatusCode::NOT_FOUND
+                };
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(status)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+            }))
+        });
+        let server = hyper::Server::from_tcp(listener).unwrap().serve(make_svc);
+        tokio::spawn(async move {
+            let _ = server.await;
+        });
+        addr.to_string()
+    }
+
     impl ReplicationScheduler {
         fn new_test() -> Self {
-            // TODO: Add proper initialization when needed
-            let (sender, _) = tikv_util::mpsc::unbounded();
+            let (sender, receiver) = tikv_util::mpsc::unbounded();
+            std::thread::spawn(move || {
+                while let Ok(msg) = receiver.recv() {
+                    match msg {
+                        CdcMsg::NewTask { cb, .. } => {
+                            cb(Ok((StatusCode::OK, Bytes::from_static(b"{}"))));
+                        }
+                        CdcMsg::RemoveTask { cb, .. }
+                        | CdcMsg::RemoveKeyspace { cb, .. }
+                        | CdcMsg::AddKeyspace { cb, .. }
+                        | CdcMsg::LoadKeyspaceShards { cb, .. } => {
+                            cb(Ok(()));
+                        }
+                        CdcMsg::GetKeyspaces { cb } => {
+                            cb(Vec::new());
+                        }
+                        CdcMsg::LoadKeyspaceShardMetas { cb, .. } => {
+                            cb(Ok(std::collections::HashMap::new()));
+                        }
+                        _ => {}
+                    }
+                }
+            });
             let cdc_addrs = Arc::new(dashmap::DashMap::new());
+            cdc_addrs.insert(1, test_cdc_addr());
             ReplicationScheduler::new(
                 sender,
                 cdc_addrs,
@@ -581,5 +673,32 @@ mod tests {
             .unwrap();
         let resp = worker.handle_http_request(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_extract_bool_param() {
+        let cases = vec![
+            ("/cdc/keyspace?keyspace_id=1", Ok(false)),
+            ("/cdc/keyspace?keyspace_id=1&force=1", Ok(true)),
+            ("/cdc/keyspace?keyspace_id=1&force=true", Ok(true)),
+            ("/cdc/keyspace?keyspace_id=1&force=0", Ok(false)),
+            ("/cdc/keyspace?keyspace_id=1&force=false", Ok(false)),
+            (
+                "/cdc/keyspace?keyspace_id=1&force=maybe",
+                Err(StatusCode::BAD_REQUEST),
+            ),
+        ];
+
+        for (uri, expected) in cases {
+            let uri = Uri::from_static(uri);
+            let query_pairs = parse_query(&uri);
+            match expected {
+                Ok(value) => assert_eq!(extract_bool_param(&query_pairs, "force").unwrap(), value),
+                Err(status) => {
+                    let err_resp = extract_bool_param(&query_pairs, "force").unwrap_err();
+                    assert_eq!(err_resp.status(), status);
+                }
+            }
+        }
     }
 }

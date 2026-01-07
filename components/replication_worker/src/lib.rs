@@ -294,6 +294,7 @@ pub enum CdcMsg {
     },
     RemoveKeyspace {
         keyspace_id: u32,
+        force: bool,
         cb: Box<dyn FnOnce(Result<()>) + Send>,
     },
     GetKeyspaces {

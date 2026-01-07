@@ -481,7 +481,8 @@ UNIT_TEST_PACKAGES := \
 	test_cloud_server test_pd_client \
 	native_br load_data cloud_encryption \
 	cloud_server pd_client api_version \
-	concurrency_manager
+	concurrency_manager \
+	merged_engine replication_worker
 UNIT_TEST_PACKAGES_STR := $(foreach p,$(UNIT_TEST_PACKAGES),-p $(p))
 
 test-cloud-engine: pre-test
