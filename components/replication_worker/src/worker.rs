@@ -1201,6 +1201,15 @@ impl ReplicationWorker {
 
         let merged_store_id = self.merged_store_id();
         info!("send_resolved_ts"; "last_update_ts" => self.last_update_ts, "store" => merged_store_id);
+
+        if self.region_delegates.is_empty() {
+            self.resolved_ts_stats = Some(ResolvedTsStats {
+                min_ts: self.last_update_ts,
+                ..Default::default()
+            });
+            return Ok(());
+        }
+
         self.resolved_regions.clear();
         let mut stats = ResolvedTsStats::default();
         for (&region_id, delegate) in &mut self.region_delegates {
