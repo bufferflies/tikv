@@ -40,6 +40,8 @@ mod storage_class;
 mod transaction;
 mod write_sst;
 
+mod storage;
+
 pub use test_cloud_server::{alloc_node_id, alloc_node_id_vec};
 
 pub(crate) fn get_keyspace_prefix(keyspace_id: u32) -> Vec<u8> {

@@ -678,6 +678,7 @@ impl TikvServer {
                 ),
             ),
             self.raw_engines.kv.clone(),
+            Some(self.region_info_accessor.clone()),
         );
         let store_meta = Arc::new(Mutex::new(store_meta));
         self.engines = Some(TikvEngines { store_meta, engine });
@@ -1272,6 +1273,10 @@ impl TikvServer {
 
     pub fn get_raft_engine(&self) -> rfengine::RfEngine {
         self.raw_engines.raft.clone()
+    }
+
+    pub fn get_raft_kv(&self) -> Option<RaftKv> {
+        self.engines.as_ref().map(|es| es.engine.clone())
     }
 
     pub fn get_store_id(&self) -> u64 {

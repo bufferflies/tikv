@@ -33,8 +33,11 @@ use raft::{
     eraftpb::{self, MessageType},
     StateRole,
 };
-use raftstore::coprocessor::{
-    dispatcher::BoxReadIndexObserver, Coprocessor, CoprocessorHost, ReadIndexObserver,
+use raftstore::{
+    coprocessor::{
+        dispatcher::BoxReadIndexObserver, Coprocessor, CoprocessorHost, ReadIndexObserver,
+    },
+    RegionInfoAccessor,
 };
 use rfstore::{
     store,
@@ -236,6 +239,7 @@ pub struct RaftKv {
     router: ServerRaftStoreRouter,
     engine: kvengine::Engine,
     txn_extra_scheduler: Option<Arc<dyn TxnExtraScheduler>>,
+    region_info_accessor: Option<RegionInfoAccessor>,
 }
 
 pub enum CmdRes {
@@ -275,11 +279,16 @@ fn on_read_result(mut read_resp: ReadResponse) -> Result<CmdRes> {
 
 impl RaftKv {
     /// Create a RaftKv using specified configuration.
-    pub fn new(router: ServerRaftStoreRouter, engine: kvengine::Engine) -> RaftKv {
+    pub fn new(
+        router: ServerRaftStoreRouter,
+        engine: kvengine::Engine,
+        region_info_accessor: Option<RegionInfoAccessor>,
+    ) -> RaftKv {
         RaftKv {
             router,
             engine,
             txn_extra_scheduler: None,
+            region_info_accessor,
         }
     }
 
@@ -352,6 +361,23 @@ impl Engine for RaftKv {
 
     fn modify_on_kv_engine(&self, _modifies: HashMap<u64, Vec<Modify>>) -> kv::Result<()> {
         panic!();
+    }
+
+    fn precheck_write_with_ctx(&self, ctx: &Context) -> tikv_kv::Result<()> {
+        let region_id = ctx.get_region_id();
+        if let Some(region_info_accessor) = self.region_info_accessor.as_ref() {
+            match region_info_accessor
+                .region_leaders()
+                .read()
+                .unwrap()
+                .get(&region_id)
+            {
+                Some(_) => Ok(()),
+                None => Err(RaftServerError::NotLeader(region_id, None).into()),
+            }
+        } else {
+            Ok(())
+        }
     }
 
     type WriteRes = impl Stream<Item = WriteEvent> + Send + Unpin;

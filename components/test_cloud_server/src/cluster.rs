@@ -12,7 +12,7 @@ use std::{
 use anyhow::bail;
 use bstr::ByteSlice;
 use causal_ts::CausalTsProviderImpl;
-use cloud_server::TikvServer;
+use cloud_server::{RaftKv, TikvServer};
 use cloud_worker::{local_gc::LocalGcConfig, native_br::NativeBrConfig, CloudWorker};
 use dashmap::DashMap;
 use futures::{executor::block_on, future::try_join_all};
@@ -351,6 +351,11 @@ impl ServerCluster {
         server.get_raft_engine()
     }
 
+    pub fn get_raft_kv(&self, node_id: u16) -> Option<RaftKv> {
+        let server = self.servers.get(&node_id).unwrap();
+        server.get_raft_kv()
+    }
+
     pub fn get_snap(&self, node_id: u16, key: &[u8]) -> kvengine::SnapAccess {
         let engine = self.get_kvengine(node_id);
         let region = self.pd_client.get_region(&encode_bytes(key)).unwrap();
@@ -572,7 +577,7 @@ impl ServerCluster {
         panic!("kvengine is not empty");
     }
 
-    fn get_server_node_id(&self, store_id: u64) -> Option<u16> {
+    pub fn get_server_node_id(&self, store_id: u64) -> Option<u16> {
         for (node_id, server) in &self.servers {
             if server.get_store_id() == store_id {
                 return Some(*node_id);
