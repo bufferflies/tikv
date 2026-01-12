@@ -121,13 +121,13 @@ impl KmsProvider for AwsKms {
 fn classify_generate_data_key_error(err: SdkError<GenerateDataKeyError>) -> Error {
     if let SdkError::ServiceError(service_err) = &err {
         match &service_err.err() {
-            GenerateDataKeyError::NotFoundException(_) => Error::ApiNotFound(err.into()),
+            GenerateDataKeyError::NotFoundException(_) => Error::ApiNotFound(verbose(err)),
             GenerateDataKeyError::InvalidKeyUsageException(_) => {
-                Error::KmsError(KmsError::Other(err.into()))
+                Error::KmsError(KmsError::Other(verbose(err)))
             }
-            GenerateDataKeyError::DependencyTimeoutException(_) => Error::ApiTimeout(err.into()),
-            GenerateDataKeyError::KmsInternalException(_) => Error::ApiInternal(err.into()),
-            _ => Error::KmsError(KmsError::Other(err.into())),
+            GenerateDataKeyError::DependencyTimeoutException(_) => Error::ApiTimeout(verbose(err)),
+            GenerateDataKeyError::KmsInternalException(_) => Error::ApiInternal(verbose(err)),
+            _ => Error::KmsError(KmsError::Other(verbose(err))),
         }
     } else {
         classify_error(err)
@@ -138,11 +138,11 @@ fn classify_decrypt_error(err: SdkError<DecryptError>) -> Error {
     if let SdkError::ServiceError(service_err) = &err {
         match &service_err.err() {
             DecryptError::IncorrectKeyException(_) | DecryptError::NotFoundException(_) => {
-                Error::KmsError(KmsError::WrongMasterKey(err.into()))
+                Error::KmsError(KmsError::WrongMasterKey(verbose(err)))
             }
-            DecryptError::DependencyTimeoutException(_) => Error::ApiTimeout(err.into()),
-            DecryptError::KmsInternalException(_) => Error::ApiInternal(err.into()),
-            _ => Error::KmsError(KmsError::Other(err.into())),
+            DecryptError::DependencyTimeoutException(_) => Error::ApiTimeout(verbose(err)),
+            DecryptError::KmsInternalException(_) => Error::ApiInternal(verbose(err)),
+            _ => Error::KmsError(KmsError::Other(verbose(err))),
         }
     } else {
         classify_error(err)
@@ -157,14 +157,42 @@ fn classify_error<E: std::error::Error + Send + Sync + 'static>(err: SdkError<E>
                 .and_then(|connector_err| std::error::Error::source(connector_err))
                 .filter(|src_err| src_err.is::<CredentialsError>());
             if maybe_credentials_err.is_some() {
-                Error::ApiAuthentication(err.into())
+                Error::ApiAuthentication(verbose(err))
             } else {
-                Error::ApiTimeout(err.into())
+                Error::ApiTimeout(verbose(err))
             }
         }
-        e if is_retryable(e) => Error::ApiInternal(err.into()),
-        _ => Error::KmsError(KmsError::Other(err.into())),
+        e if is_retryable(e) => Error::ApiInternal(verbose(err)),
+        _ => Error::KmsError(KmsError::Other(verbose(err))),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{report}")]
+pub struct VerboseSdkError {
+    report: String,
+
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl VerboseSdkError {
+    pub fn new<E>(err: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            report: aws_sdk_kms::error::DisplayErrorContext(&err).to_string(),
+            source: Box::new(err),
+        }
+    }
+}
+
+fn verbose<E>(err: SdkError<E>) -> aws_sdk_kms::error::BoxError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    Box::new(VerboseSdkError::new(err))
 }
 
 struct KmsClientDebug {

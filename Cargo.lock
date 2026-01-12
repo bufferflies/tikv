@@ -1834,7 +1834,10 @@ dependencies = [
  "hmac 0.10.1",
  "kvenginepb",
  "kvproto",
+ "lazy_static",
  "openssl",
+ "prometheus",
+ "prometheus-static-metric",
  "protobuf",
  "rand 0.8.5",
  "serde",
@@ -1845,6 +1848,7 @@ dependencies = [
  "slog-global",
  "strum 0.25.0",
  "thiserror",
+ "tikv_util",
  "tokio",
  "zeroize",
 ]
@@ -7377,6 +7381,7 @@ dependencies = [
 name = "rfstore"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
  "api_version",
  "async-trait",
  "batch-system",

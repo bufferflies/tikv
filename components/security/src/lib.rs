@@ -132,7 +132,7 @@ impl SecurityConfig {
     }
 
     pub async fn new_master_key(&self) -> MasterKey {
-        self.master_key.decrypt().await.unwrap()
+        self.master_key.decrypt(true /* is_legacy */).await.unwrap()
     }
 
     pub fn override_from_env(&mut self) {

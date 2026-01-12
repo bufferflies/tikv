@@ -35,7 +35,9 @@ use tikv_util::{
 use trace_event::types::EventFieldValue;
 
 use crate::{
-    store::{ProposalContext, StoreMsg, SPLIT_FLAG_ENCRYPTION_METAS},
+    store::{
+        metrics::RAFT_ENTRY_CRYPT_DURATION, ProposalContext, StoreMsg, SPLIT_FLAG_ENCRYPTION_METAS,
+    },
     Error, RaftRouter, Result,
 };
 
@@ -236,6 +238,7 @@ pub fn parse_raft_cmd(
     let proposal_ctx = ProposalContext::from_bytes(entry.get_context());
     let index = entry.index;
     if proposal_ctx.contains(ProposalContext::ENCRYPTED) {
+        let timer = tikv_util::time::Instant::now_coarse();
         let encryption_header = data.get_u32();
         let encryption_key = encryption_key
             .unwrap()
@@ -243,6 +246,11 @@ pub fn parse_raft_cmd(
             .unwrap();
         decryption_buf.truncate(0);
         encryption_key.decrypt(data, tag.id_ver.id(), entry.index as u32, decryption_buf);
+        if !encryption_key.is_noop() {
+            RAFT_ENTRY_CRYPT_DURATION
+                .decrypt
+                .observe(timer.saturating_elapsed().as_secs_f64());
+        }
         parse_data_at(decryption_buf, index, tag)
     } else {
         parse_data_at(data, index, tag)

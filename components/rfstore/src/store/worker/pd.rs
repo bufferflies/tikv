@@ -1011,7 +1011,10 @@ impl PdRunner {
                 {
                     Ok(metas) => metas,
                     Err(e) => {
-                        warn!("failed to prepare/persist CMEK encryption metas"; "err" => ?e);
+                        warn!(
+                            "failed to prepare/persist CMEK encryption metas";
+                            "err" => format_args!("{:#}", e),
+                        );
                         return;
                     }
                 };
@@ -2385,7 +2388,7 @@ pub async fn prepare_and_persist_encryption_metas(
     pd: &Arc<dyn PdClient>,
     dfs: Arc<dyn kvengine::dfs::Dfs>,
     encryption_cfgs: &Vec<(u32, KeyspaceEncryptionConfig)>,
-) -> Result<Vec<kvenginepb::EncryptionMeta>, String> {
+) -> Result<Vec<kvenginepb::EncryptionMeta>> {
     if encryption_cfgs.is_empty() {
         return Ok(Vec::new());
     }
@@ -2399,7 +2402,7 @@ pub async fn prepare_and_persist_encryption_metas(
     let tso = match pd.batch_get_tso(count as u32).await {
         Ok(tso) => tso,
         Err(e) => {
-            return Err(format!("failed to get tso for encryption keys: {}", e));
+            return Err(anyhow::Error::new(e)).context("failed to get tso for encryption keys");
         }
     };
     let first_file_id = tso.into_inner() - count as u64 + 1;
@@ -2419,30 +2422,27 @@ pub async fn prepare_and_persist_encryption_metas(
         let file_id = meta.current.as_ref().unwrap().get_file_id();
         let dfs_clone = dfs.clone();
         let content = meta.write_to_bytes().unwrap();
-        let res = rt.spawn(async move { dfs_clone.create(file_id, content.into(), opts).await });
-        match res.await {
-            Ok(Ok(())) => info!(
-                "persisted CMEK encryption meta file in S3";
-                "file_id" => file_id,
-                "content" => format!("{:#?}", meta),
-            ),
-            Ok(Err(e)) => {
-                return Err(format!("failed to create file in S3: {}", e));
-            }
-            Err(e) => {
-                return Err(format!("failed Tokio join error when writing to S3: {}", e));
-            }
-        }
+        rt.spawn(async move { dfs_clone.create(file_id, content.into(), opts).await })
+            .await
+            .context("tokio join error when writing to S3")?
+            .context("failed to create file in S3")?;
+        info!(
+            "persisted CMEK encryption meta file in S3";
+            "file_id" => file_id,
+            "content" => format!("{:#?}", meta),
+        )
     }
     Ok(encryption_metas)
 }
+
+use anyhow::{Context, Result};
 
 pub async fn build_encryption_meta(
     keyspace_id: u32,
     file_id: u64,
     cfg: &KeyspaceEncryptionConfig,
     rt: &tokio::runtime::Runtime,
-) -> Result<kvenginepb::EncryptionMeta, String> {
+) -> Result<kvenginepb::EncryptionMeta> {
     let master_key_config = MasterKeyConfig {
         key_id: cfg.cmek_id.clone().unwrap_or_default(),
         vendor: cfg.vendor.clone().unwrap_or_default(),
@@ -2451,51 +2451,43 @@ pub async fn build_encryption_meta(
         cipher_text: "".into(),
     };
     let cfg = master_key_config.clone();
-    let res = rt
+
+    let (master_key, encrypted_master_key) = rt
         .spawn(async move { cfg.generate_new_master_key().await })
-        .await;
-    match res {
-        Ok(Ok((master_key, encrypted_master_key))) => {
-            info!(
-                "generated CMEK master key for keyspace";
-                "keyspace_id" => keyspace_id,
-            );
+        .await
+        .context("tokio join error during master key generation")?
+        .with_context(|| format!("failed to generate master key, keyspace_id={}", keyspace_id))?;
 
-            let data_key = master_key.generate_encryption_key();
-            let encrypted_data_key = data_key.export();
-            let data_key_id = data_key.get_key_id();
+    info!(
+        "generated CMEK master key for keyspace";
+        "keyspace_id" => keyspace_id,
+    );
 
-            let mut meta = kvenginepb::EncryptionMeta::default();
-            meta.keyspace_id = keyspace_id;
-            // Current encryption epoch
-            meta.mut_current().set_file_id(file_id);
-            meta.mut_current().set_data_key_id(data_key_id);
-            meta.mut_current()
-                .set_created_at(tikv_util::time::UnixSecs::now().into_inner());
-            // Master key
-            let mut master_key = kvenginepb::MasterKey::default();
-            master_key.set_cmek_id(master_key_config.key_id.clone());
-            master_key.set_vendor(master_key_config.vendor.clone());
-            master_key.set_region(master_key_config.region.clone());
-            master_key.set_endpoint(master_key_config.endpoint.clone());
-            master_key.set_ciphertext(encrypted_master_key.to_vec());
-            meta.set_master_key(master_key);
-            // Data key map.
-            let mut data_key = kvenginepb::DataKey::new();
-            data_key.set_ciphertext(encrypted_data_key);
-            meta.mut_data_keys().insert(data_key_id, data_key);
+    let data_key = master_key.generate_encryption_key();
+    let encrypted_data_key = data_key.export();
+    let data_key_id = data_key.get_key_id();
 
-            Ok(meta)
-        }
-        Ok(Err(e)) => Err(format!(
-            "failed to generate master key, keyspace_id={} {}",
-            keyspace_id, e
-        )),
-        Err(e) => Err(format!(
-            "tokio join error during master key generation: {}",
-            e
-        )),
-    }
+    let mut meta = kvenginepb::EncryptionMeta::default();
+    meta.keyspace_id = keyspace_id;
+    // Current encryption epoch
+    meta.mut_current().set_file_id(file_id);
+    meta.mut_current().set_data_key_id(data_key_id);
+    meta.mut_current()
+        .set_created_at(tikv_util::time::UnixSecs::now().into_inner());
+    // Master key
+    let mut master_key = kvenginepb::MasterKey::default();
+    master_key.set_cmek_id(master_key_config.key_id.clone());
+    master_key.set_vendor(master_key_config.vendor.clone());
+    master_key.set_region(master_key_config.region.clone());
+    master_key.set_endpoint(master_key_config.endpoint.clone());
+    master_key.set_ciphertext(encrypted_master_key.to_vec());
+    meta.set_master_key(master_key);
+    // Data key map.
+    let mut data_key = kvenginepb::DataKey::new();
+    data_key.set_ciphertext(encrypted_data_key);
+    meta.mut_data_keys().insert(data_key_id, data_key);
+
+    Ok(meta)
 }
 
 #[cfg(test)]

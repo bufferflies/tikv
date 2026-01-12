@@ -288,6 +288,7 @@ impl Builder {
         block_builder: &BlockBuilder,
         data_buf: &mut Vec<u8>,
     ) {
+        let timer = tikv_util::time::Instant::now_coarse();
         for (i, addr) in block_builder.block_addrs.iter().enumerate() {
             let start = addr.curr_off as usize;
             let end = if i + 1 < block_builder.block_addrs.len() {
@@ -297,6 +298,11 @@ impl Builder {
             };
             let data = &block_builder.buf[start..end];
             encryption_key.encrypt(data, addr.origin_fid, addr.curr_off + base_off, data_buf);
+        }
+        if !encryption_key.is_noop() {
+            crate::metrics::ENGINE_SST_CRYPT_DURATION_STATIC
+                .encrypt_data_blocks
+                .observe(timer.saturating_elapsed().as_secs_f64());
         }
     }
 

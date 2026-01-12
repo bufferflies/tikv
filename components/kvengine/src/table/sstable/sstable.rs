@@ -20,6 +20,7 @@ use xorf::{BinaryFuse8, Filter};
 use super::{builder::*, iterator::TableIterator};
 use crate::{
     ia::types::FileSegmentIdent,
+    metrics::ENGINE_SST_CRYPT_DURATION_STATIC,
     next_version, next_version_async,
     table::{
         file::{File, TtlCache},
@@ -515,6 +516,7 @@ impl SsTableCore {
             let mut raw_block = self.file.read(addr.curr_off as u64, length).await?;
             if let Some(encryption_key) = &self.encryption_key {
                 assert_eq!(self.encryption_ver, encryption_key.encryption_header());
+                let timer = tikv_util::time::Instant::now_coarse();
                 let mut block = Vec::with_capacity(length + encryption_key.encryption_block_size());
                 encryption_key.decrypt(
                     raw_block.chunk(),
@@ -522,6 +524,11 @@ impl SsTableCore {
                     addr.curr_off,
                     &mut block,
                 );
+                if !encryption_key.is_noop() {
+                    ENGINE_SST_CRYPT_DURATION_STATIC
+                        .decrypt_data_block
+                        .observe(timer.saturating_elapsed().as_secs_f64());
+                }
                 raw_block = Bytes::from(block)
             }
             self.validate_checksum_with_fix(raw_block.chunk())?;
@@ -534,8 +541,14 @@ impl SsTableCore {
             self.file
                 .read_at(decryption_buf, addr.curr_off as u64)
                 .await?;
+            let timer = tikv_util::time::Instant::now_coarse();
             buf.truncate(0);
             encryption_key.decrypt(decryption_buf, addr.origin_fid, addr.curr_off, buf);
+            if !encryption_key.is_noop() {
+                ENGINE_SST_CRYPT_DURATION_STATIC
+                    .decrypt_data_block
+                    .observe(timer.saturating_elapsed().as_secs_f64());
+            }
         } else {
             self.file.read_at(buf, addr.curr_off as u64).await?;
         }

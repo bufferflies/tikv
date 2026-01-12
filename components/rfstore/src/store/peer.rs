@@ -70,7 +70,11 @@ use txn_types::Key;
 use uuid::Uuid;
 
 use super::*;
-use crate::{errors::*, store::metrics::STORE_RAFT_ENABLE_UNPERSISTED_APPLY_GAUGE, RaftRouter};
+use crate::{
+    errors::*,
+    store::metrics::{RAFT_ENTRY_CRYPT_DURATION, STORE_RAFT_ENABLE_UNPERSISTED_APPLY_GAUGE},
+    RaftRouter,
+};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const MAX_COMMITTED_SIZE_PER_READY: u64 = 16 * 1024 * 1024;
@@ -3676,10 +3680,17 @@ impl Peer {
             let buf = &mut self.encryption_buf;
             buf.truncate(0);
             req.write_to_vec(buf)?;
+
+            let timer = tikv_util::time::Instant::now_coarse();
             let mut data =
                 Vec::with_capacity(4 + buf.len() + encryption_key.encryption_block_size());
             data.put_u32(encryption_key.encryption_header());
             encryption_key.encrypt(buf, self.region_id, propose_index as u32, &mut data);
+            if !encryption_key.is_noop() {
+                RAFT_ENTRY_CRYPT_DURATION
+                    .encrypt
+                    .observe(timer.saturating_elapsed().as_secs_f64());
+            }
             data
         } else {
             req.write_to_bytes()?

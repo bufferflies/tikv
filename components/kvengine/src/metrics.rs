@@ -156,6 +156,15 @@ make_auto_flush_static_metric! {
     pub struct SeekDurationVec: LocalHistogram {
         "type" => SeekType,
     }
+
+    pub label_enum SSTCryptType {
+        encrypt_data_blocks,
+        decrypt_data_block,
+    }
+
+    pub struct SSTCryptDurationVec: LocalHistogram {
+        "type" => SSTCryptType,
+    }
 }
 
 lazy_static! {
@@ -467,6 +476,16 @@ lazy_static! {
         "kv_engine_prepare_use_local_file",
         "Total number local file hit during preparing changeset"
     ).unwrap();
+
+    pub static ref ENGINE_SST_CRYPT_DURATION_VEC: HistogramVec = register_histogram_vec!(
+        "kv_engine_sst_crypt_duration_seconds",
+        "Bucketed histogram of KV Engine SST encryption/decryption duration",
+        &["type"],
+        exponential_buckets(0.00005, 1.8, 26).unwrap()
+    ).unwrap();
+
+    pub static ref ENGINE_SST_CRYPT_DURATION_STATIC: SSTCryptDurationVec =
+        auto_flush_from!(ENGINE_SST_CRYPT_DURATION_VEC, SSTCryptDurationVec);
 }
 
 pub(crate) fn elapsed_secs(t: Instant) -> f64 {

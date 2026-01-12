@@ -16,6 +16,15 @@ make_auto_flush_static_metric! {
     pub struct RaftEntryFetches : LocalIntCounter {
         "type" => RaftEntryFetchKind,
     }
+
+    pub label_enum RaftEntryCryptType {
+        encrypt,
+        decrypt,
+    }
+
+    pub struct RaftEntryCryptDurationHistogram : LocalHistogram {
+        "type" => RaftEntryCryptType,
+    }
 }
 
 make_static_metric! {
@@ -113,6 +122,14 @@ lazy_static! {
             exponential_buckets(0.0005, 2.0, 21).unwrap()  // 500us ~ 8.7m
         ).unwrap();
 
+    pub static ref RAFT_ENTRY_CRYPT_DURATION_VEC: HistogramVec = register_histogram_vec!(
+        "rfstore_raft_entry_crypt_duration_seconds",
+        "Bucketed histogram of raft entry encryption/decryption duration.",
+        &["type"],
+        exponential_buckets(0.00001, 2.0, 26).unwrap()
+    ).unwrap();
+    pub static ref RAFT_ENTRY_CRYPT_DURATION: RaftEntryCryptDurationHistogram =
+        auto_flush_from!(RAFT_ENTRY_CRYPT_DURATION_VEC, RaftEntryCryptDurationHistogram);
 
     pub static ref STORE_BUSY_ON_APPLY_REGIONS_GAUGE_VEC: StoreBusyOnApplyRegionsGaugeVec =
         register_static_int_gauge_vec!(

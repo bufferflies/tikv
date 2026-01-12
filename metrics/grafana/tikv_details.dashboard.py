@@ -8368,24 +8368,24 @@ def Encryption() -> RowPanel:
     layout.row(
         [
             graph_panel(
-                title="Encryption data keys",
-                description="Total number of encryption data keys in use",
+                title="Encrypted region count",
+                description="Number of regions with encryption enabled",
                 targets=[
                     target(
                         expr=expr_sum(
-                            "tikv_encryption_data_key_storage_total",
+                            "tikv_encryption_region_count",
                         ),
                         legend_format="{{instance}}",
                     ),
                 ],
             ),
             graph_panel(
-                title="Encrypted files",
-                description="Number of files being encrypted",
+                title="Encrypted keyspace count",
+                description="Number of keyspaces with encryption enabled",
                 targets=[
                     target(
                         expr=expr_sum(
-                            "tikv_encryption_file_num",
+                            "tikv_encryption_keyspace_active_count",
                         ),
                         legend_format="{{instance}}",
                     ),
@@ -8395,69 +8395,60 @@ def Encryption() -> RowPanel:
     )
     layout.row(
         [
-            graph_panel(
-                title="Encryption initialized",
-                description="Flag to indicate if encryption is initialized",
-                targets=[
-                    target(
-                        expr=expr_simple(
-                            "tikv_encryption_is_initialized",
-                        ),
-                        legend_format="{{instance}}",
-                    ),
-                ],
-            ),
-            graph_panel(
-                title="Encryption meta files size",
-                description="Total size of encryption meta files",
-                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
-                targets=[
-                    target(
-                        expr=expr_simple(
-                            "tikv_encryption_meta_file_size_bytes",
-                        ),
-                        legend_format="{{name}}-{{instance}}",
-                    ),
-                ],
-            ),
-        ]
-    )
-    layout.row(
-        [
-            graph_panel(
-                title="Encrypt/decrypt data nanos",
-                description="",
-                targets=[
-                    target(
-                        expr=expr_sum_rate(
-                            "tikv_coprocessor_rocksdb_perf",
-                            label_selectors=[
-                                'metric="encrypt_data_nanos"',
-                            ],
-                            by_labels=["req"],
-                        ),
-                        legend_format="encrypt-{{req}}",
-                        additional_groupby=True,
-                    ),
-                    target(
-                        expr=expr_sum_rate(
-                            "tikv_coprocessor_rocksdb_perf",
-                            label_selectors=[
-                                'metric="decrypt_data_nanos"',
-                            ],
-                            by_labels=["req"],
-                        ),
-                        legend_format="decrypt-{{req}}",
-                        additional_groupby=True,
-                    ),
-                ],
+            graph_panel_histogram_quantiles(
+                title="Raft log encrypt/decrypt duration",
+                description="Time spent encrypting or decrypting raft log entries in the write path.",
+                metric="rfstore_raft_entry_crypt_duration_seconds",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                by_labels=["type"],
+                hide_p9999=True,
+                hide_avg=True,
             ),
             graph_panel_histogram_quantiles(
-                title="Read/write encryption meta duration",
-                description="Writing or reading file duration (second)",
+                title="KV engine SST encrypt/decrypt duration",
+                description="Time spent encrypting or decrypting SST data in the KV engine.",
+                metric="kv_engine_sst_crypt_duration_seconds",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
-                metric="tikv_encryption_write_read_file_duration_seconds",
-                hide_count=True,
+                by_labels=["type"],
+                hide_p9999=True,
+                hide_avg=True,
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel_histogram_quantiles(
+                title="Master Key Generate/Decrypt duration (calls KMS)",
+                description="Master key generating or decrypting duration, including KMS round trips.",
+                metric="tikv_master_key_ops_duration_seconds",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                by_labels=["type"],
+                hide_p9999=True,
+                hide_avg=True,
+            ),
+            graph_panel_histogram_quantiles(
+                title="Encryption Key Read Duration",
+                description="Encryption Key read duration.",
+                metric="tikv_encryption_key_get_duration",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                hide_p9999=True,
+                hide_avg=True,
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Encrypted key switch count",
+                description="Number of times TiKV switches to a previous data key to decrypt older data.",
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "tikv_encryption_key_switch_count",
+                        ),
+                        legend_format="{{instance}}",
+                    ),
+                ],
             ),
         ]
     )

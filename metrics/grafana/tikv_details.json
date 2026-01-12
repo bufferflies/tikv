@@ -75416,7 +75416,7 @@
           "bars": false,
           "cacheTimeout": null,
           "datasource": "${DS_TEST-CLUSTER}",
-          "description": "Total number of encryption data keys in use",
+          "description": "Number of regions with encryption enabled",
           "editable": true,
           "error": false,
           "fieldConfig": {
@@ -75486,7 +75486,7 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum((\n    tikv_encryption_data_key_storage_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n)) by (instance) ",
+              "expr": "sum((\n    tikv_encryption_region_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n)) by (instance) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -75494,7 +75494,7 @@
               "intervalFactor": 1,
               "legendFormat": "{{instance}}",
               "metric": "",
-              "query": "sum((\n    tikv_encryption_data_key_storage_total\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n)) by (instance) ",
+              "query": "sum((\n    tikv_encryption_region_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n)) by (instance) ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -75503,7 +75503,7 @@
           "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
-          "title": "Encryption data keys",
+          "title": "Encrypted region count",
           "tooltip": {
             "msResolution": true,
             "shared": true,
@@ -75549,7 +75549,7 @@
           "bars": false,
           "cacheTimeout": null,
           "datasource": "${DS_TEST-CLUSTER}",
-          "description": "Number of files being encrypted",
+          "description": "Number of keyspaces with encryption enabled",
           "editable": true,
           "error": false,
           "fieldConfig": {
@@ -75619,7 +75619,7 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum((\n    tikv_encryption_file_num\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n)) by (instance) ",
+              "expr": "sum((\n    tikv_encryption_keyspace_active_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n)) by (instance) ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -75627,7 +75627,7 @@
               "intervalFactor": 1,
               "legendFormat": "{{instance}}",
               "metric": "",
-              "query": "sum((\n    tikv_encryption_file_num\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n)) by (instance) ",
+              "query": "sum((\n    tikv_encryption_keyspace_active_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n)) by (instance) ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -75636,7 +75636,7 @@
           "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
-          "title": "Encrypted files",
+          "title": "Encrypted keyspace count",
           "tooltip": {
             "msResolution": true,
             "shared": true,
@@ -75682,7 +75682,7 @@
           "bars": false,
           "cacheTimeout": null,
           "datasource": "${DS_TEST-CLUSTER}",
-          "description": "Flag to indicate if encryption is initialized",
+          "description": "Time spent encrypting or decrypting raft log entries in the write path.",
           "editable": true,
           "error": false,
           "fieldConfig": {
@@ -75745,22 +75745,90 @@
           "renderer": "flot",
           "repeat": null,
           "repeatDirection": null,
-          "seriesOverrides": [],
+          "seriesOverrides": [
+            {
+              "alias": "/^count/",
+              "bars": false,
+              "dashLength": 1,
+              "dashes": true,
+              "fill": 2,
+              "fillBelowTo": null,
+              "lines": true,
+              "spaceLength": 1,
+              "transform": "negative-Y",
+              "yaxis": 2,
+              "zindex": -3
+            },
+            {
+              "alias": "/^avg/",
+              "bars": false,
+              "fill": 7,
+              "fillBelowTo": null,
+              "lines": true,
+              "yaxis": 1,
+              "zindex": 0
+            }
+          ],
           "span": null,
           "stack": false,
           "steppedLine": false,
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "((\n    tikv_encryption_is_initialized\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n))  ",
+              "expr": "histogram_quantile(0.9999,(\n    sum(rate(\n    rfstore_raft_entry_crypt_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
+              "format": "time_series",
+              "hide": true,
+              "instant": false,
+              "interval": "",
+              "intervalFactor": 1,
+              "legendFormat": "99.99%-{{type}} {{$additional_groupby}}",
+              "metric": "",
+              "query": "histogram_quantile(0.9999,(\n    sum(rate(\n    rfstore_raft_entry_crypt_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
+              "refId": "",
+              "step": 10,
+              "target": ""
+            },
+            {
+              "datasource": "${DS_TEST-CLUSTER}",
+              "expr": "histogram_quantile(0.99,(\n    sum(rate(\n    rfstore_raft_entry_crypt_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "{{instance}}",
+              "legendFormat": "99%-{{type}} {{$additional_groupby}}",
               "metric": "",
-              "query": "((\n    tikv_encryption_is_initialized\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n))  ",
+              "query": "histogram_quantile(0.99,(\n    sum(rate(\n    rfstore_raft_entry_crypt_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
+              "refId": "",
+              "step": 10,
+              "target": ""
+            },
+            {
+              "datasource": "${DS_TEST-CLUSTER}",
+              "expr": "(sum(rate(\n    rfstore_raft_entry_crypt_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby)  / sum(rate(\n    rfstore_raft_entry_crypt_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) )",
+              "format": "time_series",
+              "hide": true,
+              "instant": false,
+              "interval": "",
+              "intervalFactor": 1,
+              "legendFormat": "avg-{{type}} {{$additional_groupby}}",
+              "metric": "",
+              "query": "(sum(rate(\n    rfstore_raft_entry_crypt_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby)  / sum(rate(\n    rfstore_raft_entry_crypt_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) )",
+              "refId": "",
+              "step": 10,
+              "target": ""
+            },
+            {
+              "datasource": "${DS_TEST-CLUSTER}",
+              "expr": "sum(rate(\n    rfstore_raft_entry_crypt_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
+              "format": "time_series",
+              "hide": false,
+              "instant": false,
+              "interval": "",
+              "intervalFactor": 1,
+              "legendFormat": "count-{{type}} {{$additional_groupby}}",
+              "metric": "",
+              "query": "sum(rate(\n    rfstore_raft_entry_crypt_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -75769,7 +75837,7 @@
           "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
-          "title": "Encryption initialized",
+          "title": "Raft log encrypt/decrypt duration",
           "tooltip": {
             "msResolution": true,
             "shared": true,
@@ -75788,7 +75856,7 @@
           "yaxes": [
             {
               "decimals": null,
-              "format": "none",
+              "format": "s",
               "label": null,
               "logBase": 1,
               "max": null,
@@ -75815,7 +75883,7 @@
           "bars": false,
           "cacheTimeout": null,
           "datasource": "${DS_TEST-CLUSTER}",
-          "description": "Total size of encryption meta files",
+          "description": "Time spent encrypting or decrypting SST data in the KV engine.",
           "editable": true,
           "error": false,
           "fieldConfig": {
@@ -75878,22 +75946,90 @@
           "renderer": "flot",
           "repeat": null,
           "repeatDirection": null,
-          "seriesOverrides": [],
+          "seriesOverrides": [
+            {
+              "alias": "/^count/",
+              "bars": false,
+              "dashLength": 1,
+              "dashes": true,
+              "fill": 2,
+              "fillBelowTo": null,
+              "lines": true,
+              "spaceLength": 1,
+              "transform": "negative-Y",
+              "yaxis": 2,
+              "zindex": -3
+            },
+            {
+              "alias": "/^avg/",
+              "bars": false,
+              "fill": 7,
+              "fillBelowTo": null,
+              "lines": true,
+              "yaxis": 1,
+              "zindex": 0
+            }
+          ],
           "span": null,
           "stack": false,
           "steppedLine": false,
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "((\n    tikv_encryption_meta_file_size_bytes\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n))  ",
+              "expr": "histogram_quantile(0.9999,(\n    sum(rate(\n    kv_engine_sst_crypt_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
+              "format": "time_series",
+              "hide": true,
+              "instant": false,
+              "interval": "",
+              "intervalFactor": 1,
+              "legendFormat": "99.99%-{{type}} {{$additional_groupby}}",
+              "metric": "",
+              "query": "histogram_quantile(0.9999,(\n    sum(rate(\n    kv_engine_sst_crypt_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
+              "refId": "",
+              "step": 10,
+              "target": ""
+            },
+            {
+              "datasource": "${DS_TEST-CLUSTER}",
+              "expr": "histogram_quantile(0.99,(\n    sum(rate(\n    kv_engine_sst_crypt_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "{{name}}-{{instance}}",
+              "legendFormat": "99%-{{type}} {{$additional_groupby}}",
               "metric": "",
-              "query": "((\n    tikv_encryption_meta_file_size_bytes\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n))  ",
+              "query": "histogram_quantile(0.99,(\n    sum(rate(\n    kv_engine_sst_crypt_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
+              "refId": "",
+              "step": 10,
+              "target": ""
+            },
+            {
+              "datasource": "${DS_TEST-CLUSTER}",
+              "expr": "(sum(rate(\n    kv_engine_sst_crypt_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby)  / sum(rate(\n    kv_engine_sst_crypt_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) )",
+              "format": "time_series",
+              "hide": true,
+              "instant": false,
+              "interval": "",
+              "intervalFactor": 1,
+              "legendFormat": "avg-{{type}} {{$additional_groupby}}",
+              "metric": "",
+              "query": "(sum(rate(\n    kv_engine_sst_crypt_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby)  / sum(rate(\n    kv_engine_sst_crypt_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) )",
+              "refId": "",
+              "step": 10,
+              "target": ""
+            },
+            {
+              "datasource": "${DS_TEST-CLUSTER}",
+              "expr": "sum(rate(\n    kv_engine_sst_crypt_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
+              "format": "time_series",
+              "hide": false,
+              "instant": false,
+              "interval": "",
+              "intervalFactor": 1,
+              "legendFormat": "count-{{type}} {{$additional_groupby}}",
+              "metric": "",
+              "query": "sum(rate(\n    kv_engine_sst_crypt_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -75902,7 +76038,7 @@
           "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
-          "title": "Encryption meta files size",
+          "title": "KV engine SST encrypt/decrypt duration",
           "tooltip": {
             "msResolution": true,
             "shared": true,
@@ -75921,7 +76057,7 @@
           "yaxes": [
             {
               "decimals": null,
-              "format": "bytes",
+              "format": "s",
               "label": null,
               "logBase": 1,
               "max": null,
@@ -75948,7 +76084,7 @@
           "bars": false,
           "cacheTimeout": null,
           "datasource": "${DS_TEST-CLUSTER}",
-          "description": "",
+          "description": "Master key generating or decrypting duration, including KMS round trips.",
           "editable": true,
           "error": false,
           "fieldConfig": {
@@ -76011,37 +76147,90 @@
           "renderer": "flot",
           "repeat": null,
           "repeatDirection": null,
-          "seriesOverrides": [],
+          "seriesOverrides": [
+            {
+              "alias": "/^count/",
+              "bars": false,
+              "dashLength": 1,
+              "dashes": true,
+              "fill": 2,
+              "fillBelowTo": null,
+              "lines": true,
+              "spaceLength": 1,
+              "transform": "negative-Y",
+              "yaxis": 2,
+              "zindex": -3
+            },
+            {
+              "alias": "/^avg/",
+              "bars": false,
+              "fill": 7,
+              "fillBelowTo": null,
+              "lines": true,
+              "yaxis": 1,
+              "zindex": 0
+            }
+          ],
           "span": null,
           "stack": false,
           "steppedLine": false,
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum(rate(\n    tikv_coprocessor_rocksdb_perf\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\",metric=\"encrypt_data_nanos\"}\n    [$__rate_interval]\n)) by (req, $additional_groupby) ",
+              "expr": "histogram_quantile(0.9999,(\n    sum(rate(\n    tikv_master_key_ops_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
               "format": "time_series",
-              "hide": false,
+              "hide": true,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "encrypt-{{req}} {{$additional_groupby}}",
+              "legendFormat": "99.99%-{{type}} {{$additional_groupby}}",
               "metric": "",
-              "query": "sum(rate(\n    tikv_coprocessor_rocksdb_perf\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\",metric=\"encrypt_data_nanos\"}\n    [$__rate_interval]\n)) by (req, $additional_groupby) ",
+              "query": "histogram_quantile(0.9999,(\n    sum(rate(\n    tikv_master_key_ops_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
               "refId": "",
               "step": 10,
               "target": ""
             },
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum(rate(\n    tikv_coprocessor_rocksdb_perf\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\",metric=\"decrypt_data_nanos\"}\n    [$__rate_interval]\n)) by (req, $additional_groupby) ",
+              "expr": "histogram_quantile(0.99,(\n    sum(rate(\n    tikv_master_key_ops_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
               "format": "time_series",
               "hide": false,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
-              "legendFormat": "decrypt-{{req}} {{$additional_groupby}}",
+              "legendFormat": "99%-{{type}} {{$additional_groupby}}",
               "metric": "",
-              "query": "sum(rate(\n    tikv_coprocessor_rocksdb_perf\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\",metric=\"decrypt_data_nanos\"}\n    [$__rate_interval]\n)) by (req, $additional_groupby) ",
+              "query": "histogram_quantile(0.99,(\n    sum(rate(\n    tikv_master_key_ops_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, le, $additional_groupby) \n    \n    \n))  ",
+              "refId": "",
+              "step": 10,
+              "target": ""
+            },
+            {
+              "datasource": "${DS_TEST-CLUSTER}",
+              "expr": "(sum(rate(\n    tikv_master_key_ops_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby)  / sum(rate(\n    tikv_master_key_ops_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) )",
+              "format": "time_series",
+              "hide": true,
+              "instant": false,
+              "interval": "",
+              "intervalFactor": 1,
+              "legendFormat": "avg-{{type}} {{$additional_groupby}}",
+              "metric": "",
+              "query": "(sum(rate(\n    tikv_master_key_ops_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby)  / sum(rate(\n    tikv_master_key_ops_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) )",
+              "refId": "",
+              "step": 10,
+              "target": ""
+            },
+            {
+              "datasource": "${DS_TEST-CLUSTER}",
+              "expr": "sum(rate(\n    tikv_master_key_ops_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
+              "format": "time_series",
+              "hide": false,
+              "instant": false,
+              "interval": "",
+              "intervalFactor": 1,
+              "legendFormat": "count-{{type}} {{$additional_groupby}}",
+              "metric": "",
+              "query": "sum(rate(\n    tikv_master_key_ops_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (type, $additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -76050,7 +76239,7 @@
           "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
-          "title": "Encrypt/decrypt data nanos",
+          "title": "Master Key Generate/Decrypt duration (calls KMS)",
           "tooltip": {
             "msResolution": true,
             "shared": true,
@@ -76069,7 +76258,7 @@
           "yaxes": [
             {
               "decimals": null,
-              "format": "none",
+              "format": "s",
               "label": null,
               "logBase": 1,
               "max": null,
@@ -76096,7 +76285,7 @@
           "bars": false,
           "cacheTimeout": null,
           "datasource": "${DS_TEST-CLUSTER}",
-          "description": "Writing or reading file duration (second)",
+          "description": "Encryption Key read duration.",
           "editable": true,
           "error": false,
           "fieldConfig": {
@@ -76189,22 +76378,22 @@
           "targets": [
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "histogram_quantile(0.9999,(\n    sum(rate(\n    tikv_encryption_write_read_file_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
+              "expr": "histogram_quantile(0.9999,(\n    sum(rate(\n    tikv_encryption_key_get_duration_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
               "format": "time_series",
-              "hide": false,
+              "hide": true,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
               "legendFormat": "99.99% {{$additional_groupby}}",
               "metric": "",
-              "query": "histogram_quantile(0.9999,(\n    sum(rate(\n    tikv_encryption_write_read_file_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
+              "query": "histogram_quantile(0.9999,(\n    sum(rate(\n    tikv_encryption_key_get_duration_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
               "refId": "",
               "step": 10,
               "target": ""
             },
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "histogram_quantile(0.99,(\n    sum(rate(\n    tikv_encryption_write_read_file_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
+              "expr": "histogram_quantile(0.99,(\n    sum(rate(\n    tikv_encryption_key_get_duration_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
               "format": "time_series",
               "hide": false,
               "instant": false,
@@ -76212,37 +76401,37 @@
               "intervalFactor": 1,
               "legendFormat": "99% {{$additional_groupby}}",
               "metric": "",
-              "query": "histogram_quantile(0.99,(\n    sum(rate(\n    tikv_encryption_write_read_file_duration_seconds_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
+              "query": "histogram_quantile(0.99,(\n    sum(rate(\n    tikv_encryption_key_get_duration_bucket\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by (le, $additional_groupby) \n    \n    \n))  ",
               "refId": "",
               "step": 10,
               "target": ""
             },
             {
               "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "(sum(rate(\n    tikv_encryption_write_read_file_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby)  / sum(rate(\n    tikv_encryption_write_read_file_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby) )",
-              "format": "time_series",
-              "hide": false,
-              "instant": false,
-              "interval": "",
-              "intervalFactor": 1,
-              "legendFormat": "avg {{$additional_groupby}}",
-              "metric": "",
-              "query": "(sum(rate(\n    tikv_encryption_write_read_file_duration_seconds_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby)  / sum(rate(\n    tikv_encryption_write_read_file_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby) )",
-              "refId": "",
-              "step": 10,
-              "target": ""
-            },
-            {
-              "datasource": "${DS_TEST-CLUSTER}",
-              "expr": "sum(rate(\n    tikv_encryption_write_read_file_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
+              "expr": "(sum(rate(\n    tikv_encryption_key_get_duration_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby)  / sum(rate(\n    tikv_encryption_key_get_duration_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby) )",
               "format": "time_series",
               "hide": true,
               "instant": false,
               "interval": "",
               "intervalFactor": 1,
+              "legendFormat": "avg {{$additional_groupby}}",
+              "metric": "",
+              "query": "(sum(rate(\n    tikv_encryption_key_get_duration_sum\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby)  / sum(rate(\n    tikv_encryption_key_get_duration_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby) )",
+              "refId": "",
+              "step": 10,
+              "target": ""
+            },
+            {
+              "datasource": "${DS_TEST-CLUSTER}",
+              "expr": "sum(rate(\n    tikv_encryption_key_get_duration_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
+              "format": "time_series",
+              "hide": false,
+              "instant": false,
+              "interval": "",
+              "intervalFactor": 1,
               "legendFormat": "count {{$additional_groupby}}",
               "metric": "",
-              "query": "sum(rate(\n    tikv_encryption_write_read_file_duration_seconds_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
+              "query": "sum(rate(\n    tikv_encryption_key_get_duration_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    [$__rate_interval]\n)) by ($additional_groupby) ",
               "refId": "",
               "step": 10,
               "target": ""
@@ -76251,7 +76440,7 @@
           "thresholds": [],
           "timeFrom": null,
           "timeShift": null,
-          "title": "Read/write encryption meta duration",
+          "title": "Encryption Key Read Duration",
           "tooltip": {
             "msResolution": true,
             "shared": true,
@@ -76271,6 +76460,139 @@
             {
               "decimals": null,
               "format": "s",
+              "label": null,
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            },
+            {
+              "decimals": null,
+              "format": "short",
+              "label": null,
+              "logBase": 1,
+              "max": null,
+              "min": null,
+              "show": true
+            }
+          ],
+          "yaxis": {
+            "align": false,
+            "alignLevel": 0
+          }
+        },
+        {
+          "aliasColors": {},
+          "bars": false,
+          "cacheTimeout": null,
+          "datasource": "${DS_TEST-CLUSTER}",
+          "description": "Number of times TiKV switches to a previous data key to decrypt older data.",
+          "editable": true,
+          "error": false,
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": []
+              }
+            }
+          },
+          "fill": 1,
+          "fillGradient": 1,
+          "grid": {
+            "threshold1": null,
+            "threshold1Color": "rgba(216, 200, 27, 0.27)",
+            "threshold2": null,
+            "threshold2Color": "rgba(234, 112, 112, 0.22)"
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 24,
+            "x": 0,
+            "y": 21
+          },
+          "height": null,
+          "hideTimeOverride": false,
+          "id": 569,
+          "interval": null,
+          "isNew": true,
+          "legend": {
+            "alignAsTable": true,
+            "avg": false,
+            "current": true,
+            "hideEmpty": true,
+            "hideZero": true,
+            "max": true,
+            "min": false,
+            "rightSide": true,
+            "show": true,
+            "sideWidth": null,
+            "sort": "max",
+            "sortDesc": true,
+            "total": false,
+            "values": true
+          },
+          "lines": true,
+          "linewidth": 1,
+          "links": [],
+          "maxDataPoints": null,
+          "maxPerRow": null,
+          "minSpan": null,
+          "nullPointMode": "null as zero",
+          "options": {
+            "alertThreshold": true,
+            "dataLinks": []
+          },
+          "percentage": false,
+          "pointradius": 5,
+          "points": false,
+          "renderer": "flot",
+          "repeat": null,
+          "repeatDirection": null,
+          "seriesOverrides": [],
+          "span": null,
+          "stack": false,
+          "steppedLine": false,
+          "targets": [
+            {
+              "datasource": "${DS_TEST-CLUSTER}",
+              "expr": "sum((\n    tikv_encryption_key_switch_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n)) by (instance) ",
+              "format": "time_series",
+              "hide": false,
+              "instant": false,
+              "interval": "",
+              "intervalFactor": 1,
+              "legendFormat": "{{instance}}",
+              "metric": "",
+              "query": "sum((\n    tikv_encryption_key_switch_count\n    {k8s_cluster=\"$k8s_cluster\",tidb_cluster=\"$tidb_cluster\",instance=~\"${instance:regex}\",instance=~\"${worker_instance:regex}\"}\n    \n)) by (instance) ",
+              "refId": "",
+              "step": 10,
+              "target": ""
+            }
+          ],
+          "thresholds": [],
+          "timeFrom": null,
+          "timeShift": null,
+          "title": "Encrypted key switch count",
+          "tooltip": {
+            "msResolution": true,
+            "shared": true,
+            "sort": 0,
+            "value_type": "individual"
+          },
+          "transformations": [],
+          "transparent": false,
+          "type": "graph",
+          "xaxis": {
+            "mode": "time",
+            "name": null,
+            "show": true,
+            "values": []
+          },
+          "yaxes": [
+            {
+              "decimals": null,
+              "format": "none",
               "label": null,
               "logBase": 1,
               "max": null,
@@ -76327,7 +76649,7 @@
       },
       "height": null,
       "hideTimeOverride": false,
-      "id": 569,
+      "id": 570,
       "interval": null,
       "links": [],
       "maxDataPoints": 100,
@@ -76366,7 +76688,7 @@
           },
           "height": null,
           "hideTimeOverride": false,
-          "id": 570,
+          "id": 571,
           "interval": null,
           "isNew": true,
           "legend": {
@@ -76499,7 +76821,7 @@
           },
           "height": null,
           "hideTimeOverride": false,
-          "id": 571,
+          "id": 572,
           "interval": null,
           "isNew": true,
           "legend": {
@@ -76632,7 +76954,7 @@
           },
           "height": null,
           "hideTimeOverride": false,
-          "id": 572,
+          "id": 573,
           "interval": null,
           "isNew": true,
           "legend": {
@@ -76765,7 +77087,7 @@
           },
           "height": null,
           "hideTimeOverride": false,
-          "id": 573,
+          "id": 574,
           "interval": null,
           "isNew": true,
           "legend": {
@@ -76898,7 +77220,7 @@
           },
           "height": null,
           "hideTimeOverride": false,
-          "id": 574,
+          "id": 575,
           "interval": null,
           "isNew": true,
           "legend": {
@@ -77095,7 +77417,7 @@
           },
           "height": null,
           "hideTimeOverride": false,
-          "id": 575,
+          "id": 576,
           "interval": null,
           "links": [],
           "maxDataPoints": 100,

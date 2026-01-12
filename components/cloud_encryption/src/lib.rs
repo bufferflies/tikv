@@ -1,5 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod metrics;
+
 use std::{
     ops::Deref,
     sync::{Arc, Mutex, RwLock},
@@ -20,7 +22,10 @@ use rand::RngCore;
 use serde_derive::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 use thiserror::Error;
+use tikv_util::{defer, info, time::Instant};
 use zeroize::Zeroize;
+
+use crate::metrics::*;
 
 type Hmac256 = Hmac<sha2::Sha256>;
 use kvproto::encryptionpb::MasterKeyKms;
@@ -41,6 +46,9 @@ pub const KEY_TYPE_AES_256_CTR: u8 = 2;
 const KEY_EXPORTED_SIZE: usize = 1 + 32;
 const ENCRYPTION_DATA_FORMAT: u8 = 1;
 
+// Next-gen key type that suggests no encryption is used.
+pub const KEY_TYPE_UNENCRYPTED: u8 = 3;
+
 pub type Result<T> = std::result::Result<T, EncryptionKeyError>;
 
 #[derive(Debug, Error)]
@@ -60,7 +68,7 @@ pub enum EncryptionKeyError {
     #[error("Unsupported KMS vendor: {0}")]
     UnsupportedVendor(String),
 
-    #[error("Cloud error: {0}")]
+    #[error(transparent)]
     Cloud(#[from] cloud::Error),
 }
 
@@ -114,6 +122,19 @@ impl EncryptionKey {
         }
     }
 
+    pub fn new_unencrypted_key() -> Self {
+        Self {
+            core: Arc::new(EncryptionKeyCore {
+                keyspace_id: None,
+                key_id: [0; 3],
+                key_type: KEY_TYPE_UNENCRYPTED,
+                cipher_text: vec![],
+                plain_text: vec![],
+                key_manager: None,
+            }),
+        }
+    }
+
     pub fn with_keyspace_id(&self, keyspace_id: u32) -> Self {
         EncryptionKey {
             core: Arc::new(self.core.with_keyspace_id(keyspace_id)),
@@ -132,6 +153,7 @@ impl EncryptionKey {
         if self.encryption_header() == encryption_header {
             Ok(self.clone())
         } else {
+            ENCRYPTION_KEY_SWITCH_COUNTER.inc();
             let m = self.key_manager.clone().unwrap();
             let key = m.get_data_key_by_header(
                 self.keyspace_id.expect("keyspace id should be set"),
@@ -175,6 +197,10 @@ pub struct EncryptionKeyCore {
 
 impl EncryptionKeyCore {
     pub fn encrypt(&self, data: &[u8], iv_high: u64, iv_low: u32, buf: &mut Vec<u8>) {
+        if self.key_type == KEY_TYPE_UNENCRYPTED {
+            buf.extend_from_slice(data);
+            return;
+        }
         let mut iv = [0u8; 16];
         iv[0..8].copy_from_slice(&iv_high.to_be_bytes());
         iv[8..12].copy_from_slice(&iv_low.to_be_bytes());
@@ -190,6 +216,10 @@ impl EncryptionKeyCore {
     }
 
     pub fn decrypt(&self, ciphertext: &[u8], iv_high: u64, iv_low: u32, buf: &mut Vec<u8>) {
+        if self.key_type == KEY_TYPE_UNENCRYPTED {
+            buf.extend_from_slice(ciphertext);
+            return;
+        }
         let mut iv = [0u8; 16];
         iv[0..8].copy_from_slice(&iv_high.to_be_bytes());
         iv[8..12].copy_from_slice(&iv_low.to_be_bytes());
@@ -220,8 +250,15 @@ impl EncryptionKeyCore {
                 data.extend_from_slice(&self.cipher_text);
                 data
             }
+            KEY_TYPE_UNENCRYPTED => vec![KEY_TYPE_UNENCRYPTED],
             _ => unreachable!(),
         }
+    }
+
+    /// Returns true if this key performs no encryption and passes data
+    /// through unchanged.
+    pub fn is_noop(&self) -> bool {
+        self.key_type == KEY_TYPE_UNENCRYPTED
     }
 
     // Transforms a legacy 64-byte encryption key into a 32-byte data key using
@@ -275,6 +312,7 @@ impl EncryptionKeyCore {
         match self.key_type {
             KEY_TYPE_AES_256_CTR_LEGACY => ENCRYPTION_DATA_FORMAT_LEGACY as u32,
             KEY_TYPE_AES_256_CTR => ((ENCRYPTION_DATA_FORMAT as u32) << 24) | self.get_key_id(),
+            KEY_TYPE_UNENCRYPTED => 0,
             _ => unreachable!(),
         }
     }
@@ -329,6 +367,10 @@ impl MasterKeyConfig {
     /// Generates a new master key and its encrypted form using the configured
     /// KMS vendor.
     pub async fn generate_new_master_key(&self) -> Result<(MasterKey, cloud::EncryptedKey)> {
+        let start = Instant::now_coarse();
+        defer! {
+            MASTER_KEY_OPS_DURATION.generate.observe(start.saturating_elapsed().as_secs_f64())
+        };
         let vendor = self.vendor.parse::<KmsVendor>();
         match vendor {
             Ok(KmsVendor::Aws) => {
@@ -362,7 +404,19 @@ impl MasterKeyConfig {
     }
 
     /// Decrypts the encrypted master key using the configured KMS vendor.
-    pub async fn decrypt(&self) -> Result<MasterKey> {
+    pub async fn decrypt(&self, is_legacy: bool) -> Result<MasterKey> {
+        let start = Instant::now_coarse();
+        defer!({
+            if !is_legacy {
+                let elapsed = start.saturating_elapsed().as_secs_f64();
+                info!(
+                    "[CMEK] decrypt master key took {}s, cmek_id={}, vendor={}",
+                    elapsed, self.key_id, self.vendor
+                );
+                MASTER_KEY_OPS_DURATION.decrypt.observe(elapsed);
+            }
+        });
+
         let vendor = self.vendor.parse::<KmsVendor>();
         match vendor {
             Ok(KmsVendor::Aws) => {
@@ -391,9 +445,14 @@ impl MasterKeyConfig {
                 Ok(MasterKey::new(&master_key))
             }
             _ => {
-                // use a fixed master key for test.
-                let master_key = vec![1u8; 32];
-                Ok(MasterKey::new(&master_key))
+                if is_legacy {
+                    // use a fixed master key for test.
+                    let master_key = vec![1u8; 32];
+                    Ok(MasterKey::new(&master_key))
+                } else {
+                    // For next-gen, reject unknown vendors.
+                    Err(EncryptionKeyError::UnsupportedVendor(self.vendor.clone()))
+                }
             }
         }
     }
@@ -461,11 +520,17 @@ impl MasterKeyCore {
         let expected_len = match key_type {
             KEY_TYPE_AES_256_CTR_LEGACY => KEY_EXPORTED_SIZE_LEGACY,
             KEY_TYPE_AES_256_CTR => KEY_EXPORTED_SIZE,
+            KEY_TYPE_UNENCRYPTED => 1,
             _ => return Err(EncryptionKeyError::InvalidKeyType(key_type)),
         };
         if expected_len != key_len {
             return Err(EncryptionKeyError::InvalidKeyLength { key_len, key_type });
         }
+
+        if key_type == KEY_TYPE_UNENCRYPTED {
+            return Ok(EncryptionKey::new_unencrypted_key());
+        }
+
         if key_type == KEY_TYPE_AES_256_CTR_LEGACY {
             let key_ver = exported.get_u32();
             assert!(key_ver == 0);
@@ -495,6 +560,7 @@ use protobuf::Message;
 struct EncryptionKeyRef {
     keyspace_id: u32,
     data_key_id: u32,
+    unencrypted: bool,
 }
 
 /// Extracts the current data key from serialized `EncryptionMeta` bytes.
@@ -583,8 +649,10 @@ impl EncryptionKeyManager {
         let key_ref = EncryptionKeyRef {
             keyspace_id,
             data_key_id: k.get_key_id(),
+            unencrypted: k.get_type() == KEY_TYPE_UNENCRYPTED,
         };
         self.shard_to_current_key.insert(shard_id, key_ref);
+        self.update_encryption_stats();
     }
 
     /// Returns the current encryption key for the given shard, if available.
@@ -595,6 +663,9 @@ impl EncryptionKeyManager {
             .shard_to_current_key
             .get(&shard_id)
             .ok_or_else(|| EncryptionKeyError::NoDataKeyForShard(shard_id))?;
+        if key_ref.unencrypted {
+            return Ok(EncryptionKey::new_unencrypted_key().with_keyspace_id(key_ref.keyspace_id));
+        }
         let entry = self
             .keyspace_to_encryption_entry
             .get(&key_ref.keyspace_id)
@@ -605,6 +676,20 @@ impl EncryptionKeyManager {
     /// Deregisters the encryption key associated with a shard.
     pub fn deregister_current_key_for_shard(&self, shard_id: u64) {
         self.shard_to_current_key.remove(&shard_id);
+        self.update_encryption_stats();
+    }
+
+    fn update_encryption_stats(&self) {
+        ENCRYPTION_REGION_COUNT_GAUGE.set(self.shard_to_current_key.len() as i64);
+        let keyspace_count = self
+            .shard_to_current_key
+            .iter()
+            .map(|entry| entry.value().keyspace_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        ENCRYPTION_KEYSPACE_ACTIVE_COUNT_GAUGE.set(keyspace_count as i64);
+        ENCRYPTION_KEYSPACE_REGISTERED_COUNT_GAUGE
+            .set(self.keyspace_to_encryption_entry.len() as i64);
     }
 
     /// Retrieves the data key for a given keyspace and encryption header.
@@ -613,6 +698,9 @@ impl EncryptionKeyManager {
         keyspace_id: u32,
         encryption_header: u32,
     ) -> Result<EncryptionKey> {
+        if encryption_header == 0 {
+            return Ok(EncryptionKey::new_unencrypted_key().with_keyspace_id(keyspace_id));
+        }
         let encryption_format = (encryption_header >> 24) as u8;
         match encryption_format {
             ENCRYPTION_DATA_FORMAT_LEGACY => {
@@ -672,7 +760,10 @@ impl KeyspaceEncryptionEntry {
         if let Some(key) = self.data_key_cache.get(&data_key_id) {
             return Ok(key.value().clone());
         }
-
+        let start = Instant::now_coarse();
+        defer!({
+            ENCRYPTION_KEY_GET_DURATION.observe(start.saturating_elapsed().as_secs_f64());
+        });
         let m = self.meta.read().unwrap();
         let data_key = m
             .data_keys
@@ -717,7 +808,7 @@ impl KeyspaceEncryptionEntry {
             endpoint: master_key.endpoint.clone(),
             cipher_text: base64::encode(master_key.ciphertext.clone()),
         };
-        let fut = master_key_config.decrypt();
+        let fut = master_key_config.decrypt(false /* is_legacy */);
         let master_key = if tokio::runtime::Handle::try_current().is_ok() {
             // Inside a Tokio runtime (e.g. in
             // `TxnChunkHandler::acquire_keyspace_info`), calling
@@ -808,7 +899,9 @@ mod tests {
         let (master_key, encrypted_key) =
             runtime.block_on(config.generate_new_master_key()).unwrap();
         config.cipher_text = base64::encode(encrypted_key.to_vec());
-        let decoded_master_key = runtime.block_on(config.decrypt()).unwrap();
+        let decoded_master_key = runtime
+            .block_on(config.decrypt(false /* is_legacy */))
+            .unwrap();
         assert_eq!(master_key.export(), decoded_master_key.export());
     }
 
@@ -878,5 +971,17 @@ mod tests {
             mgr.current_key_by_shard(5),
             Err(EncryptionKeyError::NoDataKeyForShard(_))
         ));
+    }
+
+    #[test]
+    fn test_unencrypted_key() {
+        let encryption_key = EncryptionKey::new_unencrypted_key();
+        let mut encrypted = vec![];
+        encryption_key.encrypt(b"hello", 123, 12, &mut encrypted);
+        assert_eq!(encrypted, b"hello");
+
+        let mut decrypted = vec![];
+        encryption_key.decrypt(&encrypted, 123, 12, &mut decrypted);
+        assert_eq!(decrypted, b"hello");
     }
 }
