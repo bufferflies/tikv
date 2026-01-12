@@ -592,9 +592,7 @@ fn test_native_br_service_x(
         .unwrap();
     info!("backup v1x: {:?}", backup_x);
 
-    for node in cluster.get_nodes() {
-        cluster.get_rfengine(node).upload_wal_chunk();
-    }
+    br_cli.flush_wals().unwrap();
 
     let pack_backup = if override_pack {
         block_on(br_cli.pack_backup_with_override(

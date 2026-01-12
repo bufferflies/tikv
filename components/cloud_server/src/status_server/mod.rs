@@ -69,7 +69,7 @@ use rfstore::{
     RaftRouter, RaftStoreRouter,
 };
 use security::{self, SecurityConfig};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tikv::{
     config::{ConfigController, LogLevel},
     server::status_server::profile::start_one_cpu_profile,
@@ -1750,6 +1750,19 @@ impl StatusServer {
         })
     }
 
+    async fn flush_rfengine_wal(engine: &rfengine::RfEngine) -> hyper::Result<Response<Body>> {
+        engine.upload_wal_chunk().await;
+        let healthy = engine.dfs_worker_is_healthy();
+        if healthy {
+            Ok(make_response(StatusCode::OK, ""))
+        } else {
+            Ok(make_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!("DFS worker isn't healthy, please check the log").to_string(),
+            ))
+        }
+    }
+
     fn get_covered_shards_by_range(
         range: Option<(Vec<u8>, Vec<u8>)>,
         engine: &kvengine::Engine,
@@ -2361,6 +2374,9 @@ impl StatusServer {
                             (Method::POST, path) if path.starts_with("/rfengine/backup") => {
                                 let dfs_conf = ctx.cfg_controller.get_current().dfs.clone();
                                 Self::backup_rfengine(req, ctx.rfengine.clone(), ctx.kvengine.clone(), ctx.concurrency_manager.clone(), dfs_conf, ctx.s3fs_pool.clone()).await
+                            }
+                            (Method::POST, path) if path.starts_with("/rfengine/flush") => {
+                                Self::flush_rfengine_wal(&ctx.rfengine).await
                             }
                             (Method::POST, path) if path.starts_with("/restore-shard") => {
                                 Self::restore_shard(req, ctx.router.clone(), ctx.kvengine.clone()).await

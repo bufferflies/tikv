@@ -716,7 +716,8 @@ fn test_restore_archived_keyspace_impl(
         info!("backup_cluster result: {:?}", backup_meta);
 
         for node_id in cluster.get_nodes() {
-            cluster.get_rfengine(node_id).upload_wal_chunk();
+            // This wait can be done when archiving.
+            let _ = cluster.get_rfengine(node_id).upload_wal_chunk();
         }
 
         // Archive backup.

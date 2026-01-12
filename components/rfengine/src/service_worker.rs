@@ -32,7 +32,7 @@ use crate::{
     metrics::ENGINE_COMPACT_CACHE_WAL_SKIPPED_COUNTER,
     write_batch::{PeerBatch, WriteBatch},
     writer::WalWriter,
-    BackupTask, DfsStatistic, Error,
+    BackupTask, DfsMeter, Error, NotifyOnDrop,
 };
 
 // the maximum number of WriteBatch cached in memory for compact.
@@ -64,7 +64,7 @@ pub(crate) enum ServiceTask {
     },
     Backup(BackupTask),
     Truncates(Vec<Vec<RaftLogBlock>>),
-    Upload,
+    Upload(NotifyOnDrop),
     Close {
         force: bool,
     },
@@ -78,7 +78,7 @@ impl fmt::Debug for ServiceTask {
             ServiceTask::Write { .. } => write!(f, "ServiceTask::Write"),
             ServiceTask::Backup(_) => write!(f, "ServiceTask::Backup"),
             ServiceTask::Truncates(_) => write!(f, "ServiceTask::Truncates"),
-            ServiceTask::Upload => write!(f, "ServiceTask::Upload"),
+            ServiceTask::Upload(_) => write!(f, "ServiceTask::Upload"),
             ServiceTask::Close { force } => write!(f, "ServiceTask::Close({})", force),
         }
     }
@@ -101,7 +101,7 @@ pub(crate) struct ServiceWorker {
     dfs_worker_handle: Option<ObjectStorageWorkerHandle>,
     dfs_worker_healthy: Healthy,
     // Shared statistic across dfs worker and compact worker
-    statistics: Arc<DfsStatistic>,
+    statistics: Arc<DfsMeter>,
 }
 
 impl ServiceWorker {
@@ -120,7 +120,7 @@ impl ServiceWorker {
         peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
     ) -> Self {
         // Create a shared statistic object for both compact worker and dfs worker.
-        let statistic = Arc::new(DfsStatistic::default());
+        let statistic = Arc::new(DfsMeter::default());
         let s3fs = lightweight_backup_config.as_ref().map(|cfg| {
             let s3fs = kvengine::dfs::S3Fs::new_from_config(cfg.dfs_config.clone());
             Arc::new(s3fs)
@@ -191,7 +191,7 @@ impl ServiceWorker {
         }
     }
 
-    pub(crate) fn dfs_statistic(&self) -> Option<Arc<DfsStatistic>> {
+    pub(crate) fn dfs_statistic(&self) -> Option<Arc<DfsMeter>> {
         if self.is_lightweight_enabled() {
             Some(self.statistics.clone())
         } else {
@@ -223,8 +223,8 @@ impl ServiceWorker {
                     self.handle_rotate(epoch_id, cache_wb_for_compact);
                 }
                 ServiceTask::Truncates(truncates) => drop(truncates),
-                ServiceTask::Upload => {
-                    self.handle_flush();
+                ServiceTask::Upload(sender) => {
+                    self.handle_flush(sender);
                 }
                 ServiceTask::Close { force } => {
                     self.handle_close(force);
@@ -337,14 +337,14 @@ impl ServiceWorker {
         }
     }
 
-    fn handle_flush(&mut self) {
+    fn handle_flush(&mut self, sender: NotifyOnDrop) {
         if self.is_lightweight_enabled() {
             // Send flush task to object storage worker.
             self.dfs_worker_handle
                 .as_ref()
                 .unwrap()
                 .task_sender
-                .send(ObjectStorageTask::Flush)
+                .send(ObjectStorageTask::Flush(sender))
                 .unwrap();
         }
     }
@@ -393,7 +393,8 @@ impl ServiceWorker {
         {
             // If force close, we skip flushing wal chunk and close task thread.
             if !force {
-                task_sender.send(ObjectStorageTask::Flush).unwrap();
+                let (tx, _) = tokio::sync::oneshot::channel();
+                task_sender.send(ObjectStorageTask::Flush(tx)).unwrap();
             }
             task_sender.send(ObjectStorageTask::Close).unwrap();
             handle.join().unwrap();

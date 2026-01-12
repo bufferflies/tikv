@@ -95,7 +95,7 @@ pub(crate) struct CompactWorker {
     // Shared per-peer Rlog files; see `RfEngineCore::peer_rlog_files`.
     peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
 
-    statistic: Arc<DfsStatistic>,
+    statistic: Arc<DfsMeter>,
 }
 
 impl CompactWorker {
@@ -112,7 +112,7 @@ impl CompactWorker {
         pending_compact_wb_count: Arc<AtomicUsize>,
         rlog_file_size: u32,
         peer_rlog_files: Arc<ArcSwap<HashMap<u64, VecDeque<PeerFile>>>>,
-        statistic: Arc<DfsStatistic>,
+        statistic: Arc<DfsMeter>,
     ) -> Self {
         // Create new thread for object storage worker if lightweight backup enabled.
         let (rlog_cache, compress_type) = if let Some(config) = lightweight_backup_cfg {
@@ -517,8 +517,7 @@ impl CompactWorker {
                         error!("{} put snapshot object failed", engine_id; "err" => ?err, "epoch" => epoch_id);
                         return Err((epoch_id, err));
                     }
-                    stat.uploaded_bytes.fetch_add(length as u64, Ordering::Relaxed);
-                    stat.request_count.fetch_add(1, Ordering::Relaxed);
+                    stat.observe_request(length as u64);
                 }
                 Ok(epoch_id)
             })

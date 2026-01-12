@@ -96,6 +96,11 @@ pub struct Config {
 
     /// The number of bytes per second to compact WAL files.
     pub compact_bytes_per_sec: ReadableSize,
+
+    /// The max gap between now and last WAL chunk updated.
+    /// If `None`, will only flush chunks to S3 when the size limit reached or
+    /// shutting down.
+    pub max_wal_chunk_gap_duration: Option<ReadableDuration>,
 }
 
 #[allow(deprecated)]
@@ -118,6 +123,7 @@ impl Default for Config {
             rlog_soft_memory_limit: ReadableSize::gb(4),
             rlog_file_size: ReadableSize::mb(256),
             compact_bytes_per_sec: ReadableSize::mb(200),
+            max_wal_chunk_gap_duration: None,
         }
     }
 }

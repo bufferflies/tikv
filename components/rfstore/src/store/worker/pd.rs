@@ -1316,6 +1316,7 @@ impl PdRunner {
         self.store_stat.region_bytes_read.flush();
         self.store_stat.region_keys_read.flush();
 
+        let mut dfs_measure = None;
         if let Some(store_info) = store_info {
             // Update the timestap for reporting heratbeat.
             // If `store_info` is None, the given Task::StoreHeartbeat should be a fake
@@ -1323,14 +1324,16 @@ impl PdRunner {
             // marking current TiKV node in normal state.
             self.store_stat.last_report_ts = UnixSecs::now();
 
-            let engine_dfs_stat = store_info.rf_engine.take_dfs_stats();
+            let dfs_meter = store_info.rf_engine.dfs_stats().clone();
+            let measure = dfs_meter.measure();
             let mut rf_dfs_stat = DfsStatItem::default();
             let scope = rf_dfs_stat.mut_scope();
             scope.set_component("rfengine".to_owned());
             scope.set_is_global(true);
-            rf_dfs_stat.set_write_requests(engine_dfs_stat.requests);
-            rf_dfs_stat.set_written_bytes(engine_dfs_stat.uploaded_bytes);
+            rf_dfs_stat.set_write_requests(measure.request_count);
+            rf_dfs_stat.set_written_bytes(measure.uploaded_bytes);
             stats.mut_dfs().push(rf_dfs_stat);
+            dfs_measure = Some(measure);
         }
 
         // Set slow score for this node.
@@ -1350,6 +1353,10 @@ impl PdRunner {
         let f = async move {
             match resp.await {
                 Ok(_resp) => {
+                    if let Some(dfs_measure) = dfs_measure {
+                        dfs_measure.acknowledge();
+                    }
+
                     // TODO(x): UpdateReplicationMode
                     // TODO(x): support recovery plan.
                     if GLOBAL_SERVER_READINESS

@@ -1268,7 +1268,7 @@ pub mod v1x {
     use kvengine::dfs::{DFSConfig, S3Fs};
     use native_br::{
         backup::IncrementalBackupFile,
-        common::get_all_incremental_backups,
+        common::{get_all_incremental_backups, send_request_to_store},
         packing::{
             offline_pd::OfflinePd, CopyPackedRun, CopyStep, MigratePackEnv, PackBackupStep,
             PackConfig, PackContext, ReportCopyStepTrait, ReportPackBackupStepTrait,
@@ -1286,7 +1286,7 @@ pub mod v1x {
     };
     use serde_json::json;
     use tikv::storage::mvcc::TimeStamp;
-    use tikv_util::{defer, info, warn, HandyRwLock};
+    use tikv_util::{box_err, defer, info, warn, HandyRwLock};
     use tokio::task::spawn_blocking;
 
     use crate::{
@@ -1570,6 +1570,9 @@ pub mod v1x {
         pub safe_ts: u64,
         pub keyspaces: Vec<KeyspaceBackupInfo>,
     }
+
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    pub struct FlushResult {}
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
     #[serde(tag = "state")]
@@ -2265,6 +2268,13 @@ pub mod v1x {
                 }
                 _ => method_not_allowed(&ctx),
             },
+            [.., "cluster", "flush_wal"] => match method {
+                Method::POST => (
+                    handle_flush_wal(ctx).await.json_with_status(StatusCode::OK),
+                    "x_flush_wal",
+                ),
+                _ => method_not_allowed(&ctx),
+            },
             _ => not_found(&ctx),
         };
 
@@ -2476,6 +2486,42 @@ pub mod v1x {
         })
     }
 
+    async fn handle_flush_wal(cx: HttpRequestContext) -> HttpResult<FlushResult> {
+        let pdc = &cx.br.context.pd_client;
+        let mut stores = pdc.get_all_stores(true)?;
+        stores.retain(|store| {
+            let is_tiflash = store
+                .get_labels()
+                .iter()
+                .any(|label| label.get_key() == "engine" && label.get_value().contains("tiflash"));
+            !is_tiflash
+        });
+
+        let sec = pdc.get_security_mgr();
+        let mut store_requests = vec![];
+        for store in stores {
+            let sec = &sec;
+            store_requests.push(async move {
+                let req = {
+                    let uri = sec
+                        .build_uri(format!("{}/rfengine/flush_wal", &store.status_address))
+                        .unwrap();
+                    Request::post(uri).body(Body::empty())
+                }?;
+                let (status_code, _) =
+                    send_request_to_store(req, &store, sec, std::time::Duration::from_secs(600)).await?;
+                if !status_code.is_success() {
+                    warn!("backup v1x: flush store failed."; "status_code" => %status_code, "store_id" => store.id);
+                    return Err(Error::Other(box_err!("store {} failed to flush wal; perhaps its dfs worker isn't healthy", store.id)))
+                }
+                Ok(())
+            });
+        }
+        futures::future::try_join_all(store_requests).await?;
+
+        Ok(FlushResult::default())
+    }
+
     async fn fetch_backup_details(s3fs: &Arc<S3Fs>, backup_name: &str) -> Result<BackupDetails> {
         let (backup_meta, _) = load_norm_backup_meta(s3fs, backup_name).await?;
 
@@ -2518,7 +2564,7 @@ pub mod test_utils {
     use tikv_util::box_try;
 
     use crate::native_br::{
-        BackupItem, ListBackupResponse, RestoreProgressResponse, JSON_TIME_FORMAT,
+        v1x::FlushResult, BackupItem, ListBackupResponse, RestoreProgressResponse, JSON_TIME_FORMAT,
     };
 
     #[derive(Default, Serialize, Deserialize, Debug)]
@@ -2778,6 +2824,16 @@ pub mod test_utils {
                     .get(format!("api/v1/restore_keyspace/{restore_id}?{query}"))
                     .await
             ))
+        }
+
+        pub fn flush_wals(&self) -> HttpResult<FlushResult> {
+            futures::executor::block_on(async {
+                Ok(box_try!(
+                    self.inner
+                        .post("api/v1/x/cluster/flush_wal", &DummyRequest {})
+                        .await
+                ))
+            })
         }
     }
 }

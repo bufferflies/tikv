@@ -1,6 +1,7 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 #![feature(let_chains)]
 #![feature(extract_if)]
+#![feature(never_type)]
 #![cfg_attr(test, feature(test))]
 // Bytes as map key
 #![allow(clippy::mutable_key_type)]
@@ -47,6 +48,7 @@ pub use write_batch::WriteBatch;
 pub use writer::*;
 
 pub type Result<T> = std::result::Result<T, Error>;
+type NotifyOnDrop = tokio::sync::oneshot::Sender<!>;
 
 /// Information about an async fetch request that needs to be handled by upper
 /// layer

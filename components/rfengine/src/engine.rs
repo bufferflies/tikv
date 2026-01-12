@@ -21,6 +21,7 @@ use bytes::{Buf, Bytes};
 use dashmap::mapref::one::Ref;
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use file_system::{open_direct_file, IoRateLimitMode, IoRateLimiter};
+use futures::{Future, FutureExt};
 use kvengine::dfs::DFSConfig;
 use kvproto::raft_serverpb::{self, StoreIdent};
 use protobuf::Message;
@@ -188,7 +189,9 @@ pub struct RfEngineCore {
     pub(crate) in_mem_rlog_epoch_count: u32,
 
     /// DFS statistics collected by DFS worker.
-    pub(crate) dfs_statistics: Arc<DfsStatistic>,
+    pub(crate) dfs_statistics: Arc<DfsMeter>,
+
+    pub(crate) dfs_worker_healthy: Healthy,
 
     _lock: fslock::LockFile, // hold lock to avoid release
 }
@@ -286,6 +289,7 @@ impl RfEngineCore {
             in_mem_rlog_epoch_count: in_mem_rlog_epoch_count as u32,
             _lock: lock,
             dfs_statistics: Arc::default(),
+            dfs_worker_healthy: dfs_worker_healthy.clone(),
         };
         let async_offset = en.load(&manifest)?;
         if cfg.cli_mode {
@@ -328,6 +332,7 @@ impl RfEngineCore {
                         cfg.rlog_cache_capacity.0 as usize,
                         cfg.rlog_cache_size_threshold.0 as usize,
                         cfg.dfs_worker_memory_limit.as_memory_size() as usize,
+                        cfg.max_wal_chunk_gap_duration,
                     ))
                 }
             } else {
@@ -750,14 +755,18 @@ impl RfEngineCore {
         }
     }
 
-    pub fn take_dfs_stats(&self) -> EngineDfsStats {
-        let dfs = self.dfs_statistics.record_and_reset();
+    pub fn get_dfs_stats(&self) -> EngineDfsStats {
+        let dfs = self.dfs_statistics.measure();
         RFENGINE_DFS_UPLOAD_BYTES.inc_by(dfs.uploaded_bytes);
         RFENGINE_DFS_REQUESTS.inc_by(dfs.request_count);
         EngineDfsStats {
             requests: dfs.request_count,
             uploaded_bytes: dfs.uploaded_bytes,
         }
+    }
+
+    pub fn dfs_stats(&self) -> &Arc<DfsMeter> {
+        &self.dfs_statistics
     }
 
     /// Dumps the state of the region.
@@ -977,8 +986,15 @@ impl RfEngineCore {
     }
 
     // Upload latest wal chunk to object storage
-    pub fn upload_wal_chunk(&self) {
-        self.task_sender.send(ServiceTask::Upload).unwrap();
+    pub fn upload_wal_chunk(&self) -> impl Future<Output = ()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.task_sender.send(ServiceTask::Upload(tx)).unwrap();
+        rx.map(|_| ())
+    }
+
+    pub fn dfs_worker_is_healthy(&self) -> bool {
+        self.dfs_worker_healthy
+            .is_healthy(self.current_epoch_id.load(Ordering::SeqCst))
     }
 
     pub fn dump_wal_chunk(

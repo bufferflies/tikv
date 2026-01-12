@@ -10,6 +10,7 @@ use std::{
         atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
+    time::Instant,
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -17,6 +18,7 @@ use engine_traits::ObjectStorage;
 use kvengine::dfs::{DFSConfig, Dfs, S3Fs};
 use slog_global::*;
 use tikv_util::{
+    config::ReadableDuration,
     errors::{Context as _, IoError},
     mpsc::{Receiver, Sender},
 };
@@ -29,26 +31,84 @@ use crate::{
     metrics::{self, RFENGINE_DFS_WORKER_HEALTHY_GAUGE},
     wal_chunk_file_key, wal_chunk_file_prefix, wal_file_name,
     writer::EPOCH_ROTATE_LEN,
-    Error, Result, WalChunkMeta,
+    Error, NotifyOnDrop, Result, WalChunkMeta,
 };
 
+/// DFS request statistics meter.
+/// Used to observe the uploaded bytes and request count.
 #[derive(Default)]
-pub(crate) struct DfsStatistic {
-    pub(crate) uploaded_bytes: AtomicU64,
-    pub(crate) request_count: AtomicU64,
+pub struct DfsMeter {
+    uploaded_bytes: AtomicU64,
+    request_count: AtomicU64,
 }
 
-pub(crate) struct FrozenDfsStatistic {
-    pub(crate) uploaded_bytes: u64,
-    pub(crate) request_count: u64,
+/// DFS request statistics measure.
+/// Captured from `DfsMeter`.
+/// Used to acknowledge the uploaded bytes and request count.
+pub struct DfsMeasure {
+    from: Arc<DfsMeter>,
+    pub uploaded_bytes: u64,
+    pub request_count: u64,
 }
 
-impl DfsStatistic {
-    pub fn record_and_reset(&self) -> FrozenDfsStatistic {
-        FrozenDfsStatistic {
+impl Drop for DfsMeasure {
+    fn drop(&mut self) {
+        if !self.acknowledged() {
+            warn!("recollecting a dfs measure failed to upload.";
+                "uploaded_bytes" => self.uploaded_bytes,
+                "request_count" => self.request_count,
+            );
+            self.from.recollect(self);
+        }
+    }
+}
+
+impl DfsMeasure {
+    /// Acknowledge the measure, preventing it from being recollected.
+    pub fn acknowledge(mut self) {
+        use crate::metrics::*;
+
+        RFENGINE_DFS_UPLOAD_BYTES_ACKED.inc_by(self.uploaded_bytes);
+        RFENGINE_DFS_REQUESTS_ACKED.inc_by(self.request_count);
+        self.uploaded_bytes = 0;
+        self.request_count = 0;
+    }
+
+    fn acknowledged(&self) -> bool {
+        self.uploaded_bytes == 0 && self.request_count == 0
+    }
+}
+
+impl DfsMeter {
+    /// Observe a DFS request with uploaded bytes.
+    pub fn observe_request(&self, uploaded_bytes: u64) {
+        use crate::metrics::*;
+
+        RFENGINE_DFS_UPLOAD_BYTES.inc_by(uploaded_bytes);
+        RFENGINE_DFS_REQUESTS.inc();
+        self.uploaded_bytes
+            .fetch_add(uploaded_bytes, Ordering::SeqCst);
+        self.request_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Capture the current uploaded bytes and request count.
+    ///
+    /// You should acknowledge the measure after uploading it to PD
+    /// successfully.
+    #[must_use = "If not acknowledged this measure will be recollected to the meter."]
+    pub fn measure(self: &Arc<Self>) -> DfsMeasure {
+        DfsMeasure {
+            from: Arc::clone(self),
             uploaded_bytes: self.uploaded_bytes.swap(0, Ordering::SeqCst),
             request_count: self.request_count.swap(0, Ordering::SeqCst),
         }
+    }
+
+    fn recollect(&self, acknowledged: &DfsMeasure) {
+        self.uploaded_bytes
+            .fetch_add(acknowledged.uploaded_bytes, Ordering::SeqCst);
+        self.request_count
+            .fetch_add(acknowledged.request_count, Ordering::SeqCst);
     }
 }
 
@@ -65,6 +125,8 @@ pub(crate) struct LightweightBackupConfig {
     pub(crate) rlog_cache_capacity: usize,
     pub(crate) rlog_cache_size_threshold: usize,
     pub(crate) memory_limit: usize,
+
+    pub(crate) flush_chunk_interval: Option<ReadableDuration>,
 }
 
 impl LightweightBackupConfig {
@@ -77,6 +139,7 @@ impl LightweightBackupConfig {
         rlog_cache_capacity: usize,
         rlog_cache_size_threshold: usize,
         memory_limit: usize,
+        flush_chunk_interval: Option<ReadableDuration>,
     ) -> Self {
         Self {
             dir,
@@ -87,6 +150,7 @@ impl LightweightBackupConfig {
             rlog_cache_capacity,
             rlog_cache_size_threshold,
             memory_limit,
+            flush_chunk_interval,
         }
     }
 }
@@ -111,8 +175,9 @@ pub(crate) struct ObjectStorageWorker {
     s3fs: Arc<S3Fs>,
     healthy: Healthy,
     memory_limiter: MemoryLimiter,
+    last_chunk_upload_time: Instant,
 
-    statistic: Arc<DfsStatistic>,
+    statistic: Arc<DfsMeter>,
     background_uploads: Vec<BackgroundUpload>,
 }
 
@@ -133,7 +198,7 @@ impl ObjectStorageWorker {
         task_rx: Receiver<ObjectStorageTask>,
         compact_worker_tx: Sender<CompactTask>,
         service_worker_epoch: Arc<AtomicU32>,
-        statistic: Arc<DfsStatistic>,
+        statistic: Arc<DfsMeter>,
     ) -> Self {
         info!("dfs worker config: {:?}", config);
         let dfs_config = config.dfs_config.clone();
@@ -155,6 +220,7 @@ impl ObjectStorageWorker {
             healthy: dfs_worker_healthy,
             memory_limiter,
             statistic,
+            last_chunk_upload_time: Instant::now(),
             background_uploads: vec![],
         }
     }
@@ -301,13 +367,14 @@ impl ObjectStorageWorker {
                         self.healthy.set_unhealthy(epoch_id, "handle rotate");
                     }
                 }
-                ObjectStorageTask::Flush => {
+                ObjectStorageTask::Flush(notify) => {
                     // Send flush task before close in normal case. If close without flush, we can
                     // construct the case for wal chunk recovery in random test.
                     if !self.buf.is_empty() && self.next_chunk(false).is_err() {
                         self.healthy.set_unhealthy(self.epoch_id, "handle flush");
                     }
                     self.wait_uploads();
+                    drop(notify);
                 }
                 ObjectStorageTask::Close => unreachable!(),
             }
@@ -344,9 +411,7 @@ impl ObjectStorageWorker {
                 error!("{} put wal chunk failed", store_id; "err" => ?err);
                 healthy.set_unhealthy(epoch_id, "put wal chunk");
             }
-            stat.request_count.fetch_add(1, Ordering::SeqCst);
-            stat.uploaded_bytes
-                .fetch_add(length as u64, Ordering::SeqCst);
+            stat.observe_request(length as u64);
             drop(acquired);
         });
 
@@ -482,6 +547,12 @@ impl ObjectStorageWorker {
         {
             return true;
         }
+        if let Some(max_dur) = self.config.flush_chunk_interval
+            && !self.buf.is_empty()
+            && self.last_chunk_upload_time.elapsed() > max_dur.0
+        {
+            return true;
+        }
         false
     }
 
@@ -549,6 +620,8 @@ impl ObjectStorageWorker {
     }
 
     fn next_chunk(&mut self, rotate: bool) -> Result<()> {
+        self.last_chunk_upload_time = Instant::now();
+
         let store_id = self.get_engine_id();
         let file_key = if rotate {
             last_wal_chunk_file_key(store_id, self.epoch_id, self.start_off, self.sync_off)
@@ -578,9 +651,7 @@ impl ObjectStorageWorker {
                     error!("{} put wal chunk failed", store_id, ; "err" => ?err);
                     healthy.set_unhealthy(epoch_id, "put wal chunk");
                 }
-                stat.request_count.fetch_add(1, Ordering::SeqCst);
-                stat.uploaded_bytes
-                    .fetch_add(length as u64, Ordering::SeqCst);
+                stat.observe_request(length as u64);
                 metrics::RFENGINE_DFS_RUNNING_UPLOADS.dec();
                 drop(acquired);
             })
@@ -723,7 +794,7 @@ impl ChunkHeader {
 pub(crate) enum ObjectStorageTask {
     Sync { epoch_id: u32, file_off: u64 }, // Sync the `epoch_id` wal file to `file_off`.
     Rotate { epoch_id: u32, file_off: u64 }, // Rotate to next epoch.
-    Flush,                                 // Trigger flush the last chunk, mainly for test.
+    Flush(NotifyOnDrop),                   // Trigger flush the last chunk, mainly for test.
     Close,
 }
 
@@ -731,7 +802,7 @@ impl ObjectStorageTask {
     fn epoch_id(&self) -> Option<u32> {
         match self {
             Self::Sync { epoch_id, .. } | Self::Rotate { epoch_id, .. } => Some(*epoch_id),
-            Self::Flush | Self::Close => None,
+            Self::Flush(_) | Self::Close => None,
         }
     }
 }
@@ -850,6 +921,7 @@ mod tests {
                 1024 * 1024,
                 4096,
                 1 << 20,
+                None,
             ),
             1,
             Arc::new(AtomicU64::new(1)),
@@ -857,7 +929,7 @@ mod tests {
             rx,
             tx,
             service_worker_epoch,
-            Arc::new(DfsStatistic::default()),
+            Arc::new(DfsMeter::default()),
         );
 
         let mut origin_data = vec![];
@@ -899,6 +971,7 @@ mod tests {
                 1024 * 1024,
                 4096,
                 1 << 20,
+                None,
             ),
             1,
             Arc::new(AtomicU64::new(1)),
@@ -906,7 +979,7 @@ mod tests {
             rx,
             tx,
             service_worker_epoch.clone(),
-            Arc::new(DfsStatistic::default()),
+            Arc::new(DfsMeter::default()),
         );
 
         let cases = vec![
@@ -936,5 +1009,309 @@ mod tests {
         }
 
         random_bytes
+    }
+
+    use std::time::Duration;
+
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::no_interval(
+        None,
+        100,
+        100,
+        1024 * 1024,
+        Some(100),
+        false,
+        "Should not chunk without flush_chunk_interval set"
+    )]
+    #[case::with_interval_before_elapsed(
+        Some(Duration::from_millis(50)),
+        100,
+        100,
+        1024 * 1024,
+        None,
+        false,
+        "Should not chunk immediately after buffer set"
+    )]
+    #[case::with_interval_after_elapsed(
+        Some(Duration::from_millis(50)),
+        100,
+        100,
+        1024 * 1024,
+        Some(60),
+        true,
+        "Should chunk after flush_chunk_interval elapsed"
+    )]
+    fn test_flush_chunk_interval(
+        #[case] flush_interval: Option<Duration>,
+        #[case] buffer_size: usize,
+        #[case] to_read: usize,
+        #[case] target_file_size: usize,
+        #[case] sleep_ms: Option<u64>,
+        #[case] expected_should_chunk: bool,
+        #[case] assertion_msg: &str,
+    ) {
+        let (_, rx) = tikv_util::mpsc::unbounded();
+        let (tx, _) = tikv_util::mpsc::unbounded();
+        let dfs_config = kvengine::dfs::DFSConfig::default();
+        let service_worker_epoch = Arc::new(AtomicU32::new(0));
+
+        let mut worker = ObjectStorageWorker::new(
+            LightweightBackupConfig::new(
+                std::env::temp_dir(),
+                target_file_size,
+                CompressionType::Lz4Compression,
+                CompressionType::Lz4Compression,
+                dfs_config,
+                1024 * 1024,
+                4096,
+                1 << 20,
+                flush_interval.map(ReadableDuration),
+            ),
+            1,
+            Arc::new(AtomicU64::new(1)),
+            Healthy::default(),
+            rx,
+            tx,
+            service_worker_epoch,
+            Arc::new(DfsMeter::default()),
+        );
+
+        // Set buffer
+        worker.set_buf(vec![0u8; buffer_size]);
+
+        // Sleep if specified
+        if let Some(ms) = sleep_ms {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+
+        // Assert the result
+        assert_eq!(
+            worker.should_chunk(to_read),
+            expected_should_chunk,
+            "{}",
+            assertion_msg
+        );
+    }
+
+    #[test]
+    fn test_meter_basic() {
+        // Test basic observe and measure functionality
+        let meter = Arc::new(DfsMeter::default());
+
+        // Initially should be empty
+        let measure = meter.measure();
+        assert_eq!(measure.uploaded_bytes, 0);
+        assert_eq!(measure.request_count, 0);
+        measure.acknowledge();
+
+        // Observe some requests
+        meter.observe_request(100);
+        meter.observe_request(200);
+        meter.observe_request(300);
+
+        // Measure should capture and reset
+        let measure = meter.measure();
+        assert_eq!(measure.uploaded_bytes, 600);
+        assert_eq!(measure.request_count, 3);
+
+        // After measure, meter should be reset
+        let measure2 = meter.measure();
+        assert_eq!(measure2.uploaded_bytes, 0);
+        assert_eq!(measure2.request_count, 0);
+        measure2.acknowledge();
+
+        // Test RAII: measure without acknowledge should recollect
+        meter.observe_request(1000);
+        let measure3 = meter.measure();
+        assert_eq!(measure3.uploaded_bytes, 1000);
+        assert_eq!(measure3.request_count, 1);
+        // Drop measure3 without acknowledging - it should recollect
+        drop(measure3);
+
+        // The data should be back in the meter
+        let measure4 = meter.measure();
+        assert_eq!(measure4.uploaded_bytes, 1000);
+        assert_eq!(measure4.request_count, 1);
+        measure4.acknowledge();
+
+        // Test that acknowledged measure won't recollect
+        meter.observe_request(500);
+        let measure5 = meter.measure();
+        assert_eq!(measure5.uploaded_bytes, 500);
+        assert_eq!(measure5.request_count, 1);
+        measure5.acknowledge(); // This should clear the measure
+        // Now meter should be empty
+        let measure6 = meter.measure();
+        assert_eq!(measure6.uploaded_bytes, 0);
+        assert_eq!(measure6.request_count, 0);
+        measure6.acknowledge();
+
+        // Finally acknowledge the first measure (delayed acknowledge scenario)
+        measure.acknowledge();
+
+        // Test edge case: zero bytes
+        meter.observe_request(0);
+        let measure7 = meter.measure();
+        assert_eq!(measure7.uploaded_bytes, 0);
+        assert_eq!(measure7.request_count, 1);
+        measure7.acknowledge();
+
+        // Test large values
+        meter.observe_request(u64::MAX / 2);
+        meter.observe_request(u64::MAX / 2);
+        let measure8 = meter.measure();
+        assert_eq!(measure8.uploaded_bytes, u64::MAX - 1);
+        assert_eq!(measure8.request_count, 2);
+        measure8.acknowledge();
+    }
+
+    #[test]
+    fn test_meter_concurrent_randomized() {
+        use std::{sync::Barrier, thread, time::Duration};
+
+        const NUM_OBSERVER_THREADS: usize = 8;
+        const NUM_MEASURER_THREADS: usize = 4;
+        const OPERATIONS_PER_THREAD: usize = 1000;
+
+        let meter = Arc::new(DfsMeter::default());
+        let barrier = Arc::new(Barrier::new(NUM_OBSERVER_THREADS + NUM_MEASURER_THREADS));
+
+        // Track total bytes and requests for validation
+        let total_bytes_sent = Arc::new(AtomicU64::new(0));
+        let total_requests_sent = Arc::new(AtomicU64::new(0));
+        let total_bytes_acked = Arc::new(AtomicU64::new(0));
+        let total_requests_acked = Arc::new(AtomicU64::new(0));
+
+        let mut handles = vec![]; // Spawn observer threads that continuously call observe_request
+        for _thread_id in 0..NUM_OBSERVER_THREADS {
+            let meter = Arc::clone(&meter);
+            let barrier = Arc::clone(&barrier);
+            let total_bytes = Arc::clone(&total_bytes_sent);
+            let total_requests = Arc::clone(&total_requests_sent);
+
+            let handle = thread::spawn(move || {
+                let mut rng = rand::thread_rng();
+                barrier.wait(); // Synchronize start for maximum concurrency
+
+                for _ in 0..OPERATIONS_PER_THREAD {
+                    // Random bytes between 1 and 10000
+                    let bytes = rng.gen_range(1..10000);
+                    meter.observe_request(bytes);
+                    total_bytes.fetch_add(bytes, Ordering::SeqCst);
+                    total_requests.fetch_add(1, Ordering::SeqCst);
+
+                    // Random tiny sleep to simulate real-world timing
+                    if rng.gen_bool(0.1) {
+                        thread::sleep(Duration::from_micros(rng.gen_range(1..10)));
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Spawn measurer threads that continuously measure and randomly acknowledge
+        for _ in 0..NUM_MEASURER_THREADS {
+            let meter = Arc::clone(&meter);
+            let barrier = Arc::clone(&barrier);
+            let total_bytes_acked = Arc::clone(&total_bytes_acked);
+            let total_requests_acked = Arc::clone(&total_requests_acked);
+
+            let handle = thread::spawn(move || {
+                let mut rng = rand::thread_rng();
+                barrier.wait(); // Synchronize start for maximum concurrency
+
+                let mut deferred_measures = vec![];
+                for _ in 0..OPERATIONS_PER_THREAD {
+                    let measure = meter.measure();
+
+                    // Randomly decide: acknowledge immediately, defer, or drop (simulate failure)
+                    let choice = rng.gen_range(0..100);
+                    if choice < 60 {
+                        // 60% chance: acknowledge immediately (success case)
+                        total_bytes_acked.fetch_add(measure.uploaded_bytes, Ordering::SeqCst);
+                        total_requests_acked.fetch_add(measure.request_count, Ordering::SeqCst);
+                        measure.acknowledge();
+                    } else if choice < 85 {
+                        // 25% chance: defer acknowledgment (will ack later)
+                        deferred_measures.push(measure);
+                    } else {
+                        // 15% chance: drop without acknowledging (simulate upload failure)
+                        // This will trigger recollect via Drop
+                        drop(measure); // Explicitly drop to trigger recollect
+                    }
+
+                    // Randomly acknowledge some deferred measures
+                    if rng.gen_bool(0.4) && !deferred_measures.is_empty() {
+                        let idx = rng.gen_range(0..deferred_measures.len());
+                        let measure = deferred_measures.swap_remove(idx);
+                        total_bytes_acked.fetch_add(measure.uploaded_bytes, Ordering::SeqCst);
+                        total_requests_acked.fetch_add(measure.request_count, Ordering::SeqCst);
+                        measure.acknowledge();
+                    }
+
+                    // Randomly drop some deferred measures (simulate batch failure)
+                    if rng.gen_bool(0.1) && !deferred_measures.is_empty() {
+                        let idx = rng.gen_range(0..deferred_measures.len());
+                        let measure = deferred_measures.swap_remove(idx);
+                        drop(measure); // Trigger recollect
+                    }
+
+                    // Small random delay
+                    if rng.gen_bool(0.1) {
+                        thread::sleep(Duration::from_micros(rng.gen_range(1..10)));
+                    }
+                }
+
+                // At the end, acknowledge all remaining deferred measures
+                for measure in deferred_measures {
+                    total_bytes_acked.fetch_add(measure.uploaded_bytes, Ordering::SeqCst);
+                    total_requests_acked.fetch_add(measure.request_count, Ordering::SeqCst);
+                    measure.acknowledge();
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Important: After recollection, the data goes back to the meter
+        // We need to measure one more time to capture recollected data
+        let final_measure = meter.measure();
+        total_bytes_acked.fetch_add(final_measure.uploaded_bytes, Ordering::SeqCst);
+        total_requests_acked.fetch_add(final_measure.request_count, Ordering::SeqCst);
+        final_measure.acknowledge();
+
+        // Validate: all observed data should be acknowledged (including recollected)
+        let sent_bytes = total_bytes_sent.load(Ordering::SeqCst);
+        let sent_requests = total_requests_sent.load(Ordering::SeqCst);
+        let acked_bytes = total_bytes_acked.load(Ordering::SeqCst);
+        let acked_requests = total_requests_acked.load(Ordering::SeqCst);
+
+        assert_eq!(
+            sent_bytes, acked_bytes,
+            "Bytes mismatch: sent {} but acknowledged {}",
+            sent_bytes, acked_bytes
+        );
+        assert_eq!(
+            sent_requests, acked_requests,
+            "Requests mismatch: sent {} but acknowledged {}",
+            sent_requests, acked_requests
+        );
+
+        // Verify meter is empty after everything
+        let final_check = meter.measure();
+        assert_eq!(final_check.uploaded_bytes, 0);
+        assert_eq!(final_check.request_count, 0);
+        final_check.acknowledge();
+
+        println!(
+            "Concurrent test passed: {} bytes in {} requests",
+            sent_bytes, sent_requests
+        );
     }
 }

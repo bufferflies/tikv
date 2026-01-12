@@ -146,6 +146,15 @@ lazy_static! {
         "raft_engine_dfs_requests_total",
         "Total number of requests to DFS",
     ).unwrap();
+    pub static ref RFENGINE_DFS_UPLOAD_BYTES_ACKED: IntCounter = register_int_counter!(
+        "raft_engine_dfs_uploaded_bytes_acked",
+        "Total number of bytes uploaded to DFS",
+    ).unwrap();
+    pub static ref RFENGINE_DFS_REQUESTS_ACKED: IntCounter = register_int_counter!(
+        "raft_engine_dfs_requests_acked",
+        "Total number of requests to DFS",
+    ).unwrap();
+
     pub static ref RFENGINE_DOUBLE_WRITE_HEALTHY_GAUGE: IntGauge = register_int_gauge!(
         "raft_engine_double_write_healthy",
         "Status of healthy wal double write",
