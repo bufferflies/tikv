@@ -204,13 +204,16 @@ impl PdMocker for Service {
         let replication_status = req
             .has_replication_status()
             .then(|| req.get_replication_status().clone());
+        let bucket_meta = req
+            .has_bucket_meta()
+            .then(|| req.get_bucket_meta().clone());
         match block_on(self.inner.region_heartbeat(
             req.get_term(),
             req.get_region().clone(),
             req.get_leader().clone(),
             region_stat,
             replication_status,
-            None,
+            bucket_meta,
         )) {
             Ok(_) => {}
             Err(e) => {
