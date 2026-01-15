@@ -58,6 +58,8 @@ pub(crate) enum ServiceTask {
         epoch_id: u32,
         // Whether to cache new WriteBatch in memory for compaction.
         cache_wb_for_compact: bool,
+        // Whether forcing compact_worker to generate a snapshot to DFS.
+        require_snapshot: bool,
     },
     Write {
         wb: Arc<Vec<PeerBatch>>,
@@ -219,8 +221,9 @@ impl ServiceWorker {
                 ServiceTask::Rotate {
                     epoch_id,
                     cache_wb_for_compact,
+                    require_snapshot,
                 } => {
-                    self.handle_rotate(epoch_id, cache_wb_for_compact);
+                    self.handle_rotate(epoch_id, cache_wb_for_compact, require_snapshot);
                 }
                 ServiceTask::Truncates(truncates) => drop(truncates),
                 ServiceTask::Upload(sender) => {
@@ -245,7 +248,7 @@ impl ServiceWorker {
     fn handle_write(&mut self, wb: Vec<PeerBatch>) {
         if let Some(wal_writer) = &mut self.async_wal_writer {
             let old_file_off = wal_writer.file_off;
-            let (epoch_id, file_off, rotated) = wal_writer.write_batch(&wb).unwrap();
+            let (epoch_id, file_off, rotated) = wal_writer.write_batch(&wb, false).unwrap();
             if rotated {
                 // When rotated, the old file is already synced.
                 self.bytes_since_last_sync = 0;
@@ -349,7 +352,7 @@ impl ServiceWorker {
         }
     }
 
-    fn handle_rotate(&mut self, epoch_id: u32, cache_wb: bool) {
+    fn handle_rotate(&mut self, epoch_id: u32, cache_wb: bool, require_snapshot: bool) {
         if let Some(writer) = self.async_wal_writer.as_mut() {
             debug_assert_eq!(writer.epoch_id, epoch_id);
             let file_off = writer.file_off;
@@ -368,6 +371,7 @@ impl ServiceWorker {
             .send(CompactTask::Compact {
                 epoch_id,
                 compact_wb: self.compact_wb.take(),
+                require_snapshot,
             })
             .unwrap();
         let can_cache =

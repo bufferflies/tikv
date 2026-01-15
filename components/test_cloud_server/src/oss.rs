@@ -19,6 +19,7 @@ use bytes::Buf;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use engine_traits::ListObjectContent;
+use filetime::FileTime;
 use futures::{future::ok, StreamExt, TryStreamExt};
 use glob::glob;
 use hyper::{
@@ -51,6 +52,7 @@ struct ServiceContext {
     tagging: Mutex<HashMap<String, Tagging>>, // file path -> Tagging
     delay_ms: Arc<AtomicU32>,
     put_delay_rules: DelayRules,
+    as_if_date: Arc<Mutex<Option<DateTime<Utc>>>>,
 }
 
 impl ServiceContext {
@@ -99,6 +101,14 @@ impl ServiceContext {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
     }
+
+    fn maybe_override_mtime(&self, file_path: &Path) -> Result<()> {
+        if let Some(as_if_date) = *self.as_if_date.lock().unwrap() {
+            let file_time = FileTime::from_system_time(as_if_date.into());
+            filetime::set_file_mtime(file_path, file_time)?;
+        }
+        Ok(())
+    }
 }
 
 pub struct ObjectStorageService {
@@ -110,6 +120,7 @@ pub struct ObjectStorageService {
     runtime: Runtime,
     delay_ms: Arc<AtomicU32>,
     put_delay_rules: DelayRules,
+    as_if_date: Arc<Mutex<Option<DateTime<Utc>>>>,
 }
 
 impl ObjectStorageService {
@@ -129,6 +140,7 @@ impl ObjectStorageService {
             runtime,
             delay_ms: Default::default(),
             put_delay_rules: Default::default(),
+            as_if_date: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -144,6 +156,74 @@ impl ObjectStorageService {
     pub fn set_put_delay(&self, keyword: &str, delay: Duration) {
         self.put_delay_rules
             .insert(keyword.to_string(), delay.as_millis() as u64);
+    }
+
+    pub fn set_as_if_date(&self, as_if_date: Option<DateTime<Utc>>) {
+        let mut guard = self.as_if_date.lock().unwrap();
+        *guard = as_if_date;
+    }
+
+    /// Remove objects under `prefix` whose modified time is older than
+    /// `expire_dur`.
+    ///
+    /// The current time is anchored to `as_if_date` if it is set; otherwise it
+    /// falls back to `Utc::now()`. Returns the number of removed objects.
+    pub fn expire_path(&self, prefix: &str, expire_dur: Duration) -> Result<usize> {
+        let root = self
+            .store_path
+            .join(prefix.trim_start_matches('/'))
+            .to_path_buf();
+
+        if !root.exists() {
+            return Ok(0);
+        }
+
+        let now = self.as_if_date.lock().unwrap().unwrap_or_else(Utc::now);
+        let expire = chrono::Duration::from_std(expire_dur)
+            .unwrap_or_else(|_| chrono::Duration::max_value());
+
+        let mut removed = 0usize;
+        let mut stack = vec![root];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                for entry in std::fs::read_dir(&path)? {
+                    stack.push(entry?.path());
+                }
+                continue;
+            }
+
+            let metadata = match std::fs::metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    debug!("skip path metadata error"; "path" => %path.display(), "error" => %e);
+                    continue;
+                }
+            };
+
+            let modified = match metadata.modified() {
+                Ok(m) => m,
+                Err(e) => {
+                    debug!("skip path get mtime error"; "path" => %path.display(), "error" => %e);
+                    continue;
+                }
+            };
+
+            let modified: DateTime<Utc> = modified.into();
+            let age = now.signed_duration_since(modified);
+            if age >= expire {
+                match std::fs::remove_file(&path) {
+                    Ok(_) => {
+                        removed += 1;
+                        debug!("expired object removed"; "path" => %path.display());
+                    }
+                    Err(e) => {
+                        error!("failed to remove expired object"; "path" => %path.display(), "error" => %e);
+                    }
+                }
+            }
+        }
+
+        Ok(removed)
     }
 
     fn make_file_path(store_path: &Path, uri: &str) -> PathBuf {
@@ -191,6 +271,7 @@ impl ObjectStorageService {
         let len = file.metadata().await?.len();
         drop(file);
         fs::rename(&tmp_file_path, &file_path).await?;
+        ctx.maybe_override_mtime(&file_path)?;
         // sync_dir, see `file_system::sync_dir`
         File::open(parent).await?.sync_all().await?;
 
@@ -406,6 +487,8 @@ impl ObjectStorageService {
                 )
             })?;
         }
+
+        ctx.maybe_override_mtime(&file_path)?;
 
         let tagging_directive = parts
             .headers
@@ -635,6 +718,7 @@ impl ObjectStorageService {
             tagging: Default::default(),
             delay_ms: self.delay_ms.clone(),
             put_delay_rules: self.put_delay_rules.clone(),
+            as_if_date: self.as_if_date.clone(),
         });
         let make_svc = make_service_fn(move |_conn| {
             let ctx = ctx.clone();
@@ -739,6 +823,7 @@ mod tests {
     };
 
     use bytes::Bytes;
+    use chrono::TimeZone;
     use kvengine::{
         dfs,
         dfs::{Dfs, FileType, Options, S3Fs},
@@ -856,6 +941,81 @@ mod tests {
         }
 
         runtime.block_on(futures::future::join_all(handles));
+        drop(s3fs);
+        oss.graceful_shutdown();
+    }
+
+    #[test]
+    fn test_oss_as_if_date_and_expire() {
+        test_util::init_log_for_test();
+
+        let base_dir = tempfile::Builder::new()
+            .prefix("test_oss_as_if_date_")
+            .tempdir()
+            .unwrap();
+
+        let mut oss = ObjectStorageService::new(base_dir.path());
+        let create_date = Utc.with_ymd_and_hms(2020, 1, 2, 3, 4, 5).single().unwrap();
+        oss.set_as_if_date(Some(create_date));
+        oss.start_server();
+
+        let bucket = "bkt";
+        let prefix = "pfx";
+        let s3fs = S3Fs::new(
+            prefix.to_string(),
+            format!("http://127.0.0.1:{}", oss.port()),
+            "admin".to_string(),
+            "admin".to_string(),
+            "local".to_string(),
+            bucket.to_string(),
+        );
+        let runtime = s3fs.get_runtime();
+
+        // Put the first object with the initial as_if_date.
+        let old_key = format!("{}/old.obj", prefix);
+        runtime
+            .block_on(s3fs.put_object(
+                old_key.clone(),
+                Bytes::from("hello".as_bytes().to_vec()),
+                old_key.clone(),
+            ))
+            .unwrap();
+
+        let old_path = oss.store_path.join(format!("{}/{}", bucket, old_key));
+        let old_mtime: DateTime<Utc> = std::fs::metadata(&old_path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .into();
+        assert_eq!(old_mtime, create_date);
+
+        // Advance the reference time and create a second object.
+        let ref_date = create_date + chrono::Duration::days(10);
+        oss.set_as_if_date(Some(ref_date));
+        let new_key = format!("{}/new.obj", prefix);
+        runtime
+            .block_on(s3fs.put_object(
+                new_key.clone(),
+                Bytes::from("world".as_bytes().to_vec()),
+                new_key.clone(),
+            ))
+            .unwrap();
+        let new_path = oss.store_path.join(format!("{}/{}", bucket, new_key));
+        let new_mtime: DateTime<Utc> = std::fs::metadata(&new_path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .into();
+        assert_eq!(new_mtime, ref_date);
+
+        // Expire files older than 5 days relative to the current as_if_date.
+        let removed = oss
+            .expire_path(bucket, Duration::from_secs(5 * 24 * 3600))
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!old_path.exists());
+        assert!(new_path.exists());
+
         drop(s3fs);
         oss.graceful_shutdown();
     }

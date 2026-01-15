@@ -13,6 +13,7 @@ use bytes::Bytes;
 use cloud_encryption::KeyspaceEncryptionConfig;
 use cloud_worker::broadcast_schema_update_to_all_stores;
 use engine_traits::ObjectStorage;
+use fail::FailScenario;
 use kvengine::{
     dfs::{DFSConfig, Dfs, FileType, Options, S3Fs},
     table::columnar::{
@@ -127,11 +128,25 @@ fn test_restore_keyspace_with_archive(#[case] enable_encryption: bool) {
     });
 }
 
+#[test]
+fn test_restore_archived_keyspace_with_expiration() {
+    test_util::init_log_for_test();
+    test_restore_archived_keyspace_opt(TestRestoreKeyspaceOptions {
+        expire_store_backup: true,
+        nodes_count: 3,
+        with_failpoints: true,
+        ..Default::default()
+    });
+}
+
 struct TestRestoreKeyspaceOptions {
     loop_count: usize,
     target_regions: usize,
     enable_encryption: bool,
     lightweight: bool,
+    expire_store_backup: bool,
+    with_failpoints: bool,
+    nodes_count: usize,
 }
 
 impl Default for TestRestoreKeyspaceOptions {
@@ -141,6 +156,9 @@ impl Default for TestRestoreKeyspaceOptions {
             target_regions: DEFAULT_TARGET_REGIONS,
             enable_encryption: false,
             lightweight: true,
+            expire_store_backup: false,
+            with_failpoints: false,
+            nodes_count: NODES_COUNT,
         }
     }
 }
@@ -520,12 +538,12 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
         (2, 1, 1),
     ];
     let max_data_count = cases.iter().map(|x| x.1).max().unwrap();
-
+    let _scenario = options.with_failpoints.then(|| FailScenario::setup());
     let (_temp_dir, mut oss, dfs_config) = prepare_dfs("test_restore_keyspace_");
     let security_config = new_security_config();
     let pd_wrapper = PdWrapper::new_test(1, &security_config, None);
     let mut cluster = ServerClusterBuilder::new(
-        alloc_node_id_vec(NODES_COUNT),
+        alloc_node_id_vec(options.nodes_count),
         |_, conf: &mut TikvConfig| {
             conf.dfs = dfs_config.clone();
             // Set small mem-table size to make data reach L1 and generate over bound
@@ -536,6 +554,7 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
             conf.rfengine.target_file_size = ReadableSize::kb(512);
             conf.rfengine.lightweight_backup = options.lightweight;
             conf.rfengine.wal_chunk_target_file_size = ReadableSize::kb(32);
+            conf.rfengine.force_rotate_interval = Some(ReadableDuration::hours(10));
             conf.raft_store.enable_inner_key_offset = true;
             conf.security = security_config.clone();
         },
@@ -597,9 +616,12 @@ fn test_restore_archived_keyspace_opt(options: TestRestoreKeyspaceOptions) {
                 &mut cluster,
                 &dfs_config,
                 security_config.clone(),
+                &mut oss,
                 keyspace_id,
                 data_count,
                 options.lightweight,
+                options.expire_store_backup,
+                options.with_failpoints,
                 &runtime,
             );
         }
@@ -615,9 +637,12 @@ fn test_restore_archived_keyspace_impl(
     cluster: &mut ServerCluster,
     dfs_config: &DFSConfig,
     security_config: SecurityConfig,
+    oss: &mut ObjectStorageService,
     keyspace_id: u32,
     data_count: usize,
     lightweight: bool,
+    expire_store_backup: bool,
+    with_failpoints: bool,
     runtime: &Runtime,
 ) {
     step!("case: {}:{}", case_idx, loop_idx);
@@ -663,6 +688,23 @@ fn test_restore_archived_keyspace_impl(
     let mut ref_store_list = Vec::with_capacity(BACKUP_DAYS);
     let mut last_ref_store = client.dump_ref_store();
     for idx in 0..BACKUP_DAYS {
+        // Simulate daily time passing so object mtimes reflect the logical archive
+        // date.
+        let archive_day = date_time.and_utc();
+
+        // Continuously expire WAL objects under `store_backup` to verify archiving can
+        // fall back to the previous archive when WAL chunks have been GC-ed.
+        if idx > 0 && expire_store_backup {
+            let wal_prefix = format!(
+                "{}/{}/store_backup",
+                dfs_config.s3_bucket, dfs_config.prefix
+            );
+            let expired = oss
+                .expire_path(&wal_prefix, Duration::from_secs(2 * 24 * 60 * 60))
+                .unwrap();
+            info!("expired wal objects before archiving"; "case_idx" => case_idx, "loop_idx" => loop_idx, "backup_idx" => idx, "expired" => expired, "day" => %archive_day.date_naive());
+        }
+
         // Import data.
         let commit_action = CommitAction::AsyncCommitSecondaryKeys(Duration::MAX);
         let write_method = [TxnWriteMethod::Normal, TxnWriteMethod::FileBased]
@@ -733,6 +775,14 @@ fn test_restore_archived_keyspace_impl(
 
         date_time = date_time.checked_add_days(chrono::Days::new(1)).unwrap();
         pd_client.set_tso(TimeStamp::compose(date_time.timestamp_millis() as u64, 0));
+        oss.set_as_if_date(Some(date_time.and_utc()));
+        if with_failpoints {
+            fail::cfg(
+                "rfengine::now_unix_millis",
+                &format!("return({})", date_time.timestamp_millis()),
+            )
+            .unwrap();
+        }
     }
 
     // Delete old backup.

@@ -10,14 +10,16 @@ use std::{
     os::unix::fs::{FileExt, MetadataExt},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
     thread::JoinHandle,
+    time::Duration,
 };
 
 use arc_swap::ArcSwap;
 use bytes::{Buf, Bytes};
+use chrono::Utc;
 use dashmap::mapref::one::Ref;
 use engine_traits::{GetObjectOptions, ObjectStorage};
 use file_system::{open_direct_file, IoRateLimitMode, IoRateLimiter};
@@ -193,6 +195,10 @@ pub struct RfEngineCore {
 
     pub(crate) dfs_worker_healthy: Healthy,
 
+    /// unix mill of last rotate.
+    pub(crate) last_rotate_time: Arc<AtomicI64>,
+    pub(crate) force_rotation_interval: Option<Duration>,
+
     _lock: fslock::LockFile, // hold lock to avoid release
 }
 
@@ -290,6 +296,8 @@ impl RfEngineCore {
             _lock: lock,
             dfs_statistics: Arc::default(),
             dfs_worker_healthy: dfs_worker_healthy.clone(),
+            last_rotate_time: Arc::new(AtomicI64::new(now_unix_millis())),
+            force_rotation_interval: cfg.force_rotate_interval.map(|v| v.0),
         };
         let async_offset = en.load(&manifest)?;
         if cfg.cli_mode {
@@ -436,12 +444,22 @@ impl RfEngineCore {
         let wb = Arc::new(wb.into_vector());
         let mut writer = self.writer.lock().unwrap();
         let old_file_off = writer.get_file_off();
-        let (epoch_id, file_off, rotated) = writer.write_batch(wb.clone())?;
+
+        let last_rotation = self.last_rotate_time.load(Ordering::SeqCst);
+        let last_rotation_gap =
+            Duration::from_millis(now_unix_millis().saturating_sub(last_rotation) as u64);
+        let need_rotate = self
+            .force_rotation_interval
+            .is_some_and(|interval| self.lightweight && last_rotation_gap > interval);
+        let (epoch_id, file_off, rotated) = writer.write_batch(wb.clone(), need_rotate)?;
         if rotated {
+            self.last_rotate_time
+                .store(now_unix_millis(), Ordering::SeqCst);
             self.current_epoch_id.store(epoch_id, Ordering::SeqCst);
             if let Err(e) = self.task_sender.send(ServiceTask::Rotate {
                 epoch_id: epoch_id - 1, // the epoch of the old raft log
                 cache_wb_for_compact: true,
+                require_snapshot: need_rotate,
             }) {
                 warn!("send service rotate task failed: {:?}", e);
             }
@@ -450,10 +468,14 @@ impl RfEngineCore {
             warn!("send service write task failed: {:?}", e);
         }
         ENGINE_PERSIST_DURATION_HISTOGRAM.observe(timer.saturating_elapsed_secs());
-        if rotated {
-            return Ok(file_off as usize);
-        }
-        Ok(file_off.saturating_sub(old_file_off) as usize)
+
+        let write_size = if rotated {
+            file_off
+        } else {
+            file_off.saturating_sub(old_file_off)
+        } as usize;
+
+        Ok(write_size)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1748,9 +1770,21 @@ impl Display for PeerTag {
     }
 }
 
+fn now_unix_millis() -> i64 {
+    fail::fail_point!("rfengine::now_unix_millis", |v| {
+        v.expect("rfengine::now_unix_millis requires a return value")
+            .parse::<i64>()
+            .expect("rfengine::now_unix_millis return value must be an integer")
+    });
+    Utc::now().naive_utc().timestamp_millis()
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs::OpenOptions, os::unix::prelude::FileExt, time::Duration};
+    use std::{
+        collections::HashMap, fs::OpenOptions, os::unix::prelude::FileExt, sync::atomic::Ordering,
+        time::Duration,
+    };
 
     use ::test_util::eventually;
     use eraftpb::EntryType;

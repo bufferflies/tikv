@@ -156,7 +156,8 @@ impl CompactWorker {
                 CompactTask::Compact {
                     epoch_id,
                     compact_wb,
-                } => self.handle_compact(epoch_id, compact_wb),
+                    require_snapshot: take_snapshot,
+                } => self.handle_compact(epoch_id, compact_wb, take_snapshot),
                 CompactTask::HeavyBackup(task) => self.handle_heavy_backup(task),
                 CompactTask::Snapshot => {
                     self.handle_snapshot();
@@ -212,7 +213,12 @@ impl CompactWorker {
         }
     }
 
-    fn handle_compact(&mut self, epoch_id: u32, compact_wb: Option<WriteBatch>) {
+    fn handle_compact(
+        &mut self,
+        epoch_id: u32,
+        compact_wb: Option<WriteBatch>,
+        take_snapshot: bool,
+    ) {
         info!("handle compact {}", epoch_id);
         let has_wb = compact_wb.is_some();
         if let Err(err) = self.compact(epoch_id, compact_wb) {
@@ -228,7 +234,7 @@ impl CompactWorker {
             self.pending_compact_wb_count.fetch_sub(1, Ordering::SeqCst);
         }
 
-        if self.manifest.should_snapshot() {
+        if self.manifest.should_snapshot() || take_snapshot {
             self.handle_snapshot();
         }
     }
@@ -1041,6 +1047,9 @@ pub(crate) enum CompactTask {
         epoch_id: u32,
         // cache write batch for compact.
         compact_wb: Option<WriteBatch>,
+        // Normally, a snapshot will be taken and uploaded to DFS every `EPOCH_SNAPSHOT_LEN`
+        // epoches. When this set, will upload a snapshot immediately.
+        require_snapshot: bool,
     },
     HeavyBackup(BackupTask),
     Close,

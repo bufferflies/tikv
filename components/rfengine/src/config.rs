@@ -101,6 +101,15 @@ pub struct Config {
     /// If `None`, will only flush chunks to S3 when the size limit reached or
     /// shutting down.
     pub max_wal_chunk_gap_duration: Option<ReadableDuration>,
+
+    /// When set, will keep at least one rotation was executed and its snapshot
+    /// was uploaded to DFS every specified duration.
+    ///
+    /// This can prevent archiving lightweight backups failed due to the latter
+    /// references to an expired snapshot.
+    ///
+    /// Default: None
+    pub force_rotate_interval: Option<ReadableDuration>,
 }
 
 #[allow(deprecated)]
@@ -124,6 +133,7 @@ impl Default for Config {
             rlog_file_size: ReadableSize::mb(256),
             compact_bytes_per_sec: ReadableSize::mb(200),
             max_wal_chunk_gap_duration: None,
+            force_rotate_interval: None,
         }
     }
 }

@@ -43,6 +43,7 @@ impl RfEngineCore {
                 .send(ServiceTask::Rotate {
                     epoch_id,
                     cache_wb_for_compact: false,
+                    require_snapshot: false,
                 })
                 .unwrap();
             epoch_id += 1;

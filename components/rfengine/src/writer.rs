@@ -395,7 +395,7 @@ impl WalWriter {
         }
     }
 
-    pub(crate) fn flush(&mut self) -> Result<(u32, u64, bool)> {
+    pub(crate) fn flush(&mut self, request_rotate: bool) -> Result<(u32, u64, bool)> {
         self.compress_batch();
         let batch = self.buf.as_mut();
         let (mut batch_header, batch_payload) = batch.split_at_mut(BATCH_HEADER_SIZE);
@@ -413,7 +413,7 @@ impl WalWriter {
         // Check should_rotate or should_chunk after put this write batch to buf avoid
         // file size overflow.
         let mut throttle_sleep = Duration::ZERO;
-        if self.should_rotate() {
+        if self.should_rotate(request_rotate) {
             while !self.safe_to_rotate() {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 throttle_sleep += std::time::Duration::from_secs(1);
@@ -452,11 +452,15 @@ impl WalWriter {
         }
     }
 
-    pub(crate) fn write_batch(&mut self, wb: &[PeerBatch]) -> Result<(u32, u64, bool)> {
+    pub(crate) fn write_batch(
+        &mut self,
+        wb: &[PeerBatch],
+        request_rotate: bool,
+    ) -> Result<(u32, u64, bool)> {
         for peer_batch in wb {
             self.append_region_data(peer_batch);
         }
-        self.flush()
+        self.flush(request_rotate)
     }
 
     fn compress_batch(&mut self) {
@@ -490,9 +494,9 @@ impl WalWriter {
         }
     }
 
-    fn should_rotate(&self) -> bool {
+    fn should_rotate(&self, ignore_size: bool) -> bool {
         let current_size = self.buf.len() + self.file_off as usize;
-        current_size > self.wal_size && self.writer_type != WriterType::Async
+        (ignore_size || current_size > self.wal_size) && self.writer_type != WriterType::Async
     }
 
     // If the current epoch id is 5, the rotated epoch id is 6, it would overwrite
@@ -565,10 +569,16 @@ pub(crate) enum WalWriterExt {
 const DOUBLE_WRITE_UNHEALTHY_THRESHOLD: usize = 4096;
 
 impl WalWriterExt {
-    pub(crate) fn write_batch(&mut self, wb: Arc<Vec<PeerBatch>>) -> Result<(u32, u64, bool)> {
+    pub(crate) fn write_batch(
+        &mut self,
+        wb: Arc<Vec<PeerBatch>>,
+        request_rotate: bool,
+    ) -> Result<(u32, u64, bool)> {
         match self {
-            WalWriterExt::SingleWriter(writer) => writer.write_batch(&wb),
-            WalWriterExt::DoubleWriter(double_writer) => double_writer.write_batch(wb),
+            WalWriterExt::SingleWriter(writer) => writer.write_batch(&wb, request_rotate),
+            WalWriterExt::DoubleWriter(double_writer) => {
+                double_writer.write_batch(wb, request_rotate)
+            }
         }
     }
 
@@ -693,13 +703,18 @@ impl DoubleWriter {
         Ok(())
     }
 
-    pub(crate) fn write_batch(&mut self, wb: Arc<Vec<PeerBatch>>) -> Result<(u32, u64, bool)> {
+    pub(crate) fn write_batch(
+        &mut self,
+        wb: Arc<Vec<PeerBatch>>,
+        request_rotate: bool,
+    ) -> Result<(u32, u64, bool)> {
         let (tx, rx) = tikv_util::mpsc::bounded(2);
         for sender in &self.senders {
             sender
                 .send(DoubleWriterMessage::Write {
                     wb: wb.clone(),
                     res_tx: tx.clone(),
+                    request_rotate,
                 })
                 .unwrap();
         }
@@ -748,6 +763,7 @@ pub(crate) enum DoubleWriterMessage {
     Write {
         wb: Arc<Vec<PeerBatch>>,
         res_tx: Sender<Result<(u32, u64, bool)>>,
+        request_rotate: bool,
     },
     OpenFile {
         epoch_id: u32,
@@ -774,7 +790,11 @@ impl DoubleWriterWorker {
     pub(crate) fn run(&mut self) {
         while let Ok(msg) = self.rx.recv() {
             match msg {
-                DoubleWriterMessage::Write { wb, res_tx } => {
+                DoubleWriterMessage::Write {
+                    wb,
+                    res_tx,
+                    request_rotate,
+                } => {
                     if !self.healthy {
                         continue;
                     }
@@ -789,7 +809,7 @@ impl DoubleWriterWorker {
                         RFENGINE_DOUBLE_WRITE_HEALTHY_GAUGE.set(0);
                         continue;
                     }
-                    let _ = res_tx.send(self.writer.write_batch(&wb));
+                    let _ = res_tx.send(self.writer.write_batch(&wb, request_rotate));
                 }
                 DoubleWriterMessage::OpenFile {
                     epoch_id,

@@ -115,7 +115,7 @@ pub(crate) fn snapshot_rlog_key_suffix(epoch: u32) -> String {
     format!("{:08x}.rlog", epoch)
 }
 
-pub(crate) fn snapshot_rlog_key_prefix(store_id: u64) -> String {
+pub fn snapshot_rlog_key_prefix(store_id: u64) -> String {
     format!("store_backup/{:016x}/snapshots/r", store_id)
 }
 
