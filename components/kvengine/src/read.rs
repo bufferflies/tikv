@@ -19,13 +19,14 @@ use protobuf::Message;
 use tikv_util::{
     box_try,
     codec::number::{U32_SIZE, U64_SIZE},
+    memory::{MemoryLimiter, MemoryLimiterGuard},
     time::{duration_to_sec, Instant},
 };
 use tipb::ColumnInfo;
 use txn_types::Lock;
 
 use crate::{
-    context::SnapCtx,
+    context::{IaCtx, SnapCtx},
     dfs::FileType,
     ia::types::FileSegmentIdent,
     limiter::RegionLimiter,
@@ -145,7 +146,8 @@ impl SnapAccess {
         ctx: &SnapCtx,
         mem_table_data: &[u8],
         snapshot: &[u8],
-    ) -> Result<Self> {
+        memory_limiter: MemoryLimiter,
+    ) -> Result<(Self, MemoryLimiterGuard)> {
         let mut change_set = kvenginepb::ChangeSet::default();
         change_set.merge_from_bytes(snapshot).unwrap();
         if !change_set.has_snapshot() {
@@ -154,6 +156,21 @@ impl SnapAccess {
         }
 
         let snap = change_set.get_snapshot();
+
+        let mut tables_size = mem_table_data.len();
+        if matches!(ctx.ia_ctx, IaCtx::Disabled) {
+            tables_size += estimate_tables_size_from_snapshot(snap, ctx.prepare_type);
+        }
+        let mem_limiter_guard = match memory_limiter.acquire(tables_size as u64) {
+            Ok(guard) => guard,
+            Err(exceeded_size) => {
+                warn!("{} memory limit exceeded", tag;
+                    "tables_size" => tables_size, "exceeded" => exceeded_size,
+                    "limiter" => ?memory_limiter);
+                return Err(Error::MemoryLimitExceeded(exceeded_size));
+            }
+        };
+
         let encryption_key = encryption_key_from_shard_properties(
             snap.get_properties(),
             ctx.encryption_key_manager.clone(),
@@ -170,7 +187,8 @@ impl SnapAccess {
             encryption_key,
         )
         .await?;
-        Self::from_change_set_and_memtable_data(tag, ctx, change_set, mem_tbls).await
+        let snap = Self::from_change_set_and_memtable_data(tag, ctx, change_set, mem_tbls).await?;
+        Ok((snap, mem_limiter_guard))
     }
 
     async fn construct_memtables(
@@ -1956,6 +1974,7 @@ mod tests {
     use kvenginepb::TableCreate;
     use proptest::prelude::*;
     use protobuf::Message;
+    use tikv_util::memory::MemoryLimiter;
 
     use crate::{
         apply::create_snapshot_tables,
@@ -2244,7 +2263,8 @@ mod tests {
             cs.set_shard_ver(shard_ver);
             cs.set_snapshot(snap_pb);
             let snap_bin = cs.write_to_bytes().unwrap();
-            let remote_snap = block_on(SnapAccess::construct_snapshot("test", &snap_ctx, &mem_bin, &snap_bin)).unwrap();
+            let mem_limiter = MemoryLimiter::new(u64::MAX, None);
+            let remote_snap = block_on(SnapAccess::construct_snapshot("test", &snap_ctx, &mem_bin, &snap_bin, mem_limiter)).unwrap().0;
 
             let inner_ranges = inner_ranges.iter().map(|(start, end)| (start.as_ref(), end.as_ref())).collect::<Vec<_>>();
             let ref_store_in_ranges = ref_store.new_in_ranges(&inner_ranges);

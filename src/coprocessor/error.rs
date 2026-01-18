@@ -32,6 +32,9 @@ pub enum Error {
     #[error("Remote coprocessor network error {0:?}")]
     RemoteNetwork(String),
 
+    #[error("Remote service unavailable error {0:?}")]
+    RemoteServiceUnavailable(String),
+
     #[error("{0}")]
     InvalidMaxTsUpdate(#[from] concurrency_manager::InvalidMaxTsUpdate),
 
@@ -141,6 +144,9 @@ impl ErrorCodeExt for Error {
             Error::OverloadProtection(_) => error_code::coprocessor::OVERLOAD_PROTECTION,
             Error::RemoteNetwork(_) => error_code::coprocessor::REMOTE_NETWORK,
             Error::InvalidMaxTsUpdate(_) => error_code::coprocessor::INVALID_MAX_TS_UPDATE,
+            Error::RemoteServiceUnavailable(_) => {
+                error_code::coprocessor::REMOTE_SERVICE_UNAVAILABLE
+            }
             Error::Other(_) => error_code::UNKNOWN,
         }
     }

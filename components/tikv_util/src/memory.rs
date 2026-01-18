@@ -241,6 +241,11 @@ impl MemoryLimiter {
     pub fn capacity(&self) -> u64 {
         self.cap
     }
+
+    #[cfg(feature = "testexport")]
+    pub fn set_cap(&mut self, cap: u64) {
+        self.cap = cap;
+    }
 }
 
 pub struct MemoryLimiterGuard {

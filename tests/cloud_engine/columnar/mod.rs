@@ -57,6 +57,7 @@ use tikv_util::{
     codec::bytes::encode_bytes,
     config::{AbsoluteOrPercentSize, ReadableDuration, ReadableSize},
     info,
+    memory::MemoryLimiter,
 };
 use tipb::ColumnInfo;
 
@@ -638,6 +639,7 @@ fn test_get_snapshot_from_leader_by_status_api() {
         read_columnar: true,
         encryption_key_manager: kvengine.get_encryption_key_manager(),
     };
+    let mem_limiter = MemoryLimiter::new(u64::MAX, None);
     let snap_access = dfs
         .get_runtime()
         .block_on(SnapAccess::construct_snapshot(
@@ -645,8 +647,10 @@ fn test_get_snapshot_from_leader_by_status_api() {
             &snap_ctx,
             delegate_resp.get_mem_table_data(),
             delegate_resp.get_snapshot(),
+            mem_limiter,
         ))
-        .unwrap();
+        .unwrap()
+        .0;
     assert!(snap_access.has_schema_file());
     assert!(schema_files.contains_key(&schema_file_id));
 
@@ -955,14 +959,17 @@ fn test_columnar_ia_file() {
         read_columnar: true,
         encryption_key_manager: kvengine.get_encryption_key_manager(),
     };
+    let mem_limiter = MemoryLimiter::new(u64::MAX, None);
     let snap_access = runtime
         .block_on(SnapAccess::construct_snapshot(
             "test",
             &snap_ctx,
             delegate_resp.get_mem_table_data(),
             delegate_resp.get_snapshot(),
+            mem_limiter,
         ))
-        .unwrap();
+        .unwrap()
+        .0;
     assert!(snap_access.has_schema_file());
     assert!(schema_files.contains_key(&schema_file_id));
     let ts = client.get_ts().into_inner();

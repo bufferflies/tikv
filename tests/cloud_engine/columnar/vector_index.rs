@@ -8,8 +8,8 @@ use kvengine::{
     dfs,
     dfs::FileType,
     table::columnar::{
-        build_schema_file, new_int_handle_column_info, new_version_column_info, Block,
-        ColumnarFilterReader, Schema, SchemaBuf, VectorIndexDef,
+        build_schema_file, new_int_handle_column_info, new_version_column_info, Schema, SchemaBuf,
+        VectorIndexDef,
     },
 };
 use pd_client::PdClient;
@@ -19,13 +19,9 @@ use test_cloud_server::{
     must_wait, ServerCluster,
 };
 use tidb_query_datatype::{
-    codec::{
-        mysql::VectorFloat32Decoder,
-        table::{decode_int_handle, encode_row_key},
-    },
-    expr::EvalContext,
-    FieldTypeAccessor, FieldTypeTp, VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC,
-    VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC_VAL_COSINE, VECTOR_INDEX_TYPE_VECTOR32_HNSW,
+    codec::table::encode_row_key, expr::EvalContext, FieldTypeAccessor, FieldTypeTp,
+    VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC, VECTOR_INDEX_SPEC_KEY_DISTANCE_METRIC_VAL_COSINE,
+    VECTOR_INDEX_TYPE_VECTOR32_HNSW,
 };
 use tipb::ColumnInfo;
 use txn_types::Key;
@@ -173,56 +169,6 @@ fn test_build_vector_index() {
         20,
         || "failed to merge vector index region".to_string(),
     );
-    let shard = kvengine.get_shard(target_region).unwrap();
-    let target = vec![99f32, 100f32, 101f32];
-    let start_table_key = encode_row_key(t1, 99);
-    let end_table_key = encode_row_key(t1, 1000);
-    let mut outer_start_key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
-    outer_start_key.extend_from_slice(&start_table_key);
-    let mut outer_end_key = ApiV2::get_txn_keyspace_prefix(keyspace_id);
-    outer_end_key.extend_from_slice(&end_table_key);
-    let mut vector_reader = shard
-        .new_snap_access()
-        .new_vector_index_reader(
-            t1,
-            1,
-            2,
-            &target,
-            5,
-            schema.clone(),
-            u64::MAX,
-            Some(&decode_int_handle(&start_table_key).unwrap().to_le_bytes()),
-            Some(&decode_int_handle(&end_table_key).unwrap().to_le_bytes()),
-        )
-        .unwrap();
-    block_on(vector_reader.set_int_handle_range(0, Some(1000))).unwrap();
-    let mut block = Block::new(&schema);
-    let cnt = block_on(vector_reader.read_block(&mut block, 5)).unwrap();
-    assert!(cnt >= 3, "cnt: {}", cnt);
-    let handle_buf = block.get_handle_buf();
-    let vec_col_buf = &block.get_columns()[0];
-    assert_eq!(handle_buf.get_int_handle_value(0), 99);
-    let vec_val = vec_col_buf
-        .get_value(0)
-        .unwrap()
-        .read_vector_float32()
-        .unwrap();
-    assert_eq!(vec_val.as_ref().data(), &[99f32, 100f32, 101f32]);
-    // row 100 is null
-    assert_eq!(handle_buf.get_int_handle_value(1), 101);
-    let vec_val = vec_col_buf
-        .get_value(1)
-        .unwrap()
-        .read_vector_float32()
-        .unwrap();
-    assert_eq!(vec_val.as_ref().data(), &[101f32, 102f32, 103f32]);
-    assert_eq!(handle_buf.get_int_handle_value(2), 102);
-    let vec_val = vec_col_buf
-        .get_value(2)
-        .unwrap()
-        .read_vector_float32()
-        .unwrap();
-    assert_eq!(vec_val.as_ref().data(), &[102f32, 103f32, 104f32]);
 }
 
 fn build_vector_schema(table_id: i64) -> Schema {

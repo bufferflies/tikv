@@ -171,6 +171,7 @@ impl ChangeSet {
 
 // `not_all_tables_loaded` means that some tables in `snap` are not loaded to
 // `tables`. Should only happen in "ignore lock" or restoration (`for_restore`).
+// Note: keep consistency with `estimate_tables_size_from_snapshot`.
 pub(crate) fn create_snapshot_tables(
     builder: &mut ShardDataBuilder,
     snap: &kvenginepb::Snapshot,
@@ -286,6 +287,47 @@ pub(crate) fn create_snapshot_tables(
     builder.set_lock_txn_files(tables.lock_txn_files.clone());
     builder.set_columnar_levels(col_levels);
     builder.set_vector_indexes(vector_indexes);
+}
+
+// Note: keep consistency with `create_snapshot_tables`.
+pub(crate) fn estimate_tables_size_from_snapshot(
+    snap: &kvenginepb::Snapshot,
+    prepare_type: PrepareType,
+) -> usize {
+    let mut tables_size: usize = 0;
+
+    let prepare_sst = matches!(prepare_type, PrepareType::SstOnly | PrepareType::All);
+    let prepare_columnar = matches!(prepare_type, PrepareType::ColumnarOnly | PrepareType::All);
+
+    let unconverted_l0s: HashSet<u64> = snap.get_unconverted_l0s().iter().copied().collect();
+    for l0_create in snap.get_l0_creates() {
+        if prepare_columnar && !prepare_sst && !unconverted_l0s.contains(&l0_create.id) {
+            continue;
+        }
+        tables_size += l0_create.size as usize;
+    }
+    if prepare_sst {
+        // TODO: handle blob.
+        tables_size += snap
+            .get_table_creates()
+            .iter()
+            .map(|t| t.meta_offset as usize)
+            .sum::<usize>();
+    }
+    if prepare_columnar {
+        tables_size += snap
+            .get_columnar_creates()
+            .iter()
+            .map(|t| t.meta_offset as usize)
+            .sum::<usize>();
+        // Note: Vector index is not supported in next-gen, so we skip it here.
+        // tables_size += snap
+        //     .get_vector_indexes()
+        //     .iter()
+        //     .flat_map(|vec_idx| vec_idx.get_files().iter().map(|f|
+        // f.meta_offset as usize))     .sum::<usize>();
+    }
+    tables_size
 }
 
 impl EngineCore {
@@ -1160,5 +1202,73 @@ impl EngineCore {
         let mut builder = ShardDataBuilder::new(shard.get_data());
         builder.set_vector_indexes(vector_indexes);
         shard.set_data(builder.build());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_estimate_tables_size_from_snapshot() {
+        let mut snap = pb::Snapshot::default();
+
+        snap.mut_l0_creates().push(pb::L0Create {
+            id: 1,
+            size: 10,
+            ..Default::default()
+        });
+        snap.mut_l0_creates().push(pb::L0Create {
+            id: 2,
+            size: 20,
+            ..Default::default()
+        });
+
+        snap.mut_unconverted_l0s().push(2);
+
+        snap.mut_table_creates().push(pb::TableCreate {
+            meta_offset: 100,
+            ..Default::default()
+        });
+        snap.mut_table_creates().push(pb::TableCreate {
+            meta_offset: 200,
+            ..Default::default()
+        });
+
+        snap.mut_columnar_creates().push(pb::ColumnarCreate {
+            meta_offset: 1000,
+            ..Default::default()
+        });
+
+        // Note: Vector index is not supported in next-gen, so we skip it here.
+        // let mut vec_idx = pb::VectorIndex::default();
+        // vec_idx.mut_files().push(pb::VectorIndexFile {
+        //     meta_offset: 10000,
+        //     ..Default::default()
+        // });
+        // let mut vec_idx1 = pb::VectorIndex::default();
+        // vec_idx1.mut_files().push(pb::VectorIndexFile {
+        //     meta_offset: 20000,
+        //     ..Default::default()
+        // });
+        // vec_idx1.mut_files().push(pb::VectorIndexFile {
+        //     meta_offset: 30000,
+        //     ..Default::default()
+        // });
+        // snap.mut_vector_indexes().push(vec_idx);
+        // snap.mut_vector_indexes().push(vec_idx1);
+
+        assert_eq!(
+            estimate_tables_size_from_snapshot(&snap, PrepareType::SstOnly),
+            10 + 20 + 100 + 200
+        );
+        assert_eq!(
+            estimate_tables_size_from_snapshot(&snap, PrepareType::ColumnarOnly),
+            20 + 1000 // Vector index sizes (10000 + 20000 + 30000) removed
+        );
+        assert_eq!(
+            estimate_tables_size_from_snapshot(&snap, PrepareType::All),
+            10 + 20 + 100 + 200 + 1000 // Vector index sizes (10000 + 20000 + 30000) removed
+        );
     }
 }

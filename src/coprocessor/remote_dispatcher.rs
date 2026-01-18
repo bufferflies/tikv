@@ -4,7 +4,7 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
-use http::header;
+use http::{header, StatusCode};
 use kvengine::{dfs::DFS_REMOTE_CACHE_ADDR_HEADER, SnapAccess, LOCK_CF};
 use kvproto::coprocessor::Response;
 use protobuf::Message;
@@ -68,14 +68,18 @@ pub async fn remote_request(
                     .await
                     .map_err(|e| Error::RemoteNetwork(e.to_string()))?;
                 let is_pb_resp = response.headers().is_content_type_protobuf();
-                let success = response.status().is_success();
+                let status = response.status();
                 let body = hyper::body::to_bytes(response.into_body())
                     .await
                     .map_err(|e| Error::RemoteNetwork(e.to_string()))?;
-                if !success && !is_pb_resp {
-                    return Err(Error::Other(
-                        String::from_utf8_lossy(body.chunk()).to_string(),
-                    ));
+                if !status.is_success() && !is_pb_resp {
+                    let msg = String::from_utf8_lossy(body.chunk()).to_string();
+                    let err = if status == StatusCode::SERVICE_UNAVAILABLE {
+                        Error::RemoteServiceUnavailable(msg)
+                    } else {
+                        Error::Other(msg)
+                    };
+                    return Err(err);
                 }
                 Ok(body.to_vec())
             })
@@ -127,7 +131,7 @@ pub async fn remote_handle_request_with_retry(
     loop {
         match remote_handle_request(req_type, tag, remote_ctx, remote_req, deadline).await {
             Ok(resp) => return Ok(resp),
-            Err(err @ Error::RemoteNetwork(_)) => {
+            Err(err @ Error::RemoteNetwork(_) | err @ Error::RemoteServiceUnavailable(_)) => {
                 if deadline.check().is_err() {
                     warn!("{}:{}: deadline is exceeded", tag, req_type);
                     return Err(err);
@@ -367,7 +371,7 @@ impl RemoteDagDispatcher {
             .await
             {
                 Ok(data) => return Ok(data),
-                Err(err @ Error::RemoteNetwork(_)) => {
+                Err(err @ Error::RemoteNetwork(_) | err @ Error::RemoteServiceUnavailable(_)) => {
                     let dur_left: Duration =
                         deadline.check().map_err(|_| Error::DeadlineExceeded)?;
 
