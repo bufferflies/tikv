@@ -1276,7 +1276,7 @@ pub mod v1x {
         },
         restore_keyspace::{self, load_norm_backup_meta, ReportRestoreStepTrait, RestoreStep},
     };
-    use pd_client::pd_control::PdControl;
+    use pd_client::{pd_control::PdControl, PdClient};
     use serde::{
         de::{
             value::{MapDeserializer, StrDeserializer},
@@ -1573,6 +1573,11 @@ pub mod v1x {
 
     #[derive(Debug, Default, Serialize, Deserialize)]
     pub struct FlushResult {}
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct CreateLightweightBackupResponse {
+        pub backup_name: String,
+    }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
     #[serde(tag = "state")]
@@ -2275,6 +2280,15 @@ pub mod v1x {
                 ),
                 _ => method_not_allowed(&ctx),
             },
+            [.., "cluster", "lightweight_backup"] => match method {
+                Method::POST => (
+                    handle_create_lightweight_backup(ctx)
+                        .await
+                        .json_with_status(StatusCode::OK),
+                    "x_create_lightweight_backup",
+                ),
+                _ => method_not_allowed(&ctx),
+            },
             _ => not_found(&ctx),
         };
 
@@ -2486,8 +2500,7 @@ pub mod v1x {
         })
     }
 
-    async fn handle_flush_wal(cx: HttpRequestContext) -> HttpResult<FlushResult> {
-        let pdc = &cx.br.context.pd_client;
+    async fn flush_all_wal(pdc: &Arc<dyn PdClient>) -> Result<()> {
         let mut stores = pdc.get_all_stores(true)?;
         stores.retain(|store| {
             let is_tiflash = store
@@ -2508,17 +2521,46 @@ pub mod v1x {
                         .unwrap();
                     Request::post(uri).body(Body::empty())
                 }?;
-                let (status_code, _) =
-                    send_request_to_store(req, &store, sec, std::time::Duration::from_secs(600)).await?;
+                let (status_code, _) = send_request_to_store(
+                    req,
+                    &store,
+                    sec,
+                    std::time::Duration::from_secs(600),
+                )
+                .await?;
                 if !status_code.is_success() {
                     warn!("backup v1x: flush store failed."; "status_code" => %status_code, "store_id" => store.id);
-                    return Err(Error::Other(box_err!("store {} failed to flush wal; perhaps its dfs worker isn't healthy", store.id)))
+                    return Err(Error::Other(box_err!(
+                        "store {} failed to flush wal; perhaps its dfs worker isn't healthy",
+                        store.id
+                    )));
                 }
                 Ok(())
             });
         }
         futures::future::try_join_all(store_requests).await?;
+        Ok(())
+    }
 
+    async fn handle_create_lightweight_backup(
+        cx: HttpRequestContext,
+    ) -> HttpResult<CreateLightweightBackupResponse> {
+        // "Instant backup" in native-br is a lightweight backup.
+        let timeout = cx.br.config.rl().native_br.instant_backup_timeout.0;
+        let bk = cx
+            .br
+            .context
+            .backup_worker
+            .instant_backup_with_retry(timeout)
+            .await?;
+        flush_all_wal(&cx.br.context.pd_client).await?;
+        Ok(CreateLightweightBackupResponse {
+            backup_name: bk.name().to_owned(),
+        })
+    }
+
+    async fn handle_flush_wal(cx: HttpRequestContext) -> HttpResult<FlushResult> {
+        flush_all_wal(&cx.br.context.pd_client).await?;
         Ok(FlushResult::default())
     }
 
@@ -2564,7 +2606,8 @@ pub mod test_utils {
     use tikv_util::box_try;
 
     use crate::native_br::{
-        v1x::FlushResult, BackupItem, ListBackupResponse, RestoreProgressResponse, JSON_TIME_FORMAT,
+        v1x::{CreateLightweightBackupResponse, FlushResult},
+        BackupItem, ListBackupResponse, RestoreProgressResponse, JSON_TIME_FORMAT,
     };
 
     #[derive(Default, Serialize, Deserialize, Debug)]
@@ -2831,6 +2874,16 @@ pub mod test_utils {
                 Ok(box_try!(
                     self.inner
                         .post("api/v1/x/cluster/flush_wal", &DummyRequest {})
+                        .await
+                ))
+            })
+        }
+
+        pub fn create_lightweight_backup(&self) -> HttpResult<CreateLightweightBackupResponse> {
+            futures::executor::block_on(async {
+                Ok(box_try!(
+                    self.inner
+                        .post("api/v1/x/cluster/lightweight_backup", &DummyRequest {})
                         .await
                 ))
             })

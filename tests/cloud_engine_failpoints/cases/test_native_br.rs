@@ -509,15 +509,17 @@ fn test_native_br_service(#[values(true, false)] use_api_v1x: bool) {
 }
 
 #[rstest::rstest]
-#[case::trivial(false, false, false)]
-#[case::with_override_pack(true, false, false)]
-#[case::with_move(false, true, false)]
-#[case::with_point_in_time(false, false, true)]
-#[case::with_moved_point_in_time(false, true, true)]
+#[case::trivial(false, false, false, false)]
+#[case::with_override_pack(true, false, false, false)]
+#[case::with_move(false, true, false, false)]
+#[case::with_point_in_time(false, false, true, false)]
+#[case::with_moved_point_in_time(false, true, true, false)]
+#[case::trivial_with_lightweight_backup_api(false, false, false, true)]
 fn test_native_br_service_x(
     #[case] override_pack: bool,
     #[case] copy_to_another_pfx: bool,
     #[case] with_point_in_time: bool,
+    #[case] use_lightweight_backup_api: bool,
 ) {
     test_util::init_log_for_test();
     const KEYSPACE_ID: u32 = 1;
@@ -592,12 +594,21 @@ fn test_native_br_service_x(
         .unwrap();
     info!("backup v1x: {:?}", backup_x);
 
-    br_cli.flush_wals().unwrap();
+    let backup_name = if use_lightweight_backup_api {
+        let resp = br_cli.create_lightweight_backup().unwrap();
+        info!("create lightweight backup via v1x: {:?}", resp);
+        assert!(!resp.backup_name.is_empty());
+        resp.backup_name
+    } else {
+        // Keep the old behavior unchanged.
+        br_cli.flush_wals().unwrap();
+        backup_x.name.clone()
+    };
 
     let pack_backup = if override_pack {
         block_on(br_cli.pack_backup_with_override(
             1,
-            &backup_x.name,
+            &backup_name,
             &format!("ks{KEYSPACE_ID}"),
             S3Override {
                 prefix: Some(dfs_config.prefix.clone()),
@@ -605,7 +616,7 @@ fn test_native_br_service_x(
             },
         ))
     } else {
-        block_on(br_cli.pack_backup(1, &backup_x.name, &format!("ks{KEYSPACE_ID}")))
+        block_on(br_cli.pack_backup(1, &backup_name, &format!("ks{KEYSPACE_ID}")))
     }
     .unwrap();
     println!(">>> {pack_backup:?}");
@@ -616,7 +627,7 @@ fn test_native_br_service_x(
     }));
 
     // pack backup for another keyspace to verify that the meta won't be overridden.
-    block_on(br_cli.pack_backup(100, &backup_x.name, "ks2")).unwrap();
+    block_on(br_cli.pack_backup(100, &backup_name, "ks2")).unwrap();
     assert!(TryWaiter::timeout(10).interval(1).try_wait(|| {
         let task = block_on(br_cli.get_task_status(100)).unwrap();
         task.state().is_done()
