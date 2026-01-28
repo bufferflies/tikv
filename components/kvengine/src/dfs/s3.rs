@@ -416,6 +416,17 @@ impl S3FsCore {
         Some((file_id, file_type))
     }
 
+    /// Check if HTTP status code is retryable.
+    /// Alibaba Cloud OSS retryable errors:
+    /// - 429 Too Many Requests: QPS limit exceeded
+    /// - 500 Internal Server Error: service busy or internal error
+    /// - 503 Service Unavailable: bandwidth limit or QPS limit
+    /// The 500 and 503 errors are covered by `is_server_error()`.
+    /// Ref: https://www.alibabacloud.com/help/zh/oss/support/429-error
+    fn is_retryable_status(status: StatusCode) -> bool {
+        status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
+    }
+
     fn is_err_retryable<T>(&self, rustoto_err: &RusotoError<T>) -> bool {
         match rustoto_err {
             RusotoError::Service(_) => true,
@@ -424,7 +435,7 @@ impl S3FsCore {
             RusotoError::Credentials(cred) => cred.message.contains("Timeout"),
             RusotoError::Validation(_) => false,
             RusotoError::ParseError(_) => false,
-            RusotoError::Unknown(resp) => resp.status.is_server_error(),
+            RusotoError::Unknown(resp) => Self::is_retryable_status(resp.status),
             RusotoError::Blocking => false,
         }
     }
@@ -1998,5 +2009,39 @@ mod tests {
             tagging_deleted.tag_set.tag,
             Tagging::from_url_encoded("deleted=true").tag_set.tag
         );
+    }
+
+    fn make_unknown_error<T>(status: StatusCode) -> RusotoError<T> {
+        RusotoError::Unknown(BufferedHttpResponse {
+            status,
+            body: bytes::Bytes::new(),
+            headers: Default::default(),
+        })
+    }
+
+    #[test]
+    fn test_is_err_retryable_too_many_requests() {
+        let s3fs = new_test_s3fs(b"test");
+
+        // HTTP 429 (Too Many Requests) should be retryable.
+        let err = make_unknown_error::<rusoto_s3::GetObjectError>(StatusCode::TOO_MANY_REQUESTS);
+        assert!(s3fs.is_err_retryable(&err));
+
+        // HTTP 500 (Internal Server Error) should be retryable.
+        let err =
+            make_unknown_error::<rusoto_s3::GetObjectError>(StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(s3fs.is_err_retryable(&err));
+
+        // HTTP 503 (Service Unavailable) should be retryable.
+        let err = make_unknown_error::<rusoto_s3::GetObjectError>(StatusCode::SERVICE_UNAVAILABLE);
+        assert!(s3fs.is_err_retryable(&err));
+
+        // HTTP 404 (Not Found) should NOT be retryable.
+        let err = make_unknown_error::<rusoto_s3::GetObjectError>(StatusCode::NOT_FOUND);
+        assert!(!s3fs.is_err_retryable(&err));
+
+        // HTTP 400 (Bad Request) should NOT be retryable.
+        let err = make_unknown_error::<rusoto_s3::GetObjectError>(StatusCode::BAD_REQUEST);
+        assert!(!s3fs.is_err_retryable(&err));
     }
 }

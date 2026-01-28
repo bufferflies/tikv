@@ -53,6 +53,8 @@ struct ServiceContext {
     delay_ms: Arc<AtomicU32>,
     put_delay_rules: DelayRules,
     as_if_date: Arc<Mutex<Option<DateTime<Utc>>>>,
+    // Throttle injection: returns HTTP 429 (Too Many Requests).
+    throttle_count: Arc<AtomicU32>,
 }
 
 impl ServiceContext {
@@ -109,6 +111,26 @@ impl ServiceContext {
         }
         Ok(())
     }
+
+    /// Check if request should be throttled. Returns 429 (Too Many Requests) if
+    /// so.
+    fn maybe_throttle(&self) -> Option<Response<Body>> {
+        // Atomically decrement only if count > 0 to avoid race conditions.
+        let res = self
+            .throttle_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                if count > 0 { Some(count - 1) } else { None }
+            });
+        if res.is_err() {
+            return None;
+        }
+        Some(
+            Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .body(Body::from("QpsLimitExceeded"))
+                .unwrap(),
+        )
+    }
 }
 
 pub struct ObjectStorageService {
@@ -121,6 +143,8 @@ pub struct ObjectStorageService {
     delay_ms: Arc<AtomicU32>,
     put_delay_rules: DelayRules,
     as_if_date: Arc<Mutex<Option<DateTime<Utc>>>>,
+    // Throttle injection: returns 429.
+    throttle_count: Arc<AtomicU32>,
 }
 
 impl ObjectStorageService {
@@ -141,6 +165,7 @@ impl ObjectStorageService {
             delay_ms: Default::default(),
             put_delay_rules: Default::default(),
             as_if_date: Arc::new(Mutex::new(None)),
+            throttle_count: Default::default(),
         }
     }
 
@@ -161,6 +186,11 @@ impl ObjectStorageService {
     pub fn set_as_if_date(&self, as_if_date: Option<DateTime<Utc>>) {
         let mut guard = self.as_if_date.lock().unwrap();
         *guard = as_if_date;
+    }
+
+    /// Configure mock S3 to return 429 for the next `count` requests.
+    pub fn set_throttle(&self, count: u32) {
+        self.throttle_count.store(count, Ordering::Relaxed);
     }
 
     /// Remove objects under `prefix` whose modified time is older than
@@ -658,6 +688,10 @@ impl ObjectStorageService {
     }
 
     async fn service(ctx: Arc<ServiceContext>, req: Request<Body>) -> HttpResult {
+        // Check for throttle injection first.
+        if let Some(throttle_resp) = ctx.maybe_throttle() {
+            return Ok(throttle_resp);
+        }
         let res: Result<Response<Body>> = match *req.method() {
             Method::PUT if Self::is_copy_object_request(&req) => {
                 Self::handle_copy_object(ctx, req).await
@@ -719,6 +753,7 @@ impl ObjectStorageService {
             delay_ms: self.delay_ms.clone(),
             put_delay_rules: self.put_delay_rules.clone(),
             as_if_date: self.as_if_date.clone(),
+            throttle_count: self.throttle_count.clone(),
         });
         let make_svc = make_service_fn(move |_conn| {
             let ctx = ctx.clone();
@@ -820,6 +855,7 @@ mod tests {
     use std::{
         io::{Read, Seek},
         os::unix::fs::FileExt,
+        time::Duration,
     };
 
     use bytes::Bytes;
@@ -830,6 +866,7 @@ mod tests {
     };
     use rand::prelude::*;
     use tempfile::tempfile;
+    use tikv_util::time::Instant;
 
     use super::*;
 
@@ -1350,6 +1387,67 @@ mod tests {
                 }
             }
         });
+
+        drop(s3fs);
+        oss.graceful_shutdown();
+    }
+
+    /// Test S3 client retries with exponential backoff on 429 (Too Many
+    /// Requests) errors.
+    ///
+    /// T1: Configure OSS to return 429 for next 2 requests
+    /// T2: Create file (should retry with exponential backoff, then succeed)
+    /// T3: Verify data integrity
+    #[test]
+    fn test_oss_retry_exponential_backoff() {
+        test_util::init_log_for_test();
+
+        let base_dir = tempfile::Builder::new()
+            .prefix("test_oss_exp_backoff_")
+            .tempdir()
+            .unwrap();
+
+        let mut oss = ObjectStorageService::new(base_dir.path());
+        oss.start_server();
+
+        let s3fs = S3Fs::new(
+            "oss_test".to_string(),
+            format!("http://127.0.0.1:{}", oss.port()),
+            "admin".to_string(),
+            "admin".to_string(),
+            "local".to_string(),
+            "cse_test".to_string(),
+        );
+
+        let runtime = s3fs.get_runtime();
+        let file_id = 54321u64;
+        let write_data = Bytes::from(b"test_exp_backoff_data".to_vec());
+
+        // T1: Configure OSS to return 429 for next 2 requests.
+        oss.set_throttle(2);
+
+        // T2: Create file with exponential backoff retry.
+        // retry_cnt=1: 2^1 * 500ms = 1000ms
+        // retry_cnt=2: 2^2 * 500ms = 2000ms
+        // Total: ~3000ms
+        let start = Instant::now_coarse();
+        runtime
+            .block_on(s3fs.create(file_id, write_data.clone(), Options::default()))
+            .unwrap();
+        let elapsed = start.saturating_elapsed();
+
+        // Verify exponential backoff timing (~3s with some variance).
+        assert!(
+            elapsed >= Duration::from_millis(2500),
+            "expected >= 2500ms exponential backoff, got {:?}",
+            elapsed
+        );
+
+        // T3: Verify data integrity.
+        let read_data = runtime
+            .block_on(s3fs.read_file(file_id, Options::default()))
+            .unwrap();
+        assert_eq!(write_data, read_data);
 
         drop(s3fs);
         oss.graceful_shutdown();
