@@ -29,7 +29,7 @@ impl Default for CoprocessorLimiterConfig {
     fn default() -> Self {
         Self {
             global_concurrency_factor: 6.0,
-            keyspace_concurrency_factor: 2.0,
+            keyspace_concurrency_factor: 0.0,
         }
     }
 }
@@ -39,9 +39,14 @@ impl CoprocessorLimiterConfig {
         if self.global_concurrency_factor > 10.0 {
             return Err("global concurrency factor must be less than 10".into());
         }
-        if self.global_concurrency_factor < self.keyspace_concurrency_factor {
+        if self.keyspace_concurrency_factor < 0.0 {
+            return Err("keyspace concurrency factor must be non-negative".into());
+        }
+        if self.keyspace_concurrency_factor > 0.0
+            && self.global_concurrency_factor < self.keyspace_concurrency_factor
+        {
             return Err(
-                "global concurrency factor must be greater than keyspace concurrency_factor".into(),
+                "global concurrency factor must be greater than keyspace concurrency factor".into(),
             );
         }
         Ok(())
@@ -133,7 +138,7 @@ impl WorkerType {
 
 pub struct Permit {
     _global_permit: OwnedSemaphorePermit,
-    _keyspace_permit: OwnedSemaphorePermit,
+    _keyspace_permit: Option<OwnedSemaphorePermit>,
 }
 
 #[derive(Clone)]
@@ -212,16 +217,21 @@ impl WorkerLimiter {
                 .dec();
         });
 
-        let semaphore = self
-            .keyspace_semaphores
-            .entry(keyspace_id)
-            .or_insert_with(|| {
-                let keyspace_concurrency = MIN_CONCURRENCY
-                    .max((SysQuota::cpu_cores_quota() * self.keyspace_concurrency_factor) as usize);
-                Arc::new(Semaphore::new(keyspace_concurrency))
-            })
-            .clone();
-        let _keyspace_permit = semaphore.acquire_owned().await.unwrap();
+        let _keyspace_permit = if self.keyspace_concurrency_factor > 0.0 {
+            let semaphore = self
+                .keyspace_semaphores
+                .entry(keyspace_id)
+                .or_insert_with(|| {
+                    let keyspace_concurrency = MIN_CONCURRENCY.max(
+                        (SysQuota::cpu_cores_quota() * self.keyspace_concurrency_factor) as usize,
+                    );
+                    Arc::new(Semaphore::new(keyspace_concurrency))
+                })
+                .clone();
+            Some(semaphore.acquire_owned().await.unwrap())
+        } else {
+            None
+        };
         let global_semaphore = self.global_semaphore.clone();
         let _global_permit = global_semaphore.acquire_owned().await.unwrap();
         WORKER_LIMITER_REQUEST_WAIT_HISTOGRAM
@@ -262,9 +272,10 @@ mod tests {
     #[test]
     fn test_coprocessor_limiter_concurrency() {
         let coprocessor_config = CoprocessorLimiterConfig::default();
+        // Use a non-zero keyspace_concurrency_factor to test keyspace-level limiter
         let coprocessor_limiter = super::WorkerLimiter::new(
             coprocessor_config.global_concurrency_factor,
-            coprocessor_config.keyspace_concurrency_factor,
+            2.0, // Use 2.0 to test keyspace-level limiter functionality
             Duration::from_secs(u64::MAX),
             i64::MAX as u64,
             WorkerType::Coprocessor,
@@ -277,6 +288,45 @@ mod tests {
             .unwrap();
 
         // Test compressor limiter
+        test_limiter_concurrency(&coprocessor_limiter, &runtime);
+    }
+
+    #[test]
+    fn test_coprocessor_limiter_with_zero_keyspace_factor() {
+        // Test that keyspace-level limiter is disabled when keyspace_concurrency_factor
+        // is 0, and global limiter still works correctly
+        let coprocessor_limiter = super::WorkerLimiter::new(
+            6.0,
+            0.0, // keyspace_concurrency_factor is 0, keyspace-level limiter should be disabled
+            Duration::from_secs(u64::MAX),
+            i64::MAX as u64,
+            WorkerType::Coprocessor,
+        );
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(4)
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            // Acquire permits for different keyspaces
+            let permit1 = coprocessor_limiter.acquire_permit(1).await;
+            let permit2 = coprocessor_limiter.acquire_permit(2).await;
+            let permit3 = coprocessor_limiter.acquire_permit(3).await;
+
+            // All permits should be acquired successfully
+            assert!(permit1.is_some());
+            assert!(permit2.is_some());
+            assert!(permit3.is_some());
+
+            // Keyspace semaphores should not be created when keyspace_concurrency_factor is
+            // 0
+            assert!(coprocessor_limiter.keyspace_semaphores.is_empty());
+        });
+
+        // Test that global limiter works correctly when keyspace_concurrency_factor is
+        // 0
         test_limiter_concurrency(&coprocessor_limiter, &runtime);
     }
 
@@ -393,16 +443,20 @@ mod tests {
             worker_limiter.max_queue_size
         );
         let ks_counter_guard = keyspace_counters.lock().unwrap();
-        for (keyspace_id, counter) in ks_counter_guard.iter() {
-            assert_eq!(counter.running, 0);
-            assert!(
-                counter.max_running
-                    <= worker_limiter
-                        .keyspace_semaphores
-                        .get(keyspace_id)
-                        .unwrap()
-                        .available_permits()
-            );
+        // Only check keyspace-level limits if keyspace semaphores were created
+        if !worker_limiter.keyspace_semaphores.is_empty() {
+            for (keyspace_id, counter) in ks_counter_guard.iter() {
+                assert_eq!(counter.running, 0);
+                if let Some(semaphore) = worker_limiter.keyspace_semaphores.get(keyspace_id) {
+                    assert!(
+                        counter.max_running <= semaphore.available_permits(),
+                        "Keyspace {} max running ({}) should not exceed capacity ({})",
+                        keyspace_id,
+                        counter.max_running,
+                        semaphore.available_permits()
+                    );
+                }
+            }
         }
     }
 }
