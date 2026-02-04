@@ -332,9 +332,19 @@ impl Engine {
         self.join_workers();
     }
 
-    pub fn notify_memtables_size(&self, size: u64) {
+    /// Updates the memtables usages in bytes.
+    pub fn update_memtables_usage(&self, size: u64) {
         let tag = ShardTag::new(self.get_engine_id(), IdVer::default());
-        self.store_limiter.update_usage(&tag, size);
+        self.store_limiter.update_usage(
+            &tag,
+            size,
+            tikv_util::sys::memory_usage_reaches_throttling_level,
+        );
+    }
+
+    /// Returns the hard limit of the memory usage of memtables.
+    pub fn memtables_quota(&self) -> u64 {
+        self.store_limiter.resource_max_limit()
     }
 }
 

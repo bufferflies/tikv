@@ -35,7 +35,10 @@ use kvproto::{
     raft_serverpb::{ExtraMessageType, PeerState, RaftMessage, RegionLocalState},
 };
 use pd_client::{
-    metrics::{STORE_ENGINE_MEM_SIZE_GAUGE_VEC, STORE_ENGINE_SIZE_GAUGE_VEC, STORE_SIZE_GAUGE_VEC},
+    metrics::{
+        STORE_ENGINE_MEM_QUOTA_GAUGE, STORE_ENGINE_MEM_SIZE_GAUGE_VEC, STORE_ENGINE_SIZE_GAUGE_VEC,
+        STORE_SIZE_GAUGE_VEC,
+    },
     PdClient,
 };
 use protobuf::Message;
@@ -567,7 +570,7 @@ impl RaftBatchSystem {
                     engines.kv.opts.max_mem_table_size,
                 );
                 let kv_engine_stats = kvengine::Engine::get_engine_stats(kv_all_shard_stats);
-                engines.kv.notify_memtables_size(kv_engine_stats.mem_tables_size);
+                engines.kv.update_memtables_usage(kv_engine_stats.mem_tables_size);
                 if let kvengine::context::IaCtx::Enabled(mgr, _) = engines.kv.ia_ctx() {
                     mgr.notify_total_data_size(kv_engine_stats.ia.data_size);
                 }
@@ -604,6 +607,8 @@ impl RaftBatchSystem {
                         .with_label_values(&["kv", kvengine::CF_NAMES[cf]])
                         .set(level_size.iter().sum::<u64>() as i64);
                 }
+
+                STORE_ENGINE_MEM_QUOTA_GAUGE.set(engines.kv.memtables_quota() as f64);
                 STORE_ENGINE_MEM_SIZE_GAUGE_VEC
                     .with_label_values(&["kv", "memtable"])
                     .set(kv_engine_stats.mem_tables_size as i64);

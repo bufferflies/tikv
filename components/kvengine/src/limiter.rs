@@ -18,6 +18,10 @@ use crate::{
     KvEngineConfig, Options, ShardTag,
 };
 
+/// Default ratio applied to `hard_limit` to define the bursting threshold
+/// (i.e. `hard_limit * (1.0 + DEFAULT_BURST_RATIO)`).
+const DEFAULT_BURST_RATIO: f64 = 0.1;
+
 /// All members are in bytes.
 #[derive(Clone, Default, Debug)]
 pub struct LimiterOptions {
@@ -116,6 +120,17 @@ impl<Lv: LimiterLevel> WriteRateLimiter<Lv> {
         self.limiter.total_bytes_consumed()
     }
 
+    /// Returns the hard resource limit in bytes.
+    ///
+    /// Returns the configured hard limit when enabled, or `0` when disabled.
+    pub fn resource_max_limit(&self) -> u64 {
+        if self.enabled() {
+            self.options.hard_limit
+        } else {
+            0
+        }
+    }
+
     pub fn speed_limit(&self) -> f64 {
         self.limiter.speed_limit()
     }
@@ -195,7 +210,7 @@ impl<Lv: LimiterLevel> WriteRateLimiter<Lv> {
         }
     }
 
-    pub fn update_usage(&self, tag: &ShardTag, usage: u64) {
+    pub fn update_usage(&self, tag: &ShardTag, usage: u64, forcibly_throttling: impl Fn() -> bool) {
         if !self.options.enable {
             return;
         }
@@ -206,6 +221,7 @@ impl<Lv: LimiterLevel> WriteRateLimiter<Lv> {
             self.options.hard_limit,
             self.options.max_speed_limit,
             self.options.min_speed_limit,
+            forcibly_throttling,
         );
         debug!("{} ShardLimiter::update_usage", tag;
             "usage" => usage,
@@ -214,30 +230,98 @@ impl<Lv: LimiterLevel> WriteRateLimiter<Lv> {
         self.update_speed_limit(tag, throttle);
     }
 
-    /// Calculate throttle according to current usage.
+    /// Calculate throttle according to current usage using a smooth exponential
+    /// curve with bursting mechanism.
     ///
     /// All the parameters are in bytes or bytes/s.
     ///
     /// `usage` is the current usage of component (e.g. memtables) to be
     /// throttled.
-    fn calculate_throttle(
+    ///
+    /// The throttling algorithm has four zones:
+    /// 1. Below soft_limit: no throttling (INFINITY)
+    /// 2. Between soft_limit and hard_limit: exponential throttling curve
+    /// 3. Between hard_limit and hard_limit * 1.1: bursting mechanism for
+    ///    smoother throttling
+    /// 4. Above hard_limit * 1.1: minimum speed limit (hard cutoff)
+    pub(crate) fn calculate_throttle(
         usage: u64,
         soft_limit: u64,
         hard_limit: u64,
         max_speed_limit: u64,
         min_speed_limit: u64,
+        forcibly_throttling: impl Fn() -> bool,
     ) -> f64 {
         debug_assert!(hard_limit >= soft_limit);
         debug_assert!(max_speed_limit >= min_speed_limit);
 
+        // Early exit: if soft_limit is 0, no throttling
+        if soft_limit == 0 {
+            return f64::INFINITY;
+        }
+
+        // Calculate the bursting threshold (hard_limit plus a burst ratio),
+        // using saturating_add to avoid potential overflow when converting
+        // from floating point back to u64.
+        let burst_extra = (hard_limit as f64 * DEFAULT_BURST_RATIO) as u64;
+        let bursting_threshold = hard_limit.saturating_add(burst_extra);
+
         if usage < soft_limit {
+            // Zone 1: No throttling below soft_limit
             f64::INFINITY
-        } else if usage >= hard_limit {
-            min_speed_limit as f64
+        } else if usage < hard_limit {
+            // Zone 2: Exponential throttling curve between soft_limit and hard_limit
+            ENGINE_THROTTLE_ACTION_COUNTER
+                .with_label_values(&[Lv::TAG, "smoothing"])
+                .inc();
+
+            let range = (hard_limit - soft_limit) as f64;
+            let position = (usage - soft_limit) as f64;
+            let normalized = position / range.max(1.0);
+
+            // Exponential curve: e^(-k*x) where k controls the curve steepness
+            // Using k=2.0 provides a good balance between smoothness and responsiveness
+            let exp_factor = (-normalized * 2.0).exp();
+
+            // Interpolate from max_speed_limit to min_speed_limit using exponential curve
+            let throttle = min_speed_limit as f64
+                + (max_speed_limit as f64 - min_speed_limit as f64) * exp_factor;
+            throttle.max(min_speed_limit as f64)
+        } else if usage < bursting_threshold && !forcibly_throttling() {
+            // Zone 3: Bursting mechanism between hard_limit and hard_limit * 1.1
+            // This provides a smoother transition from the exponential curve result
+            // at hard_limit down to min_speed_limit at bursting_threshold
+            ENGINE_THROTTLE_ACTION_COUNTER
+                .with_label_values(&[Lv::TAG, "bursting"])
+                .inc();
+
+            // Calculate the throttle value at hard_limit (from the exponential curve)
+            let throttle_at_hard_limit = min_speed_limit as f64
+                + (max_speed_limit as f64 - min_speed_limit as f64) * (-2.0f64).exp(); // exp(-2.0) when normalized = 1.0
+
+            // Calculate the excess beyond hard_limit
+            let excess = (usage - hard_limit) as f64;
+            let bursting_range = (bursting_threshold - hard_limit) as f64;
+            let bursting_ratio = excess / bursting_range.max(1.0);
+
+            // Use a smooth sigmoid-like curve for the bursting mechanism
+            // This provides a gradual deceleration from throttle_at_hard_limit to
+            // min_speed_limit using the standard smoothstep (Hermite) interpolation:
+            // S(t) = 3t^2 - 2t^3
+            let t = bursting_ratio.min(1.0);
+            let smooth_factor = 3.0 * t * t - 2.0 * t * t * t;
+
+            // Interpolate smoothly from throttle_at_hard_limit to min_speed_limit
+            let throttle = throttle_at_hard_limit
+                - (throttle_at_hard_limit - min_speed_limit as f64) * smooth_factor;
+            throttle.max(min_speed_limit as f64)
         } else {
-            (hard_limit - usage) as f64 / (hard_limit - soft_limit) as f64
-                * (max_speed_limit - min_speed_limit) as f64
-                + min_speed_limit as f64
+            // Zone 4: Hard cutoff at bursting_threshold, use minimum speed limit
+            ENGINE_THROTTLE_ACTION_COUNTER
+                .with_label_values(&[Lv::TAG, "hard_cutoff"])
+                .inc();
+
+            min_speed_limit as f64
         }
     }
 }
@@ -330,56 +414,303 @@ mod tests {
 
     #[test]
     fn test_calculate_throttle() {
-        let cases = vec![
-            (0, f64::INFINITY), // (usage, expected throttle)
-            (200, f64::INFINITY),
-            (255, f64::INFINITY),
-            (256, 50.0),
-            (300, 45.8),
-            (512, 25.0),
-            (600, 17.0),
-            (700, 7.5),
-            (767, 1.0),
-            (768, 1.0),
-            (800, 1.0),
+        let soft_limit = 256 << 20; // 256 MB
+        let hard_limit = 768 << 20; // 768 MB
+        let max_speed_limit = 50 << 20; // 50 MB/s
+        let min_speed_limit = 1 << 20; // 1 MB/s
+        let bursting_threshold = (hard_limit as f64 * 1.1) as u64; // 110% of hard_limit
+        let forcibly_throttling = || false;
+
+        // Test 1: Below soft_limit - should be INFINITY
+        let result_below = RegionLimiter::calculate_throttle(
+            0,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling,
+        );
+        assert_eq!(
+            result_below,
+            f64::INFINITY,
+            "Below soft_limit should be INFINITY"
+        );
+
+        let result_just_below_soft = RegionLimiter::calculate_throttle(
+            soft_limit - 1,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling,
+        );
+        assert_eq!(
+            result_just_below_soft,
+            f64::INFINITY,
+            "Just below soft_limit should be INFINITY"
+        );
+
+        // Test 2: At soft_limit - should start throttling (not INFINITY)
+        let result_at_soft = RegionLimiter::calculate_throttle(
+            soft_limit,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling,
+        );
+        assert!(
+            result_at_soft.is_finite()
+                && result_at_soft <= max_speed_limit as f64
+                && result_at_soft >= min_speed_limit as f64,
+            "At soft_limit should start throttling between min and max: {}",
+            result_at_soft
+        );
+
+        // Test 3: Between soft_limit and hard_limit - should use exponential curve
+        let result_mid = RegionLimiter::calculate_throttle(
+            (soft_limit + hard_limit) / 2,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling,
+        );
+        assert!(
+            result_mid.is_finite()
+                && result_mid < result_at_soft
+                && result_mid >= min_speed_limit as f64,
+            "Between soft_limit and hard_limit should throttle: {}",
+            result_mid
+        );
+
+        // Test 4: At hard_limit - should be in bursting zone
+        let result_at_hard = RegionLimiter::calculate_throttle(
+            hard_limit,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling,
+        );
+        assert!(
+            result_at_hard >= min_speed_limit as f64,
+            "At hard_limit should be at least min_speed_limit: {}",
+            result_at_hard
+        );
+
+        // Test 5: In bursting zone (between hard_limit and hard_limit * 1.1)
+        let result_in_bursting = RegionLimiter::calculate_throttle(
+            hard_limit + (bursting_threshold - hard_limit) / 2,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling,
+        );
+        assert!(
+            result_in_bursting >= min_speed_limit as f64 && result_in_bursting <= result_at_hard,
+            "In bursting zone should throttle smoothly: {}",
+            result_in_bursting
+        );
+
+        // Test 6: At bursting threshold (hard_limit * 1.1) - should be min_speed_limit
+        let result_at_bursting_threshold = RegionLimiter::calculate_throttle(
+            bursting_threshold,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling,
+        );
+        assert_eq!(
+            result_at_bursting_threshold, min_speed_limit as f64,
+            "At bursting threshold should be min_speed_limit: {}",
+            result_at_bursting_threshold
+        );
+
+        // Test 7: Above bursting threshold - should be min_speed_limit (hard cutoff)
+        let result_above_bursting = RegionLimiter::calculate_throttle(
+            bursting_threshold + (100 << 20), // 100 MB above bursting threshold
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling,
+        );
+        assert_eq!(
+            result_above_bursting, min_speed_limit as f64,
+            "Above bursting threshold should be min_speed_limit: {}",
+            result_above_bursting
+        );
+
+        // Test 8: Monotonicity - throttle should decrease as usage increases
+        let usages = vec![
+            soft_limit - 1,
+            soft_limit,
+            (soft_limit + hard_limit) / 2,
+            hard_limit,
+            hard_limit + (bursting_threshold - hard_limit) / 2,
+            bursting_threshold,
+            bursting_threshold + (100 << 20),
         ];
-
-        for (usage, throttle_mb) in cases {
-            let result = RegionLimiter::calculate_throttle(
-                usage << 20,
-                256 << 20,
-                768 << 20,
-                50 << 20,
-                1 << 20,
+        let mut prev_throttle = f64::INFINITY;
+        for usage in usages {
+            let throttle = RegionLimiter::calculate_throttle(
+                usage,
+                soft_limit,
+                hard_limit,
+                max_speed_limit,
+                min_speed_limit,
+                forcibly_throttling,
             );
-
-            let throttle = throttle_mb * 1024.0 * 1024.0;
-            let result_mb = result / 1024.0 / 1024.0;
-            let diff = (result_mb - throttle_mb).abs();
             assert!(
-                result == throttle || diff < 1.0,
-                "result: {}, throttle: {}, diff: {}",
-                result_mb,
-                throttle_mb,
-                diff
+                throttle <= prev_throttle || (prev_throttle.is_infinite() && throttle.is_finite()),
+                "Throttle should be monotonic decreasing: usage={}, prev={}, current={}",
+                usage,
+                prev_throttle,
+                throttle
             );
+            prev_throttle = throttle;
         }
 
-        let corner_cases = vec![
-            (
-                512,  // usage
-                256,  // soft_limit
-                768,  // hard_limit
-                50,   // max_speed_limit
-                50,   // min_speed_limit
-                50.0, // expected throttle
-            ),
-            (512, 512, 512, 50, 1, 1.0), // soft_limit == hard_limit
-        ];
-        for (usage, soft, hard, max, min, expected) in corner_cases {
-            let result = RegionLimiter::calculate_throttle(usage, soft, hard, max, min);
-            assert_eq!(result, expected);
-        }
+        // Test 9: Corner case - soft_limit == hard_limit
+        let result_equal = RegionLimiter::calculate_throttle(
+            512 << 20,
+            512 << 20,
+            512 << 20,
+            50 << 20,
+            1 << 20,
+            forcibly_throttling,
+        );
+        assert!(
+            result_equal >= min_speed_limit as f64 && result_equal <= max_speed_limit as f64,
+            "When soft_limit == hard_limit, should be between min and max: {}",
+            result_equal
+        );
+
+        // Test 10: Corner case - soft_limit == 0 (should return INFINITY)
+        let result_zero_soft = RegionLimiter::calculate_throttle(
+            100 << 20,
+            0,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling,
+        );
+        assert_eq!(
+            result_zero_soft,
+            f64::INFINITY,
+            "When soft_limit is 0, should return INFINITY"
+        );
+
+        // Test 11: Forcibly throttling in bursting zone - should bypass bursting and
+        // use min_speed_limit
+        let forcibly_throttling_true = || true;
+        let usage_in_bursting_zone = hard_limit + (bursting_threshold - hard_limit) / 2;
+
+        let result_bursting_forced = RegionLimiter::calculate_throttle(
+            usage_in_bursting_zone,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling_true,
+        );
+        assert_eq!(
+            result_bursting_forced, min_speed_limit as f64,
+            "When forcibly_throttling in bursting zone, should bypass bursting and use min_speed_limit: {}",
+            result_bursting_forced
+        );
+
+        // Test 12: Forcibly throttling above hard_limit - should bypass all zones and
+        // use min_speed_limit
+        let usage_above_hard = hard_limit + (50 << 20);
+
+        let result_above_hard_forced = RegionLimiter::calculate_throttle(
+            usage_above_hard,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling_true,
+        );
+        assert_eq!(
+            result_above_hard_forced, min_speed_limit as f64,
+            "When forcibly_throttling above hard_limit, should use min_speed_limit immediately: {}",
+            result_above_hard_forced
+        );
+
+        // Test 13: Forcibly throttling between soft and hard limits - should use
+        // expotential curve.
+        let usage_mid_zone = (soft_limit + hard_limit) / 2;
+
+        let result_mid_forced = RegionLimiter::calculate_throttle(
+            usage_mid_zone,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling_true,
+        );
+
+        assert!(
+            result_mid_forced.is_finite() && result_mid_forced >= min_speed_limit as f64,
+            "When forcibly_throttling between soft and hard limits, should use expotential curve {}",
+            result_mid_forced
+        );
+
+        // Test 14: Verify forcibly_throttling bypasses all calculations
+        // Even at extreme usage levels, forcibly_throttling should result in
+        // min_speed_limit
+        let extreme_usage = hard_limit * 2;
+
+        let result_extreme_forced = RegionLimiter::calculate_throttle(
+            extreme_usage,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling_true,
+        );
+        assert_eq!(
+            result_extreme_forced, min_speed_limit as f64,
+            "When forcibly_throttling at extreme usage, should use min_speed_limit: {}",
+            result_extreme_forced
+        );
+
+        // Test 15: Compare forcibly throttling vs normal throttling at same usage level
+        // This verifies the difference in behavior
+        let comparison_usage = hard_limit + (bursting_threshold - hard_limit) / 3;
+
+        let result_normal = RegionLimiter::calculate_throttle(
+            comparison_usage,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling, // false
+        );
+        let result_forced = StoreLimiter::calculate_throttle(
+            comparison_usage,
+            soft_limit,
+            hard_limit,
+            max_speed_limit,
+            min_speed_limit,
+            forcibly_throttling_true,
+        );
+
+        assert!(
+            result_forced < result_normal,
+            "Forcibly throttling should result in stricter throttling than normal: forced={}, normal={}",
+            result_forced,
+            result_normal
+        );
+        assert_eq!(
+            result_forced, min_speed_limit as f64,
+            "Forcibly throttling should equal min_speed_limit: {}",
+            result_forced
+        );
     }
 
     #[tokio::test]

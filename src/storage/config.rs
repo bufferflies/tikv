@@ -35,8 +35,11 @@ const DEFAULT_SCHED_PENDING_WRITE_MB: u64 = 100;
 const DEFAULT_RESERVED_SPACE_GB: u64 = 5;
 const DEFAULT_RESERVED_RAFT_SPACE_GB: u64 = 1;
 
-pub const SOFT_STORE_MEM_LIMIT_RATE: f64 = 0.1;
-pub const HARD_STORE_MEM_LIMIT_RATE: f64 = 0.15;
+/// Percentage of total system memory used to derive the default soft & hard
+/// limits for flow-control store memory usage when no explicit limit is
+/// provided.
+pub const SOFT_STORE_MEM_LIMIT_RATE: f64 = 0.15;
+pub const HARD_STORE_MEM_LIMIT_RATE: f64 = 0.2;
 
 // In tests, we've observed 1.2M entries in the TxnStatusCache. We
 // conservatively set the limit to 5M entries in total.

@@ -3546,39 +3546,10 @@ def FlowControl() -> RowPanel:
                     ),
                 ],
             ),
-            graph_panel(
-                title="Scheduler discard ratio",
-                description="",
-                yaxes=yaxes(left_format=UNITS.PERCENT_UNIT),
-                targets=[
-                    target(
-                        expr=expr_sum(
-                            "tikv_scheduler_discard_ratio",
-                            by_labels=["type"],
-                        ).extra(" / 10000000"),
-                    ),
-                ],
-            ),
-        ]
-    )
-    layout.row(
-        [
             heatmap_panel(
                 title="Throttle duration",
                 metric="tikv_scheduler_throttle_duration_seconds_bucket",
                 yaxis=yaxis(format=UNITS.SECONDS),
-            ),
-            graph_panel(
-                title="Scheduler throttled CF",
-                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
-                targets=[
-                    target(
-                        expr=expr_simple(
-                            "tikv_scheduler_throttle_cf",
-                        ).extra(" != 0"),
-                        legend_format="{{instance}}-{{cf}}",
-                    ),
-                ],
             ),
         ]
     )
@@ -5432,11 +5403,20 @@ def KvEngine() -> RowPanel:
                 yaxes=yaxes(left_format=UNITS.BYTES_IEC),
                 targets=[
                     target(
-                        expr=expr_avg(
+                        expr=expr_max(
                             "kv_engine_mem_size_bytes",
                             label_selectors=['db="kv"'],  # only select `kv` db
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_max(
+                            "kv_engine_mem_size_quota_bytes",
+                            by_labels=[],  # override default by instance.
+                        ),
+                        hide=True,
+                        legend_format="memtable-quota",
                         additional_groupby=True,
                     ),
                     target(

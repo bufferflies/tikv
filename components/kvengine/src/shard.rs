@@ -2186,7 +2186,11 @@ impl ShardDataCore {
 
     pub fn refresh_for_limiter(&self, tag: &ShardTag) {
         let mem_table_size = self.get_mem_table_size();
-        self.limiter.update_usage(tag, mem_table_size);
+        self.limiter.update_usage(
+            tag,
+            mem_table_size,
+            tikv_util::sys::memory_usage_reaches_throttling_level,
+        );
     }
 
     pub fn get_unconverted_l0s(&self) -> Vec<u64> {

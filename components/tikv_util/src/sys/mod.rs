@@ -28,6 +28,7 @@ const CPU_CORES_QUOTA_ENV_VAR_KEY: &str = "TIKV_CPU_CORES_QUOTA";
 
 static GLOBAL_MEMORY_USAGE: AtomicU64 = AtomicU64::new(0);
 static MEMORY_USAGE_HIGH_WATER: AtomicU64 = AtomicU64::new(u64::MAX);
+static MEMORY_USAGE_THROTTLING_LEVEL: AtomicU64 = AtomicU64::new(u64::MAX);
 
 #[cfg(target_os = "linux")]
 lazy_static! {
@@ -165,6 +166,17 @@ pub fn memory_usage_reaches_high_water(usage: &mut u64) -> bool {
     fail_point!("memory_usage_reaches_high_water", |_| true);
     *usage = get_global_memory_usage();
     *usage >= MEMORY_USAGE_HIGH_WATER.load(Ordering::Acquire)
+}
+
+/// Register the throttling level so that
+/// `memory_usage_reaches_throttling_level` is available.
+pub fn register_memory_usage_throttling_level(mark: u64) {
+    MEMORY_USAGE_THROTTLING_LEVEL.store(mark, Ordering::Release);
+}
+
+pub fn memory_usage_reaches_throttling_level() -> bool {
+    let usage = get_global_memory_usage();
+    usage >= MEMORY_USAGE_THROTTLING_LEVEL.load(Ordering::Acquire)
 }
 
 fn limit_cpu_cores_quota_by_env_var(quota: f64) -> f64 {

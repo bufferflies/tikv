@@ -66,7 +66,7 @@ use serde_json::{to_value, Map, Value};
 use tikv_util::{
     config::{self, LogFormat, ReadableDuration, ReadableSize, TomlWriter, GIB, MIB},
     logger::{get_level_by_string, get_string_by_level, set_log_level, set_txn_info_logging},
-    sys::SysQuota,
+    sys::{register_memory_usage_throttling_level, SysQuota},
     time::duration_to_sec,
     yatp_pool,
 };
@@ -87,8 +87,18 @@ pub const DEFAULT_ROCKSDB_SUB_DIR: &str = "db";
 
 /// By default, block cache size will be set to 35% of system memory.
 pub const BLOCK_CACHE_RATE: f64 = 0.35;
-/// By default, TiKV will try to limit memory usage to 75% of system memory.
+/// By default, TiKV will try to limit its overall memory usage to 75% of
+/// system memory. This is the primary soft limit that other components
+/// should respect when sizing their own memory usage.
 pub const MEMORY_USAGE_LIMIT_RATE: f64 = 0.75;
+/// By default, TiKV will enable additional throttling once memory usage
+/// reaches 90% of system memory. Note that this threshold is intentionally
+/// higher than `MEMORY_USAGE_LIMIT_RATE` and is meant to act as a last-resort
+/// safeguard close to the OOM boundary, not as the main memory control knob.
+/// Other mechanisms are expected to take effect before this level is reached,
+/// and operators should tune both values together with that interaction in
+/// mind.
+pub const MEMORY_USAGE_THROTTLING_RATE: f64 = 0.9;
 
 /// Min block cache shard's size. If a shard is too small, the index/filter data
 /// may not fit one shard
@@ -3354,16 +3364,18 @@ impl TikvConfig {
         fill_cf_opts!(self.rocksdb.lockcf, flow_control_cfg);
         fill_cf_opts!(self.rocksdb.raftcf, flow_control_cfg);
 
+        let mut total_mem_quota = SysQuota::memory_limit_in_bytes();
         if let Some(memory_usage_limit) = self.memory_usage_limit {
-            let total = SysQuota::memory_limit_in_bytes();
-            if memory_usage_limit.0 > total {
+            if memory_usage_limit.0 > total_mem_quota {
                 // Explicitly exceeds system memory capacity is not allowed.
                 return Err(format!(
                     "memory_usage_limit is greater than system memory capacity {}",
-                    total
+                    total_mem_quota
                 )
                 .into());
             }
+            // Uses the manually set memory usage limit as the total memory quota.
+            total_mem_quota = memory_usage_limit.0;
         } else {
             // Adjust `memory_usage_limit` if necessary.
             if self.storage.block_cache.shared {
@@ -3382,6 +3394,10 @@ impl TikvConfig {
                 self.memory_usage_limit = Some(ReadableSize(limit));
             }
         }
+        // Registers the whole throttling level for global memory usage.
+        register_memory_usage_throttling_level(
+            (MEMORY_USAGE_THROTTLING_RATE * total_mem_quota as f64) as u64,
+        );
 
         let mut limit = self.memory_usage_limit.unwrap();
         let total = ReadableSize(SysQuota::memory_limit_in_bytes());
