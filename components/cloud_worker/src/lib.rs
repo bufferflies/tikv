@@ -173,6 +173,8 @@ fn start_server(
     running_ctl: &RunningController,
     encryption_key_manager: Arc<cloud_encryption::EncryptionKeyManager>,
 ) -> (ServerFuture, Arc<server::Context>) {
+    apply_redact_info_log(&config.security);
+
     let dfs_config = config.dfs.clone();
     let s3fs = Arc::new(kvengine::dfs::S3Fs::new(
         dfs_config.prefix,
@@ -443,6 +445,11 @@ fn start_server(
     }
 
     (ServerFuture::new(server, cop_server_opt), ctx)
+}
+
+fn apply_redact_info_log(security: &SecurityConfig) {
+    let redact_info_log = security.redact_info_log.unwrap_or(false);
+    log_wrappers::set_redact_info_log(redact_info_log);
 }
 
 fn run_prometheus_push(push_metrics_addr: String, push_metrics_interval: Duration) {
@@ -935,5 +942,31 @@ impl Config {
         self.is_remote_cop_enabled()
             && !self.data_dir.is_empty()
             && (!self.ia.mem_cap.is_zero() && !self.ia.disk_cap.is_zero())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apply_redact_info_log() {
+        let key = b"\xAB \xCD";
+
+        let mut security = SecurityConfig::default();
+        security.redact_info_log = None;
+        apply_redact_info_log(&security);
+        assert_eq!(format!("{}", log_wrappers::Value::key(key)), "AB20CD");
+
+        security.redact_info_log = Some(true);
+        apply_redact_info_log(&security);
+        assert_eq!(format!("{}", log_wrappers::Value::key(key)), "?");
+
+        security.redact_info_log = Some(false);
+        apply_redact_info_log(&security);
+        assert_eq!(format!("{}", log_wrappers::Value::key(key)), "AB20CD");
+
+        // Reset for other tests.
+        log_wrappers::set_redact_info_log(false);
     }
 }
