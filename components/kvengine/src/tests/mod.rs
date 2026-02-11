@@ -16,6 +16,7 @@ use tikv_util::{mpsc, time::Instant};
 use txn_types::{ClusterGcStates, GcState, NULL_KEYSPACE_ID};
 
 use crate::{
+    shard::ShardDataBuilder,
     table::{
         file::{File, InMemFile},
         sstable::{BlockCache, L0Builder, L0Table, SsTable},
@@ -401,6 +402,38 @@ fn test_delta_iterator_basic() {
         it2.next();
     }
     assert_eq!(cnt2, 50);
+}
+
+#[test]
+fn test_iterator_range_clamped_to_snapshot_bounds() {
+    ::test_util::init_log_for_test();
+    let (engine, applier_tx) = new_test_engine_api_v2();
+    let shard = engine.get_shard(1).unwrap();
+    let key1 = engine.key_builder.i_to_outer_key(1);
+    let key2 = engine.key_builder.i_to_outer_key(2);
+    let key3 = engine.key_builder.i_to_outer_key(3);
+    let key4 = engine.key_builder.i_to_outer_key(4);
+
+    let mut wb = WriteBatch::new(1);
+    wb.put(WRITE_CF, &key1, b"v1", 0, &[], 1);
+    wb.put(WRITE_CF, &key2, b"v2", 0, &[], 1);
+    wb.put(WRITE_CF, &key3, b"v3", 0, &[], 1);
+    write_data(wb, &applier_tx);
+
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_range(ShardRange::new(&key2, &key4));
+    shard.set_data(builder.build());
+
+    let snap = SnapAccess::new(&shard);
+    let mut iter = snap.new_iterator(WRITE_CF, false, false, Some(u64::MAX), true);
+    iter.set_range(Bytes::from(key1.clone()), Bytes::from(key4.clone()));
+
+    let mut keys = Vec::new();
+    while iter.valid() {
+        keys.push(iter.key().to_vec());
+        iter.next();
+    }
+    assert_eq!(keys, vec![key2, key3]);
 }
 
 #[test]

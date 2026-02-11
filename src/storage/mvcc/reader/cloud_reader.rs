@@ -434,10 +434,10 @@ impl CloudReader {
         let lower_bound: Bytes = if let Some(start) = start {
             Bytes::from(start.to_raw()?)
         } else {
-            Bytes::copy_from_slice(self.snapshot.get_start_key())
+            self.snapshot.clone_start_key()
         };
-        let upper_bound = if let Some(k) = end {
-            Bytes::from(k.to_raw()?)
+        let upper_bound: Bytes = if let Some(end) = end {
+            Bytes::from(end.to_raw()?)
         } else {
             self.snapshot.clone_end_key()
         };

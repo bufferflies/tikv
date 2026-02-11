@@ -412,12 +412,14 @@ pub async fn has_data_in_range<S: Snapshot>(
     statistic: &mut CfStatistics,
 ) -> Result<bool> {
     if let Some(snap) = snapshot.get_kvengine_snap() {
-        let raw_left = left.to_raw().unwrap();
-        let mut raw_right = right.to_raw().unwrap();
+        let raw_left = std::cmp::max(left.to_raw().unwrap(), snap.clone_start_key().to_vec());
+        let mut raw_right = std::cmp::min(right.to_raw().unwrap(), snap.clone_end_key().to_vec());
         let mut iter = snap
             .new_iterator(WRITE_CF, false, false, Some(u64::MAX), true)
             .await;
         iter.seek(&raw_left).await;
+        // Extra condition should be added to ensure the key is within the snapshot
+        // range.
         if iter.valid() && iter.key() < raw_right.as_slice() {
             return Ok(true);
         }
@@ -607,12 +609,20 @@ pub(crate) fn load_data_by_lock<S: Snapshot, I: Iterator>(
 #[cfg(test)]
 mod tests {
     use engine_rocks::ReadPerfInstant;
-    use engine_traits::MiscExt;
+    use engine_traits::{IterOptions, MiscExt, ReadOptions};
+    use kvengine::{
+        test_engine::{new_test_engine_api_v2, ApplyTask},
+        WriteBatch,
+    };
+    use tikv_util::mpsc;
     use txn_types::OldValue;
 
     use super::*;
     use crate::storage::{
-        kv::{Engine, RocksEngine, TestEngineBuilder, SEEK_BOUND},
+        kv::{
+            DummySnapshotExt, Engine, Result as KvResult, RocksEngine, TestEngineBuilder,
+            SEEK_BOUND,
+        },
         mvcc::{tests::*, Error as MvccError, ErrorInner as MvccErrorInner},
         txn::{
             tests::*, Error as TxnError, ErrorInner as TxnErrorInner, TxnEntry, TxnEntryScanner,
@@ -639,6 +649,95 @@ mod tests {
         }
 
         assert_eq!(scan_result, expected);
+    }
+
+    #[derive(Clone)]
+    struct KvEngineSnapshot {
+        snap: kvengine::SnapAccess,
+    }
+
+    struct NoopIterator;
+
+    impl Iterator for NoopIterator {
+        fn next(&mut self) -> KvResult<bool> {
+            unimplemented!()
+        }
+
+        fn prev(&mut self) -> KvResult<bool> {
+            unimplemented!()
+        }
+
+        fn seek(&mut self, _key: &Key) -> KvResult<bool> {
+            unimplemented!()
+        }
+
+        fn seek_for_prev(&mut self, _key: &Key) -> KvResult<bool> {
+            unimplemented!()
+        }
+
+        fn seek_to_first(&mut self) -> KvResult<bool> {
+            unimplemented!()
+        }
+
+        fn seek_to_last(&mut self) -> KvResult<bool> {
+            unimplemented!()
+        }
+
+        fn valid(&self) -> KvResult<bool> {
+            unimplemented!()
+        }
+
+        fn key(&self) -> &[u8] {
+            unimplemented!()
+        }
+
+        fn value(&self) -> &[u8] {
+            unimplemented!()
+        }
+    }
+
+    impl Snapshot for KvEngineSnapshot {
+        type Iter = NoopIterator;
+        type Ext<'a> = DummySnapshotExt;
+
+        fn get(&self, _key: &Key) -> KvResult<Option<Value>> {
+            unimplemented!()
+        }
+
+        fn get_cf(&self, _cf: CfName, _key: &Key) -> KvResult<Option<Value>> {
+            unimplemented!()
+        }
+
+        fn get_cf_opt(
+            &self,
+            _opts: ReadOptions,
+            _cf: CfName,
+            _key: &Key,
+        ) -> KvResult<Option<Value>> {
+            unimplemented!()
+        }
+
+        fn iter(&self, _cf: CfName, _iter_opt: IterOptions) -> KvResult<Self::Iter> {
+            unimplemented!()
+        }
+
+        fn ext(&self) -> DummySnapshotExt {
+            DummySnapshotExt
+        }
+
+        fn get_kvengine_snap(&self) -> Option<&kvengine::SnapAccess> {
+            Some(&self.snap)
+        }
+    }
+
+    fn apply_kvengine_write(applier_tx: &mpsc::Sender<ApplyTask>, key: &[u8]) {
+        let mut wb = WriteBatch::default();
+        wb.reset(1);
+        wb.put(WRITE_CF, key, b"value", 0, &[], 1);
+        let (result_tx, result_rx) = mpsc::bounded(1);
+        let task = ApplyTask::new_wb(wb, result_tx);
+        applier_tx.send(task).unwrap();
+        result_rx.recv().unwrap().unwrap();
     }
 
     fn test_scan_with_lock_and_write_impl(desc: bool) {
@@ -1070,6 +1169,35 @@ mod tests {
             let delta = perf_instant.delta();
             assert_eq!(delta.block_read_count, block_reads);
         }
+    }
+
+    #[maybe_async::test]
+    async fn test_has_data_in_range_respects_snapshot_end() {
+        let (engine, applier_tx) = new_test_engine_api_v2();
+        let key = engine.key_builder.i_to_outer_key(1);
+        apply_kvengine_write(&applier_tx, &key);
+
+        let shard = engine.get_shard(1).unwrap();
+        let snap = kvengine::SnapAccess::new(&shard);
+        let end_key = snap.get_end_key().to_vec();
+        let snapshot = KvEngineSnapshot { snap };
+        let left = Key::from_raw(&key);
+        let right_inside = Key::from_raw(&end_key);
+        let mut right_outside = end_key.clone();
+        right_outside.push(0);
+        let right_outside = Key::from_raw(&right_outside);
+
+        let mut stats = CfStatistics::default();
+        let has_inside =
+            has_data_in_range(snapshot.clone(), CF_WRITE, &left, &right_inside, &mut stats)
+                .await
+                .unwrap();
+        assert!(has_inside);
+
+        let has_outside = has_data_in_range(snapshot, CF_WRITE, &left, &right_outside, &mut stats)
+            .await
+            .unwrap();
+        assert!(has_outside);
     }
 
     #[test]

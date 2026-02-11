@@ -902,6 +902,10 @@ impl SnapAccessCore {
         self.data.inner_end()
     }
 
+    pub fn clone_start_key(&self) -> Bytes {
+        self.data.outer_start.clone()
+    }
+
     pub fn clone_end_key(&self) -> Bytes {
         self.data.outer_end.clone()
     }
@@ -1894,8 +1898,18 @@ impl Iterator {
         outer_lower_bound_include: Bytes,
         outer_upper_bound_exclude: Bytes,
     ) -> bool {
-        let inner_lower_bound = InnerKey::from_outer_key(&outer_lower_bound_include);
-        let inner_upper_bound = InnerKey::from_outer_end_key(&outer_upper_bound_exclude);
+        // Restrict the iterator range to the snapshot bounds, it's important to
+        // ensure the iterator is within the snapshot range.
+        let (snapshot_lower_bound, snapshot_upper_bound) =
+            (self.data.range.inner_start(), self.data.range.inner_end());
+        let inner_lower_bound = std::cmp::max(
+            snapshot_lower_bound,
+            InnerKey::from_outer_key(&outer_lower_bound_include),
+        );
+        let inner_upper_bound = std::cmp::min(
+            snapshot_upper_bound,
+            InnerKey::from_outer_end_key(&outer_upper_bound_exclude),
+        );
         let mut seeked = false;
         // reset monotonic range can be optimized to avoid seek.
         if self.is_reset_monotonic_range(inner_lower_bound, inner_upper_bound) {
