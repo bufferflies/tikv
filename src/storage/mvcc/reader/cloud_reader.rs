@@ -6,6 +6,17 @@ use txn_types::{Key, Lock, OldValue, TimeStamp, Value, Write, WriteType};
 
 use crate::storage::mvcc::{metrics::EXTRA_CF_SCAN_ITERATIONS, Result, TxnCommitRecord};
 
+#[derive(Debug)]
+pub(crate) struct LockSourceProbe {
+    pub source: &'static str,
+    pub source_file_id: Option<u64>,
+    pub mem_table_checked: u8,
+    pub l0_checked: u8,
+    pub ln_checked: u8,
+    pub has_visible_lock: bool,
+    pub lock: Option<Lock>,
+}
+
 pub struct CloudReader {
     snapshot: kvengine::SnapAccess,
     fill_cache: bool,
@@ -42,6 +53,49 @@ impl CloudReader {
             });
         }
         None
+    }
+
+    fn classify_lock_source(
+        path: &kvengine::read::AccessPath,
+        access_details: &kvengine::read::AccessDetails,
+        parsed_lock: Option<&Lock>,
+    ) -> (&'static str, Option<u64>) {
+        if path.ln > 0 {
+            ("sst_ln", access_details.ln_file_id)
+        } else if path.l0 > 0 {
+            ("sst_l0", access_details.l0_file_id)
+        } else if path.mem_table > 0 {
+            ("memtable", None)
+        } else if parsed_lock.map(|l| l.is_txn_file).unwrap_or(false) {
+            ("txn_file", None)
+        } else {
+            ("unknown", None)
+        }
+    }
+
+    pub(crate) fn probe_lock_source(&self, key: &Key) -> Result<LockSourceProbe> {
+        let raw_key = key.to_raw()?;
+        let item = self.snapshot.get(LOCK_CF, &raw_key, 0);
+        let has_visible_lock = !item.is_deleted() && item.value_len() > 0;
+        let parsed_lock = if has_visible_lock {
+            Some(Lock::parse(item.get_value())?)
+        } else {
+            None
+        };
+        let access_details = self
+            .snapshot
+            .get_access_details(LOCK_CF, &raw_key, &item.path);
+        let (source, source_file_id) =
+            Self::classify_lock_source(&item.path, &access_details, parsed_lock.as_ref());
+        Ok(LockSourceProbe {
+            source,
+            source_file_id,
+            mem_table_checked: item.path.mem_table,
+            l0_checked: item.path.l0,
+            ln_checked: item.path.ln,
+            has_visible_lock,
+            lock: parsed_lock,
+        })
     }
 
     /// Note: This method is also used by resolving locks during restoring

@@ -107,6 +107,15 @@ pub struct AccessPath {
     pub ln: u8,
 }
 
+/// Resolved file IDs derived from an access path.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct AccessDetails {
+    /// L0 file ID, if the access path hit an L0 table.
+    pub l0_file_id: Option<u64>,
+    /// Ln file ID, if the access path hit a level table.
+    pub ln_file_id: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct SnapAccess {
     pub core: Arc<SnapAccessCore>,
@@ -139,6 +148,16 @@ impl SnapAccess {
         let core =
             Arc::new(SnapAccessCore::from_change_set(tag, ctx, change_set, mem_tbls, true).await?);
         Ok(Self { core })
+    }
+
+    /// Returns resolved access details for an access path.
+    ///
+    /// This is a best-effort mapping based on the recorded access path counts
+    /// and current shard metadata. It can return `None` for a level if the
+    /// corresponding table is no longer found.
+    pub fn get_access_details(&self, cf: usize, key: &[u8], access: &AccessPath) -> AccessDetails {
+        self.core
+            .get_access_details(cf, InnerKey::from_outer_key(key), access)
     }
 
     pub async fn construct_snapshot<'a>(
@@ -378,6 +397,52 @@ impl SnapAccessCore {
     ) -> Result<Self> {
         let shard = Shard::from_change_set(tag, ctx, change_set, mem_tbls, ignore_lock).await?;
         Ok(Self::new(&shard))
+    }
+
+    /// Resolves access details using the current shard metadata.
+    ///
+    /// The L0 file is selected as the Nth matching L0 table (by key range),
+    /// where N is `access.l0`. The Ln file is selected from the Nth level
+    /// (by order in `levels`), if that level contains the key.
+    pub fn get_access_details(
+        &self,
+        cf: usize,
+        inner_key: InnerKey<'_>,
+        access: &AccessPath,
+    ) -> AccessDetails {
+        let mut details = AccessDetails::default();
+        let l0_checked = usize::from(access.l0);
+        if l0_checked > 0 {
+            let mut checked = 0;
+            for l0 in &self.data.l0_tbls {
+                if let Some(tbl) = &l0.get_cf(cf) {
+                    if inner_key < tbl.smallest() || tbl.biggest() < inner_key {
+                        continue;
+                    }
+                    checked += 1;
+                    if checked == l0_checked {
+                        details.l0_file_id = Some(l0.id());
+                        break;
+                    }
+                }
+            }
+        }
+
+        let ln_checked = usize::from(access.ln);
+        if ln_checked > 0 {
+            let scf = self.data.get_cf(cf);
+            let mut checked = 0;
+            for lh in &scf.levels {
+                checked += 1;
+                if checked == ln_checked {
+                    if let Some(tbl) = lh.get_table(inner_key) {
+                        details.ln_file_id = Some(tbl.id());
+                    }
+                    break;
+                }
+            }
+        }
+        details
     }
 
     #[maybe_async::both]

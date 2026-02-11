@@ -996,6 +996,71 @@ fn test_l0table_ignore_lock() {
     assert!(l0table_ignore_lock.is_none());
 }
 
+#[test]
+fn test_get_access_details() {
+    ::test_util::init_log_for_test();
+    let (engine, _applier_tx) = new_test_engine();
+    let shard = engine.get_shard(1).unwrap();
+
+    let mut cf_builder = ShardCfBuilder::new(LOCK_CF);
+    let mut saved_vals = Vec::new();
+    let l1_table = new_table(&engine, 1000, 100, 200, 1000, false, &mut saved_vals);
+    let l2_table = new_table(&engine, 2000, 100, 200, 2000, false, &mut saved_vals);
+    let l2_table_id = l2_table.id();
+    cf_builder.add_table(l1_table, 1);
+    cf_builder.add_table(l2_table, 2);
+
+    let l0_file_1 = new_l0table_file(
+        &engine,
+        3000,
+        [0, 100, 0],
+        [0, 200, 0],
+        3000,
+        [false, false, false],
+    );
+    let l0_tbl_1 = L0Table::new(l0_file_1, BlockCache::None, false, None)
+        .unwrap()
+        .unwrap();
+    let l0_file_2 = new_l0table_file(
+        &engine,
+        4000,
+        [0, 100, 0],
+        [0, 200, 0],
+        4000,
+        [false, false, false],
+    );
+    let l0_tbl_2 = L0Table::new(l0_file_2, BlockCache::None, false, None)
+        .unwrap()
+        .unwrap();
+
+    let mut cfs = shard.get_data().cfs.clone();
+    cfs[LOCK_CF] = cf_builder.build();
+    let mut builder = ShardDataBuilder::new(shard.get_data());
+    builder.set_l0_tbls(vec![l0_tbl_1.clone(), l0_tbl_2.clone()]);
+    builder.set_cfs(cfs);
+    shard.set_data(builder.build());
+
+    let snap = shard.new_snap_access();
+    let key = engine.key_builder.i_to_outer_key(150);
+    let access = AccessPath {
+        mem_table: 0,
+        l0: 2,
+        ln: 2,
+    };
+    let details = snap.get_access_details(LOCK_CF, key.as_slice(), &access);
+    assert_eq!(details.l0_file_id, Some(l0_tbl_2.id()));
+    assert_eq!(details.ln_file_id, Some(l2_table_id));
+
+    let missing = AccessPath {
+        mem_table: 0,
+        l0: 3,
+        ln: 3,
+    };
+    let missing_details = snap.get_access_details(LOCK_CF, key.as_slice(), &missing);
+    assert_eq!(missing_details.l0_file_id, None);
+    assert_eq!(missing_details.ln_file_id, None);
+}
+
 fn print_locks(snap: &SnapAccess, all_versions: bool, read_ts: Option<u64>) {
     let mut it = snap.new_iterator(LOCK_CF, false, all_versions, read_ts, false);
     it.rewind();

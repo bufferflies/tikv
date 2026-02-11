@@ -1413,6 +1413,13 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         end_key: Option<Key>,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LockInfo>>> {
+        /// Default threshold for stale lock detection in milliseconds.
+        ///
+        /// This is a best-effort threshold to detect stale locks, and the
+        /// default gc lifetime is 5 days, so we set the threshold to 5
+        /// days to detect stale locks.
+        const STALE_LOCK_THRESHOLD_MS: u64 = 5 * 24 * 60 * 60 * 1000;
+
         txn_debug!(trace_event::types::Category::ReqResp,
             "Storage::scan_lock entry";
             "max_ts" => ?max_ts,
@@ -1514,10 +1521,21 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                     let begin_instant = Instant::now();
                     let mut statistics = Statistics::default();
                     let buckets = snapshot.ext().get_buckets();
-                    let mut reader = mvcc::CloudReader::new(
-                        snapshot.get_kvengine_snap().unwrap().clone(),
-                        !ctx.get_not_fill_cache(),
+                    let kvengine_snap = snapshot.get_kvengine_snap().unwrap().clone();
+                    let snapshot_start_key = kvengine_snap.get_start_key().to_vec();
+                    let snapshot_end_key = kvengine_snap.get_end_key().to_vec();
+                    debug!("scan_lock debug context";
+                        "region_id" => ctx.get_region_id(),
+                        "peer_id" => ctx.get_peer().get_id(),
+                        "term" => ctx.get_term(),
+                        "max_ts" => max_ts.into_inner(),
+                        "max_ts_physical" => max_ts.physical(),
+                        "limit" => limit,
+                        "snapshot_start_key" => log_wrappers::Value::key(&snapshot_start_key),
+                        "snapshot_end_key" => log_wrappers::Value::key(&snapshot_end_key)
                     );
+                    let mut reader =
+                        mvcc::CloudReader::new(kvengine_snap, !ctx.get_not_fill_cache());
                     let result = reader
                         .scan_locks(
                             start_key.as_ref(),
@@ -1530,10 +1548,86 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                     let (kv_pairs, _) = result?;
                     let mut locks = Vec::with_capacity(kv_pairs.len());
                     for (key, lock) in kv_pairs {
-                        let lock_info =
-                            lock.into_lock_info(key.into_raw().map_err(txn::Error::from)?);
+                        let key_raw = key.to_raw().map_err(txn::Error::from)?;
+
+                        let mut source = "probe_failed";
+                        let mut source_mem_table_checked = 0;
+                        let mut source_l0_checked = 0;
+                        let mut source_ln_checked = 0;
+                        let mut source_file_id = None;
+                        let mut source_has_visible_lock = false;
+                        let mut probe_lock_match = false;
+                        let mut probe_lock_start_ts = 0;
+                        let mut probe_lock_ttl = 0;
+                        let mut probe_lock_type = None;
+                        let mut probe_lock_is_txn_file = false;
+
+                        let now_physical = TimeStamp::physical_now();
+                        let lock_age_ms = now_physical.saturating_sub(lock.ts.physical());
+                        let lock_is_stale = lock_age_ms >= STALE_LOCK_THRESHOLD_MS;
+                        let lock_expire_physical = lock.ts.physical().saturating_add(lock.ttl);
+                        let lock_expired_before_max_ts = lock_expire_physical < max_ts.physical();
+                        if lock_is_stale {
+                            match reader.probe_lock_source(&key) {
+                                Ok(probe) => {
+                                    source = probe.source;
+                                    source_mem_table_checked = probe.mem_table_checked;
+                                    source_l0_checked = probe.l0_checked;
+                                    source_ln_checked = probe.ln_checked;
+                                    source_file_id = probe.source_file_id;
+                                    source_has_visible_lock = probe.has_visible_lock;
+                                    if let Some(probe_lock) = probe.lock.as_ref() {
+                                        probe_lock_match = probe_lock == &lock;
+                                        probe_lock_start_ts = probe_lock.ts.into_inner();
+                                        probe_lock_ttl = probe_lock.ttl;
+                                        probe_lock_type = Some(probe_lock.lock_type);
+                                        probe_lock_is_txn_file = probe_lock.is_txn_file;
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("scan_lock source probe failed";
+                                        "region_id" => ctx.get_region_id(),
+                                        "peer_id" => ctx.get_peer().get_id(),
+                                        "term" => ctx.get_term(),
+                                        "key" => log_wrappers::Value::key(&key_raw),
+                                        "err" => ?e
+                                    );
+                                }
+                            }
+                            warn!("scan_lock found stale lock";
+                                "region_id" => ctx.get_region_id(),
+                                "peer_id" => ctx.get_peer().get_id(),
+                                "term" => ctx.get_term(),
+                                "key" => log_wrappers::Value::key(&key_raw),
+                                "lock" => ?lock,
+                                "lock_age_ms" => lock_age_ms,
+                                "expire_physical" => lock_expire_physical,
+                                "max_ts" => max_ts.into_inner(),
+                                "max_ts_physical" => max_ts.physical(),
+                                "expired_before_max_ts" => lock_expired_before_max_ts,
+                                "source" => source,
+                                "source_mem_table_checked" => source_mem_table_checked,
+                                "source_l0_checked" => source_l0_checked,
+                                "source_ln_checked" => source_ln_checked,
+                                "source_file_id" => ?source_file_id,
+                                "source_has_visible_lock" => source_has_visible_lock,
+                                "probe_lock_match" => probe_lock_match,
+                                "probe_lock_type" => ?probe_lock_type,
+                                "probe_lock_start_ts" => probe_lock_start_ts,
+                                "probe_lock_ttl" => probe_lock_ttl,
+                                "probe_lock_is_txn_file" => probe_lock_is_txn_file,
+                            );
+                        }
+
+                        let lock_info = lock.into_lock_info(key_raw);
                         locks.push(lock_info);
                     }
+                    debug!("scan_lock debug summary";
+                        "region_id" => ctx.get_region_id(),
+                        "peer_id" => ctx.get_peer().get_id(),
+                        "term" => ctx.get_term(),
+                        "returned_lock_count" => locks.len()
+                    );
 
                     metrics::tls_collect_scan_details(CMD, &statistics);
                     metrics::tls_collect_read_flow(
