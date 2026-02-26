@@ -63,7 +63,7 @@ fn test_pd_client_deadlock() {
         request!(client => block_on(get_region_async(b""))),
         request!(client => block_on(get_region_info_async(b""))),
         request!(client => block_on(get_region_by_id(0))),
-        request!(client => block_on(region_heartbeat(0, Region::default(), Peer::default(), RegionStat::default(), None))),
+        request!(client => block_on(region_heartbeat(0, Region::default(), Peer::default(), RegionStat::default(), None,None))),
         request!(client => block_on(ask_split(Region::default()))),
         request!(client => block_on(ask_batch_split(Region::default(), 1))),
         request!(client => block_on(store_heartbeat(Default::default(), None, None))),

@@ -145,6 +145,7 @@ where
             task.peer,
             region_stat,
             None,
+            None,
         );
         let logger = self.logger.clone();
         let f = async move {

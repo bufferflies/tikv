@@ -206,10 +206,11 @@ impl Display for PdTask {
             ),
             PdTask::Heartbeat(ref hb_task) => write!(
                 f,
-                "heartbeat for region {:?}, leader {}, replication status {:?}",
+                "heartbeat for region {:?}, leader {}, replication status {:?}, bucket stat {:?}",
                 hb_task.region,
                 hb_task.peer.get_id(),
-                hb_task.replication_status
+                hb_task.replication_status,
+                hb_task.bucket_stat,
             ),
             PdTask::StoreHeartbeat { ref stats, .. } => {
                 write!(f, "store heartbeat stats: {:?}", stats)
@@ -1046,6 +1047,7 @@ impl PdRunner {
         peer: metapb::Peer,
         mut region_stat: RegionStat,
         replication_status: Option<RegionReplicationStatus>,
+        bucket_meta: Option<metapb::BucketMeta>,
     ) {
         self.store_stat
             .region_bytes_written
@@ -1136,6 +1138,7 @@ impl PdRunner {
             peer,
             region_stat,
             replication_status,
+            bucket_meta,
         );
         let f = async move {
             if let Err(e) = resp.await {
@@ -2107,6 +2110,10 @@ impl Runnable for PdRunner {
                         query_stats.0,
                     )
                 };
+                let bucket_meta = hb_task
+                    .bucket_stat
+                    .as_ref()
+                    .map(|stat| -> metapb::BucketMeta { stat.meta.as_ref().into() });
                 self.handle_heartbeat(
                     hb_task.term,
                     hb_task.region,
@@ -2127,6 +2134,7 @@ impl Runnable for PdRunner {
                         cpu_usage: 0,
                     },
                     hb_task.replication_status,
+                    bucket_meta,
                 );
                 if let Some(bucket_stat) = hb_task.bucket_stat {
                     self.handle_report_region_buckets(bucket_stat);

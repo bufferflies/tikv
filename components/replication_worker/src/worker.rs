@@ -650,7 +650,7 @@ impl ReplicationWorker {
                 stats.approximate_keys = 1000000;
                 stats.approximate_size = 100 * 1024 * 1024;
                 let res = rep_pd_cli
-                    .region_heartbeat(1, region, leader, stats, None)
+                    .region_heartbeat(1, region, leader, stats, None, None)
                     .await;
                 if let Err(err) = res {
                     if kv.get_keyspace_shards(keyspace_id).is_none() {
@@ -833,7 +833,7 @@ impl ReplicationWorker {
         stats.approximate_kv_size = 100 * 1024 * 1024;
         stats.approximate_keys = 1000000;
         stats.approximate_size = 100 * 1024 * 1024;
-        let resp = rep_pd_cli.region_heartbeat(1, region, leader, stats, None);
+        let resp = rep_pd_cli.region_heartbeat(1, region, leader, stats, None, None);
         tokio::spawn(async move {
             if let Err(err) = resp.await {
                 warn!("region heartbeat failed"; "err" => ?err);

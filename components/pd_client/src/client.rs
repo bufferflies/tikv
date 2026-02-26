@@ -768,6 +768,7 @@ impl PdClient for RpcClient {
         leader: metapb::Peer,
         region_stat: RegionStat,
         replication_status: Option<RegionReplicationStatus>,
+        bucket_stat: Option<metapb::BucketMeta>,
     ) -> PdFuture<()> {
         PD_HEARTBEAT_COUNTER_VEC.with_label_values(&["send"]).inc();
 
@@ -795,6 +796,9 @@ impl PdClient for RpcClient {
         interval.set_start_timestamp(region_stat.last_report_ts.into_inner());
         interval.set_end_timestamp(UnixSecs::now().into_inner());
         req.set_interval(interval);
+        if let Some(b) = bucket_stat {
+            req.set_bucket_meta(b);
+        }
 
         let executor = |client: &Client, req: pdpb::RegionHeartbeatRequest| {
             let mut inner = client.inner.wl();

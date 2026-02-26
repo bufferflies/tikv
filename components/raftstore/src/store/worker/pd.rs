@@ -1173,6 +1173,7 @@ where
             peer,
             region_stat,
             replication_status,
+            None,
         );
         let f = async move {
             if let Err(e) = resp.await {
