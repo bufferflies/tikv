@@ -280,6 +280,9 @@ pub fn restore_keyspace(
     reporter.report_step(RestoreStep::LoadBackupMeta);
     if config.restore_packed_backup {
         let packed = get_packed_backup_meta(&s3fs, backup_name.to_owned())?;
+        if let Some(tts) = truncate_ts {
+            check_packed_backup_meta_ts(&packed, tts)?;
+        }
         let mut env = RestorePackEnv {
             dfs: s3fs.clone(),
             pd_client: pd_client.clone(),
@@ -288,6 +291,7 @@ pub fn restore_keyspace(
             reporter: reporter.as_ref() as &dyn ReportRestoreStepTrait,
             restore_config: config.clone(),
             data_dir: &working_path,
+            truncate_ts,
         };
         let restored = env.execute(packed)?;
         return Ok(restored);
@@ -547,6 +551,17 @@ fn check_backup_meta_ts(meta: &ClusterBackupMeta, truncate_ts: u64) -> Result<()
             truncate_ts,
             meta.safe_ts,
             meta.backup_ts,
+        ));
+    }
+    Ok(())
+}
+
+fn check_packed_backup_meta_ts(packed: &PackedBackup, truncate_ts: u64) -> Result<()> {
+    if truncate_ts < packed.safe_ts || truncate_ts > packed.backup_ts {
+        return Err(Error::PitrTsError(
+            truncate_ts,
+            packed.safe_ts,
+            packed.backup_ts,
         ));
     }
     Ok(())
@@ -1063,6 +1078,13 @@ impl BackupCluster {
             .store_shards
             .insert(PACKED_STORE_ID, shard_ids.clone());
         cluster.sorted_shards = shard_ids;
+        cluster.shards_need_truncate.extend(
+            cluster
+                .shards
+                .iter()
+                .filter(|(_, shard)| shard.meta.max_ts >= cluster.truncate_ts)
+                .map(|(&shard_id, _)| shard_id),
+        );
 
         #[derive(Clone)]
         struct NoopRecovery;
@@ -1091,6 +1113,8 @@ impl BackupCluster {
             .take_shards()
             .unwrap();
         cluster.shards = mem::take(&mut applied_shards);
+
+        cluster.verify_shards()?;
         Ok(cluster)
     }
 
@@ -1314,10 +1338,12 @@ impl BackupCluster {
             let table_filter: Option<LoadTableFilterFn> = if self.load_all_tables {
                 None
             } else if restoring_packed_backup {
-                // As a packed backup contains a full ready snapshot,
-                // no need to preprocess it before put it to the cluster.
-                let load_no_table = |_, _: &_| false;
-                Some(Arc::new(load_no_table))
+                // We have to load shards needing to be truncated.
+                // As its `max-ts` is in the footer, or we have no way to know whether a file is
+                // needed to be truncated.
+                let shard_need_truncate = self.shards_need_truncate.clone();
+                let table_filter = move |shard_id, _: &_| shard_need_truncate.contains(&shard_id);
+                Some(Arc::new(table_filter))
             } else {
                 // Load the following tables from DFS:
                 // 1. Tables of shards need truncate, to get the `max_ts`.
@@ -3048,7 +3074,8 @@ async fn request_restore_snapshot(
                 last_err = Some(e);
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 metrics::NATIVE_BR_RESTORE_ERROR
-                    .with_label_values(&["restore_snapshot::pd_reigon_not_found_or_no_leader"]);
+                    .with_label_values(&["restore_snapshot::pd_region_not_found_or_no_leader"])
+                    .inc();
                 continue 'retry;
             }
         };
@@ -3057,7 +3084,8 @@ async fn request_restore_snapshot(
         let shard_ver = cs.get_shard_ver();
         if region_ver != shard_ver {
             metrics::NATIVE_BR_RESTORE_ERROR
-                .with_label_values(&["restore_snapshot::pd_epoch_not_match"]);
+                .with_label_values(&["restore_snapshot::pd_epoch_not_match"])
+                .inc();
             return Err(Error::RegionVerNotMatch {
                 expected: shard_ver,
                 actual: region_ver,

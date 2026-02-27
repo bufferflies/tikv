@@ -1793,7 +1793,7 @@ pub mod v1x {
                         pd_cli,
                         Some(pd_control),
                         &br_cx.runtime,
-                        None,
+                        truncate_ts.map(|v| v.into_inner()),
                         reporter,
                     )
                 })

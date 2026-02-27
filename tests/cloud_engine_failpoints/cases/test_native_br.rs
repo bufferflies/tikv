@@ -10,7 +10,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use cloud_worker::native_br::{
     test_utils::NativeBrSvcClient,
     v1x::{Backup, PackedBackupView, S3Override, TaskState},
@@ -521,6 +521,7 @@ fn test_native_br_service_x(
     #[case] with_point_in_time: bool,
     #[case] use_lightweight_backup_api: bool,
 ) {
+    native_br::common::step_to_stdout();
     test_util::init_log_for_test();
     const KEYSPACE_ID: u32 = 1;
     const DATA_LEN: usize = 100;
@@ -561,11 +562,50 @@ fn test_native_br_service_x(
     client.split_keyspace(2);
 
     let i_to_key = i_to_keyspace_key(KEYSPACE_ID);
-    client.put_kv(0..DATA_LEN, &i_to_key, random_value::<VALUE_SIZE>);
+    let baseline_commit_ts = client.put_kv(0..DATA_LEN, &i_to_key, random_value::<VALUE_SIZE>);
     client.verify_data_with_ref_store();
 
-    let datetime0 = Utc::now();
+    // IMPORTANT: `point_in_time` is converted to a TSO by taking its physical
+    // milliseconds and composing `TimeStamp::compose(physical_ms, 0)`.
+    //
+    // That means the truncation boundary is aligned to millisecond granularity
+    // (with logical=0). To make the test stable, we craft a boundary *between*
+    // the baseline commit and the later overwrite by using the baseline
+    // commit's physical time + 1ms.
+    let baseline_physical_ms = baseline_commit_ts.physical();
+    let datetime0 = Utc
+        .timestamp_millis_opt((baseline_physical_ms + 1) as i64)
+        .single()
+        .expect("valid timestamp from baseline TSO physical part");
     let mut ref_store0 = client.dump_ref_store();
+
+    // When `point_in_time` is specified, we want to verify that the restore will
+    // truncate the later writes (in the same selected backup) and only restore
+    // data as-of `datetime0`.
+    //
+    // NOTE: We intentionally keep the later writes in the same backup archive.
+    // `point_in_time` is not used to select a different backup here, it only
+    // affects truncation.
+    if with_point_in_time {
+        // Ensure the overwrite commits strictly after `datetime0` in physical
+        // time. Otherwise, if baseline + overwrite land in the same physical
+        // millisecond, truncation boundary (logical=0) may not sit between
+        // them.
+        let wait_until_ms = baseline_physical_ms + 2;
+        let start_wait = std::time::Instant::now();
+        while client.get_ts().physical() < wait_until_ms {
+            assert!(
+                start_wait.elapsed() < Duration::from_secs(5),
+                "waited too long for PD TSO physical time to advance"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        // Overwrite some keys with new values so that restore-with-truncate can
+        // be observed behaviorally.
+        client.put_kv(0..(DATA_LEN / 2), &i_to_key, |_| b"boo!".into());
+        client.verify_data_with_ref_store();
+    }
 
     let security_mgr = Arc::new(SecurityManager::default());
     let br_cli =
@@ -668,7 +708,7 @@ fn test_native_br_service_x(
         2,
         &restore_path,
         "ks2",
-        with_point_in_time.then_some(datetime0 - chrono::Duration::milliseconds(1)),
+        with_point_in_time.then_some(datetime0),
     ))
     .unwrap();
     println!(">>> {restore:?}");

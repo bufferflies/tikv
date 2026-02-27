@@ -460,6 +460,7 @@ pub struct RestorePackEnv<'a> {
     pub reporter: &'a dyn ReportRestoreStepTrait,
     pub restore_config: RestoreConfig,
     pub data_dir: &'a Path,
+    pub truncate_ts: Option<u64>,
 }
 
 impl<'a> RestorePackEnv<'a> {
@@ -479,12 +480,12 @@ impl<'a> RestorePackEnv<'a> {
             self.dfs.clone(),
             self.restore_config.clone(),
             self.target_keyspace,
-            packed.backup_ts,
+            self.truncate_ts.unwrap_or(packed.backup_ts),
         )?;
 
         restore_keyspace::prepare_and_restore_cluster(
             &mut cluster,
-            RestoreConfig::default(),
+            self.restore_config.clone(),
             self.dfs.get_runtime(),
             self.reporter,
         )
