@@ -191,6 +191,7 @@ fn test_backup_on_scaling_up() {
     );
     client.verify_data_with_ref_store();
 
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     // Perform restore to verify backup.
     for (bk_name, ref_store) in [
         (backup_name, origin_ref_store),
@@ -214,6 +215,7 @@ fn test_backup_on_scaling_up() {
             &runtime,
             None,
             reporter.clone(),
+            limiter.clone(),
         )
         .expect("restore");
         info!("restore keyspace result for backup {}: {:?}", bk_name, res);
@@ -291,6 +293,7 @@ fn test_restore_on_disk_full() {
     fail::cfg(low_space_fp, "return").unwrap();
 
     let restore_config = RestoreConfig::default_for_test();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     thread::scope(|s| {
         let pd_client = cluster.get_pd_client();
         let h = s.spawn(move || {
@@ -306,6 +309,7 @@ fn test_restore_on_disk_full() {
                 &runtime,
                 None,
                 reporter,
+                limiter,
             )
         });
 
@@ -611,7 +615,23 @@ fn test_native_br_service_x(
     let br_cli =
         NativeBrSvcClient::new(cluster_id, cluster.tikv_worker_endpoints(), security_mgr).unwrap();
 
-    let target_datetime = datetime0 + chrono::Duration::seconds(1);
+    // Round up to the beginning of the next second. The for-pitr handler
+    // lists S3 backup files at second granularity and picks the first one,
+    // then checks `backup_ts >= target_ts`. By advancing to the next whole
+    // second we ensure:
+    //   1. The S3 listing skips any pre-write backup in the same second as
+    //      baseline_commit_ts (that backup was taken before put_kv and doesn't
+    //      contain our data).
+    //   2. target_ts sits at a second boundary, so any backup file created within
+    //      that second or later will have backup_ts >= target_ts.
+    // NOTE: `datetime0` (with full ms precision) is still used for the
+    // restore point_in_time truncation, only the *query* target is
+    // rounded here.
+    let target_secs = datetime0.timestamp() + 1;
+    let target_datetime = Utc
+        .timestamp_millis_opt(target_secs * 1000)
+        .single()
+        .unwrap();
     let backup_x = TryWaiter::timeout(10)
         .interval(1)
         .try_wait_result(|| {
@@ -864,6 +884,7 @@ fn test_backup_pessimistic_lock() {
         lower_memory: RestoreConfig::use_lower_memory(),
         ..Default::default()
     };
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -876,6 +897,7 @@ fn test_backup_pessimistic_lock() {
         &runtime,
         None,
         reporter.clone(),
+        limiter,
     )
     .expect("restore");
     info!(
@@ -1044,6 +1066,7 @@ fn test_check_backup_ts(#[case] write_method: TxnWriteMethod) {
 
     // Perform restore.
     let restore_config = RestoreConfig::default_for_test();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -1056,6 +1079,7 @@ fn test_check_backup_ts(#[case] write_method: TxnWriteMethod) {
         &runtime,
         None,
         reporter.clone(),
+        limiter,
     )
     .expect("restore");
     info!("restore: {:?}", res);
@@ -1223,6 +1247,7 @@ fn test_check_backup_ts_with_async_commit() {
         ref_store0
     });
 
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     // Perform restore.
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
@@ -1236,6 +1261,7 @@ fn test_check_backup_ts_with_async_commit() {
         &runtime,
         None,
         reporter.clone(),
+        limiter,
     )
     .expect("restore");
     info!("restore: {:?}", res);

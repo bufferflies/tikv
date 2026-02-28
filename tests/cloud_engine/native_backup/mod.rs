@@ -7,6 +7,7 @@ use native_br::{
 use rand::Rng;
 
 mod backup;
+mod limiter;
 mod restore_keyspace;
 
 fn random_value<const N: usize>(_: usize) -> Vec<u8>

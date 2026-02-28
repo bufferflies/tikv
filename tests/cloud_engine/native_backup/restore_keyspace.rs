@@ -442,6 +442,7 @@ fn test_restore_keyspace_impl(
         instant_backup_name
     };
 
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     // Restore keyspace.
     restore_keyspace::restore_keyspace(
         keyspace_id,
@@ -455,6 +456,7 @@ fn test_restore_keyspace_impl(
         runtime,
         truncate_ts,
         reporter.clone(),
+        limiter.clone(),
     )
     .unwrap();
     step!("restore done");
@@ -500,6 +502,7 @@ fn test_restore_keyspace_impl(
             runtime,
             Some(truncate_ts_pitr),
             reporter,
+            limiter,
         )
         .unwrap();
         step!("restore (pitr on restored data) done");
@@ -895,6 +898,7 @@ fn test_restore_archived_keyspace_impl(
         );
     }
 
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     for idx in 0..BACKUP_DAYS - 1 {
         // Restore keyspace.
         {
@@ -917,6 +921,7 @@ fn test_restore_archived_keyspace_impl(
                 runtime,
                 None,
                 reporter.clone(),
+                limiter.clone(),
             )
             .unwrap();
             step!("restore done. case: {}:{}:{}", case_idx, loop_idx, idx);
@@ -1124,13 +1129,14 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
         keyspace_id,
         &snapshot_backup_name,
         None,
-        s3fs,
-        restore_config,
+        s3fs.clone(),
+        restore_config.clone(),
         cluster.get_pd_client(),
         None,
         &runtime,
         None,
-        reporter,
+        reporter.clone(),
+        None,
     )
     .unwrap();
     if resolved_ts != u64::MAX {
@@ -1138,47 +1144,66 @@ fn test_restore_keyspace_with_resolve_locks(#[case] async_commit: bool) {
     } else {
         assert_eq!(restore_result.resolved_ts, restore_result.ts.into());
     }
-
-    // Invoke major compaction to reproduce issue by compacting the deletion of
-    // primary key.
-    // If restore keyspace do not resolve locks, the secondary keys of "put_kv" will
-    // not be compacted, and the following `wait_for_keyspace_stats` will fail.
-    let ts = client.get_ts();
-    runtime
-        .block_on(
-            cluster
-                .get_pd_client()
-                .advance_txn_safe_point(keyspace_id, ts),
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
+    // Restore keyspace.
+    {
+        restore_keyspace::restore_keyspace(
+            keyspace_id,
+            keyspace_id,
+            &snapshot_backup_name,
+            None,
+            s3fs.clone(),
+            restore_config.clone(),
+            cluster.get_pd_client(),
+            None,
+            &runtime,
+            None,
+            reporter.clone(),
+            limiter.clone(),
         )
         .unwrap();
-    runtime
-        .block_on(
-            cluster
-                .get_pd_client()
-                .advance_gc_safe_point(keyspace_id, ts),
+
+        // Invoke major compaction to reproduce issue by compacting the deletion of
+        // primary key.
+        // If restore keyspace do not resolve locks, the secondary keys of "put_kv" will
+        // not be compacted, and the following `wait_for_keyspace_stats` will fail.
+        let ts = client.get_ts();
+        runtime
+            .block_on(
+                cluster
+                    .get_pd_client()
+                    .advance_txn_safe_point(keyspace_id, ts),
+            )
+            .unwrap();
+        runtime
+            .block_on(
+                cluster
+                    .get_pd_client()
+                    .advance_gc_safe_point(keyspace_id, ts),
+            )
+            .unwrap();
+        runtime
+            .block_on(cluster.update_gc_states_immediately())
+            .unwrap();
+        request_major_compaction(&runtime, &pd_client, keyspace_id);
+        wait_for_keyspace_stats(
+            &runtime,
+            &cluster,
+            &pd_client,
+            keyspace_id,
+            |stats| stats.cfs[WRITE_CF].levels.iter().all(|l| l.num_tables == 0),
+            false,
+            Duration::from_secs(10),
         )
         .unwrap();
-    runtime
-        .block_on(cluster.update_gc_states_immediately())
-        .unwrap();
-    request_major_compaction(&runtime, &pd_client, keyspace_id);
-    wait_for_keyspace_stats(
-        &runtime,
-        &cluster,
-        &pd_client,
-        keyspace_id,
-        |stats| stats.cfs[WRITE_CF].levels.iter().all(|l| l.num_tables == 0),
-        false,
-        Duration::from_secs(10),
-    )
-    .unwrap();
-    std::thread::sleep(Duration::from_secs(10));
+        std::thread::sleep(Duration::from_secs(10));
 
-    // Verify restored data.
-    let verified_cnt = client
-        .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
-        .unwrap();
-    assert_eq!(verified_cnt, (0, 200));
+        // Verify restored data.
+        let verified_cnt = client
+            .verify_data_with_given_ref_store(&origin_ref_store, None, &RequestOptions::default())
+            .unwrap();
+        assert_eq!(verified_cnt, (0, 200));
+    }
 
     cluster.stop();
     oss.shutdown();
@@ -1248,6 +1273,7 @@ fn test_restore_keyspace_with_no_chunk() {
 
     // Restore keyspace.
     let restore_config = RestoreConfig::default_for_test();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -1260,6 +1286,7 @@ fn test_restore_keyspace_with_no_chunk() {
         &runtime,
         None,
         reporter,
+        limiter,
     )
     .unwrap();
 
@@ -1348,6 +1375,7 @@ fn test_restore_keyspace_with_slow_dfs() {
     }
 
     let restore_config = RestoreConfig::default_for_test();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     NATIVE_BR_RFENGINE_WAL_EPOCH_OVERWRITTEN_ERROR.reset();
     let mut ok = false;
     for _ in 0..30 {
@@ -1364,6 +1392,7 @@ fn test_restore_keyspace_with_slow_dfs() {
             &runtime,
             None,
             reporter.clone(),
+            limiter.clone(),
         )
         .unwrap();
 
@@ -1502,6 +1531,7 @@ fn test_restore_keyspace_with_schema() {
 
     // Restore keyspace.
     let restore_config = RestoreConfig::default_for_test();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -1514,6 +1544,7 @@ fn test_restore_keyspace_with_schema() {
         &runtime,
         None,
         reporter,
+        limiter,
     )
     .unwrap();
 
@@ -1694,6 +1725,7 @@ fn test_restore_keyspace_with_failed_store(
         lower_memory: RestoreConfig::use_lower_memory(),
         ..Default::default()
     };
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
 
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
@@ -1707,6 +1739,7 @@ fn test_restore_keyspace_with_failed_store(
         &runtime,
         None,
         reporter.clone(),
+        limiter.clone(),
     );
     assert_eq!(
         res.is_ok(),
@@ -1732,6 +1765,7 @@ fn test_restore_keyspace_with_failed_store(
         &runtime,
         None,
         reporter,
+        limiter,
     );
     assert_eq!(
         res_tolerated.is_err(),
@@ -2020,6 +2054,7 @@ fn test_restore_packed_backup(
         &runtime,
         None,
         Arc::new(DummyStepReporter::default()),
+        None,
     )
     .unwrap();
 

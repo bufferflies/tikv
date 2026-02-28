@@ -1,12 +1,20 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cell::RefCell, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    io::Write,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    },
+};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::{Args, Subcommand};
 use kvengine::dfs::{Dfs, S3Fs};
 use native_br::{
     common::{create_pd_client, now},
+    limiter::{RateLimitConfig, ThroughputLimiter},
     restore,
     restore::{restore_pd, restore_tikv, RestoreConfig},
     restore_keyspace::{
@@ -20,7 +28,7 @@ use pd_client::{
 };
 use security::SecurityManager;
 use slog_global::{error, info};
-use tikv_util::{box_try, config::ReadableSize};
+use tikv_util::{box_try, config::ReadableSize, time::Instant};
 
 use crate::{
     backup::{show_backup_summary, show_packed_backup_summary},
@@ -135,6 +143,15 @@ pub struct RestoreKeyspaceArgs {
     /// When this enabled, will find backups from `<prefix>/packed_backup/`
     #[clap(long)]
     pub packed: bool,
+    /// Max throughput for restore process, e.g. 500GiB. 0 to disable the limit.
+    #[clap(long, default_value = "500MiB")]
+    pub max_throughput: ReadableSize,
+    /// Calibrate estimated restore size by requesting existed files on TiKV
+    /// stores when exceeds this threshold.
+    ///
+    /// NOTE: specify this option to enable calibration after TiKV supports it.
+    #[clap(long)]
+    pub calibrate_restore_size_threshold: Option<ReadableSize>,
 }
 
 pub fn execute_restore_command(cmd: RestoreCommand) {
@@ -163,8 +180,7 @@ fn execute_restore_pd(args: RestorePdArgs) {
 
 fn execute_restore_keyspace(args: RestoreKeyspaceArgs) {
     if std::env::var("LOG_FILE").is_err() {
-        let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%z");
-        std::env::set_var("LOG_FILE", format!("cse-ctl_{}.log", timestamp));
+        std::env::set_var("LOG_FILE", "cse-ctl.log");
     }
     // The logger for test is enough.
     ::test_util::init_log_for_test();
@@ -217,20 +233,14 @@ fn execute_restore_keyspace_impl(
 
     let pd_client: Arc<dyn PdClient> = Arc::new(create_pd_client(&config.security, &config.pd));
     let dfs_config = config.dfs.clone();
-    let s3fs = S3Fs::new(
-        dfs_config.prefix,
-        dfs_config.s3_endpoint,
-        dfs_config.s3_key_id,
-        dfs_config.s3_secret_key,
-        dfs_config.s3_region,
-        dfs_config.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(dfs_config);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)
         .enable_all()
         .build()
         .unwrap();
     let reporter = Arc::new(CliRestoreStepReporter::default());
+    let limiter = box_try!(create_limiter(args, &pd_client, &runtime));
 
     let target_keyspace_name = args
         .target_keyspace_name
@@ -247,6 +257,7 @@ fn execute_restore_keyspace_impl(
         &runtime,
         args.truncate_ts,
         reporter,
+        limiter,
     )
 }
 
@@ -313,40 +324,96 @@ pub fn get_restore_keyspace_config_from_args(args: &RestoreKeyspaceArgs) -> Rest
     config
 }
 
+fn create_limiter(
+    args: &RestoreKeyspaceArgs,
+    pd_client: &Arc<dyn PdClient>,
+    runtime: &tokio::runtime::Runtime,
+) -> native_br::Result<Option<Arc<ThroughputLimiter>>> {
+    let limiter = if args.max_throughput.0 > 0 {
+        let rate_limit_cfg = RateLimitConfig {
+            enable: true,
+            max_throughput: args.max_throughput,
+            calibrate_restore_size_threshold: args
+                .calibrate_restore_size_threshold
+                .unwrap_or(ReadableSize(u64::MAX)),
+            ..Default::default()
+        };
+        let limiter =
+            ThroughputLimiter::new(&rate_limit_cfg, pd_client.clone(), runtime.handle().clone())?;
+        Some(Arc::new(limiter))
+    } else {
+        None
+    };
+    Ok(limiter)
+}
+
 #[derive(Default)]
 struct CliRestoreStepReporter {
-    step_start: RefCell<Option<(Instant, RestoreStep)>>,
+    total_restore_size: AtomicI64,
+    restored_size: AtomicI64,
+    restore_snapshot_start_time: AtomicI64,
 }
 
 impl ReportRestoreStepTrait for CliRestoreStepReporter {
     fn report_step(&self, step: RestoreStep) {
-        let mut step_start = self.step_start.borrow_mut();
-        match &*step_start {
-            Some((start, last_step)) => {
-                let elapsed = start.elapsed();
-                step!(
-                    "restore keyspace step done. takes={:?} step={:?}",
-                    elapsed,
-                    last_step
-                );
-            }
-            None => {}
+        if step == RestoreStep::RestoreSnapshotsToServers {
+            self.restore_snapshot_start_time
+                .store(Instant::now_coarse().second(), Ordering::Relaxed);
+        } else if step == RestoreStep::RestoreSnapshotsFinished {
+            println!();
         }
-        step!("restore keyspace step started. step={:?}", step);
-        *step_start = Some((Instant::now(), step));
+    }
+
+    fn report_pending_restore_data_size(&self, data_size: i64) {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        match data_size.cmp(&0) {
+            Greater => {
+                self.total_restore_size
+                    .fetch_add(data_size, Ordering::Relaxed);
+            }
+            Less => {
+                // NOTE: negative `data_size` means a snapshot has been restored or failed.
+                self.restored_size.fetch_add(-data_size, Ordering::Relaxed);
+            }
+            Equal => {}
+        }
+        self.print_progress();
     }
 }
 
-impl Drop for CliRestoreStepReporter {
-    fn drop(&mut self) {
-        if let Some((start, last_step)) = self.step_start.borrow_mut().take() {
-            let elapsed = start.elapsed();
-            step!(
-                "restore keyspace step eventually done. takes={:?} step={:?}",
-                elapsed,
-                last_step
-            );
-        }
+impl CliRestoreStepReporter {
+    fn print_progress(&self) {
+        let total_size = self.total_restore_size.load(Ordering::Relaxed);
+        let restored_size = self.restored_size.load(Ordering::Relaxed);
+        let elapsed = Instant::from_timespec_second_coarse(
+            self.restore_snapshot_start_time.load(Ordering::Relaxed),
+        )
+        .saturating_elapsed();
+
+        let percent = if total_size > 0 {
+            (restored_size as f64 / total_size as f64) * 100.0
+        } else {
+            0.0
+        };
+        let throuthput = if elapsed.as_secs() > 0 {
+            restored_size as f64 / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+
+        write!(
+            out,
+            "\r\x1b[2K[{}] Progress: {:.2}% ({}/{}) bytes, {:.2} bytes/sec",
+            now(),
+            percent,
+            restored_size,
+            total_size,
+            throuthput
+        )
+        .unwrap();
+        out.flush().unwrap();
     }
 }
 
@@ -362,14 +429,7 @@ fn show_restore_keyspace_info(
     let pd_ctl = PdControl::new(config.pd.clone(), security_mgr).unwrap();
 
     let dfs_config = config.dfs.clone();
-    let s3fs = S3Fs::new(
-        dfs_config.prefix,
-        dfs_config.s3_endpoint,
-        dfs_config.s3_key_id,
-        dfs_config.s3_secret_key,
-        dfs_config.s3_region,
-        dfs_config.s3_bucket,
-    );
+    let s3fs = S3Fs::new_from_config(dfs_config);
     let rt = s3fs.get_runtime();
 
     println!("Restore Keyspace");
@@ -411,6 +471,16 @@ fn show_restore_keyspace_info(
         println!("truncate_ts: {}", truncate_ts);
         println!();
     }
+
+    if args.max_throughput.0 > 0 {
+        println!(
+            "max_throughput: {} MiB/sec",
+            args.max_throughput.as_mb_f64()
+        );
+    } else {
+        println!("max_throughput: unlimited");
+    }
+    println!();
 }
 
 fn show_keyspace(ks: &KeyspaceMeta, indent: usize) {

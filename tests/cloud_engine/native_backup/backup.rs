@@ -297,6 +297,7 @@ fn test_periodic_backup() {
     let backup_file = files.choose(&mut thread_rng()).unwrap();
 
     let pd_client = cluster.get_pd_client();
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     let res = restore_keyspace::restore_keyspace(
         KEYSPACE_ID,
         KEYSPACE_ID,
@@ -309,6 +310,7 @@ fn test_periodic_backup() {
         &runtime,
         None,
         reporter,
+        limiter,
     )
     .unwrap();
 

@@ -1411,7 +1411,7 @@ pub struct FileMeta {
     // Available ONLY for SST level 0.
     pub l0_size: u32,
 
-    // Available ONLY for SST (level 1+) & Columnar.
+    // Available ONLY for SST (level 1+) & Columnar & Blob.
     pub table_meta_off: u32,
 }
 
@@ -1524,7 +1524,7 @@ impl FileMeta {
             table.get_smallest(),
             table.get_biggest(),
             0,
-            0,
+            table.meta_offset,
         )
     }
 
@@ -1579,6 +1579,7 @@ impl FileMeta {
         blob_create.set_id(id);
         blob_create.set_smallest(self.smallest.to_vec());
         blob_create.set_biggest(self.biggest.to_vec());
+        blob_create.set_meta_offset(self.table_meta_off);
         blob_create
     }
 }

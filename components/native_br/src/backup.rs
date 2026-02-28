@@ -515,7 +515,8 @@ async fn backup_store(
     let req = Request::post(uri.clone())
         .body(Body::from(json_string.clone()))
         .unwrap();
-    let res = match send_request_to_store(req, store, security_mgr, timeout).await {
+    let client = security_mgr.http_client(hyper::Client::builder())?;
+    let res = match send_request_to_store(req, store, &client, timeout).await {
         Ok((_, resp)) => {
             let mut store_backup_meta = StoreBackupMeta::default();
             store_backup_meta.merge_from_bytes(&resp).unwrap();

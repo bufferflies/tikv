@@ -291,6 +291,7 @@ impl BlobTable {
         blob_create.set_id(self.id());
         blob_create.set_smallest(self.smallest_key().to_vec());
         blob_create.set_biggest(self.biggest_key().to_vec());
+        blob_create.set_meta_offset(self.footer.properties_offset);
         blob_create
     }
 }

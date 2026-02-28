@@ -35,6 +35,7 @@ use crate::{
     backup::packed_backup_prefixed,
     common::{create_pd_client, PACKED_META_NAME_FORMAT},
     error::Error,
+    limiter::ThroughputLimiter,
     lock::LockResolver,
     restore::RestoreConfig,
     restore_keyspace::{
@@ -457,10 +458,11 @@ pub struct RestorePackEnv<'a> {
     pub pd_client: Arc<dyn PdClient>,
     pub pd_control: Option<PdControl>,
     pub target_keyspace: u32,
-    pub reporter: &'a dyn ReportRestoreStepTrait,
+    pub reporter: Arc<dyn ReportRestoreStepTrait>,
     pub restore_config: RestoreConfig,
     pub data_dir: &'a Path,
     pub truncate_ts: Option<u64>,
+    pub limiter: Option<Arc<ThroughputLimiter>>,
 }
 
 impl<'a> RestorePackEnv<'a> {
@@ -487,7 +489,8 @@ impl<'a> RestorePackEnv<'a> {
             &mut cluster,
             self.restore_config.clone(),
             self.dfs.get_runtime(),
-            self.reporter,
+            &self.reporter,
+            &self.limiter,
         )
     }
 }

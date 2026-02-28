@@ -42,6 +42,7 @@ lazy_static = "1.3"
 libc = "0.2"
 load_data = { path = "../load_data" }
 log_wrappers = { path = "../log_wrappers" }
+native_br = { path = "../native_br" }
 nix = "0.24"
 pd_client = { path = "../pd_client", default-features = false }
 protobuf = { version = "2.8", features = ["bytes"] }

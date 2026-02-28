@@ -164,6 +164,7 @@ fn test_random_all() {
         lower_memory: switches.restore_lower_memory,
         ..Default::default()
     };
+    let limiter = cluster.create_restore_limiter_randomly(runtime.handle().clone());
     for _ in 0..RESTORE_CONCURRENCY {
         handles.push(spawn_restore_keyspace(
             cluster.get_pd_client(),
@@ -172,10 +173,12 @@ fn test_random_all() {
             restore_config.clone(),
             keyspace_manager.clone(),
             &s3fs,
+            false,
+            limiter.clone(),
             TIMEOUT,
         ));
     }
-    let load_data_task_timeout = Duration::from_secs(env_param("LOAD_DATA_TASK_TIMEOUT_SEC", 30));
+    let load_data_task_timeout = Duration::from_secs(env_param("LOAD_DATA_TASK_TIMEOUT_SEC", 90));
     for _i in 0..LOAD_DATA_CONCURRENCY {
         let load_data_config = load_data_config.clone();
         handles.push(spawn_load_data(

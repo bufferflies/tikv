@@ -72,8 +72,12 @@ use crate::{
         Error::{MetaNotFound, RetryLimitExceeded},
         Result,
     },
+    limiter::{SnapshotSize, ThroughputLimiter},
     lock::LockResolver,
-    metrics,
+    metrics::{
+        self, NATIVE_BR_RESTORED_DATA_SIZE, NATIVE_BR_RESTORED_KV_SIZE,
+        NATIVE_BR_RESTORE_PENDING_DATA_SIZE,
+    },
     packing::RestorePackEnv,
     restore::RestoreConfig,
     step,
@@ -83,6 +87,7 @@ use crate::{
 const WORKING_PATH_PREFIX: &str = "keyspace-restore";
 const ZSTD_COMPRESSION_LEVEL: &str = "5"; // The same as ZSTD_COMPRESSION_LEVEL_FOR_REMOTE.
 
+// TODO: get replicas from keyspace config to handle 5 replicas in the future.
 const REPLICAS: usize = 3; // Number of replicas for each region.
 
 const RESOLVE_LOCKS_BATCH_SIZE: usize = 1024;
@@ -137,12 +142,15 @@ pub enum RestoreStep {
     SplitRegions,
     AlignRegions,
     RestoreSnapshotsToServers,
+    RestoreSnapshotsFinished,
     RetainSstFiles,
     Finalize,
 }
 
-pub trait ReportRestoreStepTrait {
+pub trait ReportRestoreStepTrait: Send + Sync {
     fn report_step(&self, step: RestoreStep);
+
+    fn report_pending_restore_data_size(&self, _data_size: i64) {}
 }
 
 pub fn restore_keyspace_with_cfg(
@@ -156,6 +164,7 @@ pub fn restore_keyspace_with_cfg(
     runtime: &Runtime,
     truncate_ts: Option<u64>,
     reporter: Arc<dyn ReportRestoreStepTrait>,
+    limiter: Option<Arc<ThroughputLimiter>>,
 ) -> Result<RestoredKeyspace> {
     let mut pd_control = PdControl::new(config.pd.clone(), pd_client.get_security_mgr())?;
     pd_control.set_retry_timeout(config.timeout_pd_control.0);
@@ -200,6 +209,7 @@ pub fn restore_keyspace_with_cfg(
         runtime,
         truncate_ts,
         reporter,
+        limiter,
     )
 }
 
@@ -249,6 +259,7 @@ pub fn restore_keyspace(
     runtime: &Runtime,
     truncate_ts: Option<u64>,
     reporter: Arc<dyn ReportRestoreStepTrait>,
+    limiter: Option<Arc<ThroughputLimiter>>,
 ) -> Result<RestoredKeyspace> {
     let keyspace_tag = make_keyspace_tag(keyspace_id, target_keyspace_id);
 
@@ -288,10 +299,11 @@ pub fn restore_keyspace(
             pd_client: pd_client.clone(),
             pd_control,
             target_keyspace: target_keyspace_id,
-            reporter: reporter.as_ref() as &dyn ReportRestoreStepTrait,
+            reporter: reporter.clone(),
             restore_config: config.clone(),
             data_dir: &working_path,
             truncate_ts,
+            limiter: limiter.clone(),
         };
         let restored = env.execute(packed)?;
         return Ok(restored);
@@ -392,7 +404,7 @@ pub fn restore_keyspace(
     let flush_cnt = cluster.flush_shards(config.timeout_wait_flush.0)?;
     step!("Keyspace {keyspace_tag} flush {flush_cnt} shards");
 
-    let mut res = prepare_and_restore_cluster(&mut cluster, config, runtime, &*reporter)?;
+    let mut res = prepare_and_restore_cluster(&mut cluster, config, runtime, &reporter, &limiter)?;
     res.resolved_ts = resolved_ts.unwrap_or(truncate_ts).into();
     Ok(res)
 }
@@ -403,7 +415,8 @@ pub fn prepare_and_restore_cluster(
     cluster: &mut BackupCluster,
     config: RestoreConfig,
     runtime: &Runtime,
-    reporter: &dyn ReportRestoreStepTrait,
+    reporter: &Arc<dyn ReportRestoreStepTrait>,
+    limiter: &Option<Arc<ThroughputLimiter>>,
 ) -> Result<RestoredKeyspace> {
     let keyspace_tag = cluster.tag.clone();
     reporter.report_step(RestoreStep::TruncateTs);
@@ -497,12 +510,15 @@ pub fn prepare_and_restore_cluster(
             &keyspace_tag,
             runtime,
             cluster.pd_client.clone(),
+            reporter,
             snapshots,
             &mut success_ranges,
             config.timeout_restore_snapshot.0,
             config.restore_snapshot_concurrency_factor,
             &mut bo,
+            limiter,
         )?;
+        reporter.report_step(RestoreStep::RestoreSnapshotsFinished);
         restore_bytes += ret.restore_bytes;
         step!(
             "Keyspace {keyspace_tag} restore {snapshots_count} regions, result: {:?}",
@@ -2974,28 +2990,47 @@ fn restore_snapshots(
     tag: &str,
     runtime: &Runtime,
     pd_client: Arc<dyn PdClient>,
+    reporter: &Arc<dyn ReportRestoreStepTrait>,
     snapshots: Vec<pb::ChangeSet>,
     success_ranges: &mut MergeRanges,
     timeout: Duration,
     concurrency_factor: usize,
     bo: &mut Backoff,
+    limiter: &Option<Arc<ThroughputLimiter>>,
 ) -> Result<RestoredSnapshots> {
     let store_count = get_all_stores_except_tiflash(pd_client.as_ref())?.len();
     let semaphore = Arc::new(Semaphore::new(concurrency_factor * store_count));
     info!("using restore concurrency."; "concurrency_factor" => concurrency_factor,
         "store_count" => store_count, "semaphore" => ?semaphore);
+    let (snapshots_size, need_calibrate) = estimate_snapshot_size(&snapshots, limiter, REPLICAS);
+    debug_assert_eq!(snapshots.len(), snapshots_size.len());
+
+    let security_mgr = pd_client.get_security_mgr();
+    let client = security_mgr.http_client(hyper::Client::builder())?;
 
     let mut handles = Vec::with_capacity(snapshots.len());
-    for snap in snapshots {
+    for (snap, snapshot_size) in snapshots.into_iter().zip(snapshots_size.into_iter()) {
         let pd_client = pd_client.clone();
+        let client = client.clone();
+        let reporter = reporter.clone();
         let semaphore = semaphore.clone();
         let shard_id = snap.shard_id;
         let start = snap.get_restore_shard().get_outer_start().to_vec();
         let end = snap.get_restore_shard().get_outer_end().to_vec();
-
+        let limiter = limiter.clone();
         let task = async move {
             let _permit = semaphore.acquire().await.unwrap();
-            request_restore_snapshot(pd_client, &snap, timeout).await
+            request_restore_snapshot(
+                pd_client,
+                client,
+                reporter,
+                snap,
+                timeout,
+                limiter,
+                snapshot_size,
+                need_calibrate,
+            )
+            .await
         };
         handles.push((shard_id, runtime.spawn(task), start, end));
     }
@@ -3056,9 +3091,15 @@ fn restore_snapshots(
 
 async fn request_restore_snapshot(
     pd_client: Arc<dyn PdClient>,
-    cs: &pb::ChangeSet,
+    client: security::HttpClient,
+    reporter: Arc<dyn ReportRestoreStepTrait>,
+    cs: pb::ChangeSet,
     timeout: Duration,
+    limiter: Option<Arc<ThroughputLimiter>>,
+    snapshot_size: SnapshotSize,
+    restore_size_need_calibrate: bool,
 ) -> Result<RestoreShardResponse> {
+    let security_mgr = pd_client.get_security_mgr();
     let post_data = Cow::from(cs.write_to_bytes().unwrap());
     let mut last_err = None;
     let mut retry_cnt = 0;
@@ -3095,17 +3136,61 @@ async fn request_restore_snapshot(
         let store = pd_client.get_store_async(leader.get_store_id()).await?;
         let tag = ShardTag::new(store.get_id(), IdVer::new(cs.shard_id, cs.shard_ver));
 
-        let security_mgr = pd_client.get_security_mgr();
+        let replicas = region
+            .get_peers()
+            .iter()
+            .filter(|p| p.role == PeerRole::Voter)
+            .count();
+        let mut estimated_restore_size = snapshot_size.estimated_size * replicas as u64;
+        if let Some(limiter) = limiter.as_ref() {
+            if restore_size_need_calibrate && !snapshot_size.files.is_empty() {
+                match limiter
+                    .calibrate_restore_size_from_tikv(&snapshot_size, &region)
+                    .await
+                {
+                    Ok(calibrated_restore_size) => {
+                        debug!(
+                            "{} request_restore_snapshot: calibrated restore size: {} bytes",
+                            tag, calibrated_restore_size
+                        );
+                        estimated_restore_size = calibrated_restore_size;
+                    }
+                    Err(err) => {
+                        warn!(
+                            "{} request_restore_snapshot: calibrate restore size error: {:?}",
+                            tag, err
+                        );
+                        debug_assert!(false);
+                    }
+                }
+            }
+
+            if estimated_restore_size > 0 {
+                reporter.report_pending_restore_data_size(estimated_restore_size as i64);
+                NATIVE_BR_RESTORE_PENDING_DATA_SIZE.add(estimated_restore_size as i64);
+                limiter.consume_restore_size(estimated_restore_size).await;
+            }
+        } else {
+            reporter.report_pending_restore_data_size(estimated_restore_size as i64);
+            NATIVE_BR_RESTORE_PENDING_DATA_SIZE.add(estimated_restore_size as i64);
+        }
+        tikv_util::defer!({
+            reporter.report_pending_restore_data_size(-(estimated_restore_size as i64));
+            NATIVE_BR_RESTORE_PENDING_DATA_SIZE.sub(estimated_restore_size as i64);
+        });
+
         let uri = security_mgr.build_uri(format!("{}/restore-shard", &store.status_address))?;
         let req = Request::post(uri)
             .header(header::ACCEPT, CONTENT_TYPE_PROTOBUF)
             .body(Body::from(post_data.clone()))
             .unwrap();
-        match send_request_to_store(req, &store, security_mgr.as_ref(), timeout / 2).await {
+        match send_request_to_store(req, &store, &client, timeout / 2).await {
             Ok((_, resp)) => {
                 let resp: RestoreShardResponse = serde_json::from_slice(&resp).unwrap();
                 metrics::NATIVE_BR_RESTORED_SNAPSHOT_KV_BYTES.inc_by(resp.restore_bytes);
                 debug!("{} request_restore_snapshot succeed", tag);
+                NATIVE_BR_RESTORED_DATA_SIZE.inc_by(estimated_restore_size);
+                NATIVE_BR_RESTORED_KV_SIZE.inc_by(resp.restore_bytes);
                 return Ok(resp);
             }
             Err(Error::HttpPbError(status, mut err)) => {
@@ -3135,6 +3220,11 @@ async fn request_restore_snapshot(
                     warn!("restore snapshot encounters generic error."; "err" => ?err);
                     Duration::from_millis(500)
                 };
+                if let Some(limiter) = limiter.as_ref()
+                    && estimated_restore_size > 0
+                {
+                    limiter.unconsume(estimated_restore_size);
+                }
                 tokio::time::sleep(sleep_dur).await;
                 last_err = Some(Err(Error::HttpPbError(status, err)));
                 continue 'retry;
@@ -3148,12 +3238,38 @@ async fn request_restore_snapshot(
                 metrics::NATIVE_BR_RESTORE_ERROR
                     .with_label_values(&["restore_snapshot::unknown_internal"]);
                 last_err = Some(Err(box_err!(err_msg)));
+                if let Some(limiter) = limiter.as_ref()
+                    && estimated_restore_size > 0
+                {
+                    limiter.unconsume(estimated_restore_size);
+                }
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 continue 'retry;
             }
         }
     }
     last_err.expect("there must be error")
+}
+
+fn estimate_snapshot_size(
+    snapshots: &[pb::ChangeSet],
+    limiter: &Option<Arc<ThroughputLimiter>>,
+    replicas: usize,
+) -> (Vec<SnapshotSize>, bool /* need_calibrate */) {
+    let mut total_snapshot_size = 0;
+    let snapshots_size = snapshots
+        .iter()
+        .map(|cs| {
+            let snapshot_size = ThroughputLimiter::estimate_snapshot_size_locally(cs);
+            total_snapshot_size += snapshot_size.estimated_size;
+            snapshot_size
+        })
+        .collect();
+    let need_calibrate = limiter
+        .as_ref()
+        .is_some_and(|x| total_snapshot_size * replicas as u64 >= x.calibrate_threshold());
+
+    (snapshots_size, need_calibrate)
 }
 
 fn make_keyspace_tag(source_keyspace_id: u32, target_keyspace_id: u32) -> String {

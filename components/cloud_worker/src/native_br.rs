@@ -639,6 +639,7 @@ impl RestoreProgressReporter {
             RestoreStep::SplitRegions => (55, "split regions"),
             RestoreStep::AlignRegions => (60, "align regions"),
             RestoreStep::RestoreSnapshotsToServers => (65, "restore snapshots to servers"),
+            RestoreStep::RestoreSnapshotsFinished => (85, "restore snapshots finished"),
             RestoreStep::RetainSstFiles => (85, "retain files"),
             RestoreStep::Finalize => (90, "finalize"), // Wait for ClusterCR become normal.
         }
@@ -678,6 +679,7 @@ pub(crate) struct BrContext {
     pub backup_worker: BackupWorker,
 
     pub v1x_tasks: RwLock<HashMap<u64, v1x::Task>>,
+    limiter: Option<Arc<native_br::limiter::ThroughputLimiter>>,
 }
 
 impl BrContext {
@@ -805,6 +807,7 @@ impl BrContext {
             &self.runtime,
             truncate_ts,
             progress_reporter,
+            self.limiter.clone(),
         )?)
     }
 
@@ -1006,6 +1009,8 @@ pub struct NativeBrConfig {
 
     /// See `RestoreConfig::lower_memory`.
     pub lower_memory: bool,
+
+    pub restore_rate_limit: native_br::limiter::RateLimitConfig,
 }
 
 impl Default for NativeBrConfig {
@@ -1028,6 +1033,7 @@ impl Default for NativeBrConfig {
             backup_tolerate_err: false,
             restore_tolerate_err: false,
             lower_memory: false,
+            restore_rate_limit: native_br::limiter::RateLimitConfig::default(),
         }
     }
 }
@@ -1064,6 +1070,18 @@ impl NativeBrManager {
             pd_client.clone(),
             config.native_br.backup_interval.0,
         );
+        let limiter = if config.native_br.restore_rate_limit.enable {
+            Some(Arc::new(
+                native_br::limiter::ThroughputLimiter::new(
+                    &config.native_br.restore_rate_limit,
+                    pd_client.clone(),
+                    runtime.handle().clone(),
+                )
+                .expect("create restore rate limiter failed"),
+            ))
+        } else {
+            None
+        };
         let mut context = BrContext {
             pd_client,
             s3fs,
@@ -1074,6 +1092,7 @@ impl NativeBrManager {
             backup_worker,
 
             v1x_tasks: Default::default(),
+            limiter,
         };
         if let Err(err) = context.init() {
             warn!("BR context init failed: {:?}", err);
@@ -1795,6 +1814,7 @@ pub mod v1x {
                         &br_cx.runtime,
                         truncate_ts.map(|v| v.into_inner()),
                         reporter,
+                        br_cx.limiter.clone(),
                     )
                 })
                 .await
@@ -2511,9 +2531,11 @@ pub mod v1x {
         });
 
         let sec = pdc.get_security_mgr();
+        let client = sec.http_client(hyper::Client::builder())?;
         let mut store_requests = vec![];
         for store in stores {
-            let sec = &sec;
+            let sec = sec.clone();
+            let client = client.clone();
             store_requests.push(async move {
                 let req = {
                     let uri = sec
@@ -2524,7 +2546,7 @@ pub mod v1x {
                 let (status_code, _) = send_request_to_store(
                     req,
                     &store,
-                    sec,
+                    &client,
                     std::time::Duration::from_secs(600),
                 )
                 .await?;

@@ -127,6 +127,7 @@ message BlobCreate {
   uint64 ID = 1;
   bytes smallest = 2;
   bytes biggest = 3;
+  uint32 meta_offset = 4;
 }
 
 message TableCreate {
