@@ -2085,6 +2085,11 @@ pub mod v1x {
         ForPointInTimeRestore { point_in_time: DateTime<Utc> },
     }
 
+    #[derive(Deserialize)]
+    struct QueryExoticBackupRequest {
+        exotic_backup: String,
+    }
+
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub struct CreateRestorePackedBackupRequest {
         #[serde(with = "serde_with::rust::display_fromstr")]
@@ -2138,6 +2143,14 @@ pub mod v1x {
         pub engine_size: u64,
         pub keyspace_size: u64,
         pub path: String,
+    }
+
+    #[derive(Serialize, Debug, Deserialize)]
+    pub struct ExoticBackupInfo {
+        #[serde(flatten)]
+        pub base: PackedBackupView,
+        pub backup_time: String,
+        pub backup_size: u64,
     }
 
     #[derive(Serialize, Debug, Deserialize)]
@@ -2433,6 +2446,15 @@ pub mod v1x {
                         .await
                         .json_with_status(StatusCode::OK);
                     (res, "x_query_backup")
+                }
+                _ => method_not_allowed(&ctx),
+            },
+            [.., "exotic_backup"] => match method {
+                Method::GET => {
+                    let res = handle_query_exotic_backup(ctx)
+                        .await
+                        .json_with_status(StatusCode::OK);
+                    (res, "x_query_exotic_backup")
                 }
                 _ => method_not_allowed(&ctx),
             },
@@ -2736,6 +2758,28 @@ pub mod v1x {
     async fn handle_flush_wal(cx: HttpRequestContext) -> HttpResult<FlushResult> {
         flush_all_wal(&cx.br.context.pd_client).await?;
         Ok(FlushResult::default())
+    }
+
+    async fn handle_query_exotic_backup(ctx: HttpRequestContext) -> HttpResult<ExoticBackupInfo> {
+        let req: QueryExoticBackupRequest = ctx.query_params()?;
+        let s3fs = ctx.br.context.s3fs.clone();
+        let env = MigratePackEnv::load_exotic(s3fs, &req.exotic_backup).await?;
+        let meta = env.get_packed_backup();
+        let backup_size = env.estimated_total_file_size();
+        Ok(ExoticBackupInfo {
+            base: PackedBackupView {
+                cluster_id: meta.cluster_id,
+                backup_ts: meta.backup_ts,
+                safe_ts: meta.safe_ts,
+                keyspace_name: meta.get_keyspace_name().to_string(),
+                resolved_ts: meta.resolved_ts,
+                engine_size: meta.engine_size,
+                keyspace_size: meta.keyspace_size,
+                path: req.exotic_backup,
+            },
+            backup_time: ts_to_datetime(meta.backup_ts).to_rfc3339(),
+            backup_size,
+        })
     }
 
     async fn fetch_backup_details(s3fs: &Arc<S3Fs>, backup_name: &str) -> Result<BackupDetails> {

@@ -527,6 +527,10 @@ impl MigratePackEnv {
             .copied()
             .unwrap_or(DEFAULT_UNKNOWN_FILE_SIZE_BYTES)
     }
+
+    pub fn estimated_total_file_size(&self) -> u64 {
+        self.file_sizes.values().sum()
+    }
 }
 
 pub struct RestorePackEnv<'a> {
