@@ -19,7 +19,10 @@ use native_br::{
     },
     common::INCREMENTAL_BACKUP_FOLDER_FORMAT,
 };
-use tikv_util::{config::ReadableDuration, info};
+use tikv_util::{
+    config::{ReadableDuration, ReadableSize},
+    info,
+};
 
 use crate::{
     backup::ShowBackupConfig,
@@ -73,6 +76,9 @@ pub struct ArchiveArgs {
     /// The timeout for fetching WAL chunks.
     #[clap(long, default_value = "10m")]
     pub fetch_wal_timeout: ReadableDuration,
+    /// Max throughput for S3 operations (e.g. "500MB"). 0 means unlimited.
+    #[clap(long, default_value = "0")]
+    pub max_throughput: ReadableSize,
 }
 
 pub fn execute_archive(args: ArchiveArgs) {
@@ -115,7 +121,9 @@ fn get_archive_config_from_args(args: &ArchiveArgs) -> ArchiveConfig {
         });
     config.max_archive_file_size = args.max_archive_file_size;
     config.start_archive_duration = Duration::from(args.start_archive_duration);
-    config.expiration_date = args.expiration_date.clone();
+    if !args.expiration_date.is_empty() {
+        config.expiration_date = args.expiration_date.clone();
+    }
     config.concurrency = args.concurrency;
     config.store_concurrency = args.store_concurrency;
     config.skip_no_meta_days = args.skip_no_meta_days;
@@ -124,6 +132,7 @@ fn get_archive_config_from_args(args: &ArchiveArgs) -> ArchiveConfig {
     config.security.override_from_env();
     config.data_dir = args.data_dir.clone();
     config.fetch_wal_timeout = args.fetch_wal_timeout.0;
+    config.max_throughput = args.max_throughput;
     config.check_data_dir();
     config
 }

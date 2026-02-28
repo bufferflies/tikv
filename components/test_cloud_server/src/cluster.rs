@@ -1186,7 +1186,7 @@ impl ServerCluster {
                                                                * tolerance. */
                 store_cache_ttl: ReadableDuration::secs(5),
             };
-            let limiter = ThroughputLimiter::new(&config, self.get_pure_pd_client(), runtime)
+            let limiter = ThroughputLimiter::new(&config, self.get_pure_pd_client(), runtime, 0)
                 .expect("create ThroughputLimiter failed");
             Arc::new(limiter)
         })

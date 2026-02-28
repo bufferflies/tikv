@@ -45,4 +45,18 @@ lazy_static! {
         register_int_counter!("native_br_restored_data_size", "Restored data size",).unwrap();
     pub static ref NATIVE_BR_RESTORED_KV_SIZE: IntCounter =
         register_int_counter!("native_br_restored_kv_size", "Restored kv size",).unwrap();
+    pub static ref NATIVE_BR_RATE_LIMITER_WAIT_DURATION_SECS: HistogramVec =
+        register_histogram_vec!(
+            "native_br_rate_limiter_wait_duration_secs",
+            "Duration of rate limiter wait in seconds",
+            &["source"],
+            exponential_buckets(0.001, 2.0, 20).unwrap()
+        )
+        .unwrap();
+    pub static ref NATIVE_BR_RATE_LIMITER_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "native_br_rate_limiter_bytes_total",
+        "Total bytes consumed through rate limiter",
+        &["source"],
+    )
+    .unwrap();
 }

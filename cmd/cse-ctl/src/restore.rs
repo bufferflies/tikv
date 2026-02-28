@@ -338,8 +338,12 @@ fn create_limiter(
                 .unwrap_or(ReadableSize(u64::MAX)),
             ..Default::default()
         };
-        let limiter =
-            ThroughputLimiter::new(&rate_limit_cfg, pd_client.clone(), runtime.handle().clone())?;
+        let limiter = ThroughputLimiter::new(
+            &rate_limit_cfg,
+            pd_client.clone(),
+            runtime.handle().clone(),
+            0,
+        )?;
         Some(Arc::new(limiter))
     } else {
         None

@@ -134,6 +134,7 @@ fn test_restore_keyspace_throughput_limit() {
                     &config,
                     cluster.get_pure_pd_client(),
                     runtime.handle().clone(),
+                    0,
                 )
                 .expect("create ThroughputLimiter"),
             )

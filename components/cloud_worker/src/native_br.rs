@@ -34,8 +34,12 @@ use pd_client::{pd_control::PdControl, PdClient};
 use serde::Deserialize;
 use tikv::storage::mvcc::TimeStamp;
 use tikv_util::{
-    config::ReadableDuration, debug, error, errors::Context as _, info, time::Instant, warn,
-    HandyRwLock,
+    config::{ReadableDuration, ReadableSize},
+    debug, error,
+    errors::Context as _,
+    info,
+    time::{Instant, Limiter},
+    warn, HandyRwLock,
 };
 use tokio::runtime::Runtime;
 
@@ -287,12 +291,15 @@ pub(crate) async fn handle_restore_keyspace(
                 "{} request to PUT restore_keyspace, restore_id {}, backup {:?}",
                 keyspace_tag, restore_id, backup
             );
+            let max_throughput = get_param::<ReadableSize>(&query_pairs, "max_throughput")
+                .unwrap_or(ReadableSize(0));
             match manager.restore_keyspace(
                 restore_id,
                 source_keyspace,
                 target_keyspace.clone(),
                 backup.clone(),
                 restore_type,
+                max_throughput,
             ) {
                 Ok(true) => {
                     info!(
@@ -679,10 +686,100 @@ pub(crate) struct BrContext {
     pub backup_worker: BackupWorker,
 
     pub v1x_tasks: RwLock<HashMap<u64, v1x::Task>>,
-    limiter: Option<Arc<native_br::limiter::ThroughputLimiter>>,
+    /// Global/shared rate limiter token bucket for native_br operations.
+    ///
+    /// Selection rules (mutually exclusive, NOT hierarchical):
+    /// - If per-request `max_throughput > 0`, the request uses an independent
+    ///   token bucket (does not consume this global bucket).
+    /// - If per-request `max_throughput == 0`, the request follows this global
+    ///   shared bucket (if enabled).
+    ///
+    /// Speed is set to `f64::INFINITY` when disabled (zero overhead).
+    global_limiter: Limiter,
 }
 
 impl BrContext {
+    fn make_byte_limiter(
+        &self,
+        max_throughput: ReadableSize,
+        source: &'static str,
+        request_id: u64,
+    ) -> Option<native_br::limiter::ByteLimiter> {
+        if max_throughput.0 > 0 {
+            info!(
+                "native_br: create per-request {} limiter: {:.1} MiB/s, request_id: {}",
+                source,
+                max_throughput.as_mb_f64(),
+                request_id,
+            );
+            Some(native_br::limiter::ByteLimiter::new(
+                max_throughput.0,
+                source,
+                request_id,
+            ))
+        } else {
+            let speed = self.global_limiter.speed_limit();
+            if speed.is_finite() {
+                info!(
+                    "native_br: create shared {} limiter: {:.1} MiB/s, request_id: {}",
+                    source,
+                    speed / (1024.0 * 1024.0),
+                    request_id,
+                );
+                Some(native_br::limiter::ByteLimiter::from_limiter(
+                    self.global_limiter.clone(),
+                    source,
+                    request_id,
+                ))
+            } else {
+                None
+            }
+        }
+    }
+
+    fn make_throughput_limiter(
+        &self,
+        rate_cfg: &native_br::limiter::RateLimitConfig,
+        max_throughput: ReadableSize,
+        request_id: u64,
+    ) -> Option<Arc<native_br::limiter::ThroughputLimiter>> {
+        let byte_limiter = self.make_byte_limiter(max_throughput, "restore", request_id)?;
+        match native_br::limiter::ThroughputLimiter::with_byte_limiter(
+            byte_limiter,
+            rate_cfg,
+            self.pd_client.clone(),
+            self.runtime.handle().clone(),
+        ) {
+            Ok(limiter) => Some(Arc::new(limiter)),
+            Err(e) => {
+                error!("native_br: failed to create throughput limiter: {:?}", e);
+                None
+            }
+        }
+    }
+
+    fn update_global_limiter(&self, rate_cfg: &native_br::limiter::RateLimitConfig) {
+        let new_speed = if rate_cfg.enable && rate_cfg.max_throughput.0 > 0 {
+            rate_cfg.max_throughput.0 as f64
+        } else {
+            if rate_cfg.enable && rate_cfg.max_throughput.0 == 0 {
+                warn!(
+                    "native_br: restore_rate_limit.enable=true but max_throughput=0, treating as disabled"
+                );
+            }
+            f64::INFINITY
+        };
+        let old_speed = self.global_limiter.speed_limit();
+        if new_speed != old_speed {
+            info!(
+                "native_br: update global rate limiter: {:.1} -> {:.1} MiB/s",
+                old_speed / (1024.0 * 1024.0),
+                new_speed / (1024.0 * 1024.0),
+            );
+            self.global_limiter.set_speed_limit(new_speed);
+        }
+    }
+
     // Return false if the state is falling back.
     fn change_restore_state(
         &self,
@@ -763,6 +860,8 @@ impl BrContext {
         restore_source: RestoreSource,
         restore_type: RestoreType,
         progress_reporter: Arc<RestoreProgressReporter>,
+        max_throughput: ReadableSize,
+        restore_id: u64,
     ) -> Result<RestoredKeyspace> {
         // Instant backup must be performed before every restore.
         // Otherwise the data from previous backup to now will be lost, and can not be
@@ -796,6 +895,12 @@ impl BrContext {
             ),
         };
 
+        let limiter = self.make_throughput_limiter(
+            &config.native_br.restore_rate_limit,
+            max_throughput,
+            restore_id,
+        );
+
         Ok(restore_keyspace_with_cfg(
             config.to_restore_config(),
             keyspace_name,
@@ -807,7 +912,7 @@ impl BrContext {
             &self.runtime,
             truncate_ts,
             progress_reporter,
-            self.limiter.clone(),
+            limiter,
         )?)
     }
 
@@ -819,6 +924,7 @@ impl BrContext {
         target_keyspace_name: String,
         restore_source: RestoreSource,
         restore_type: RestoreType,
+        max_throughput: ReadableSize,
     ) -> Result<()> {
         let ob_start_time = Instant::now();
 
@@ -841,6 +947,8 @@ impl BrContext {
             restore_source,
             restore_type,
             progress_reporter.clone(),
+            max_throughput,
+            restore_id,
         ) {
             Ok(ret) => {
                 NATIVE_BR_COUNTER_VEC
@@ -1010,6 +1118,14 @@ pub struct NativeBrConfig {
     /// See `RestoreConfig::lower_memory`.
     pub lower_memory: bool,
 
+    /// Default/global rate limit shared across all native_br operations
+    /// (restore/copy/unpack).
+    ///
+    /// Selection rules (mutually exclusive, NOT hierarchical):
+    /// - If per-request `max_throughput > 0`, the request uses an independent
+    ///   token bucket (does not consume this global bucket).
+    /// - If per-request `max_throughput == 0`, the request follows this global
+    ///   shared bucket (if enabled).
     pub restore_rate_limit: native_br::limiter::RateLimitConfig,
 }
 
@@ -1070,17 +1186,20 @@ impl NativeBrManager {
             pd_client.clone(),
             config.native_br.backup_interval.0,
         );
-        let limiter = if config.native_br.restore_rate_limit.enable {
-            Some(Arc::new(
-                native_br::limiter::ThroughputLimiter::new(
-                    &config.native_br.restore_rate_limit,
-                    pd_client.clone(),
-                    runtime.handle().clone(),
-                )
-                .expect("create restore rate limiter failed"),
-            ))
-        } else {
-            None
+        let global_limiter = {
+            let rate_cfg = &config.native_br.restore_rate_limit;
+            let speed = if rate_cfg.enable && rate_cfg.max_throughput.0 > 0 {
+                info!(
+                    "native_br: global rate limiter enabled: {:.1} MiB/s",
+                    rate_cfg.max_throughput.as_mb_f64()
+                );
+                rate_cfg.max_throughput.0 as f64
+            } else {
+                f64::INFINITY
+            };
+            <Limiter>::builder(speed)
+                .refill(Duration::from_millis(10))
+                .build()
         };
         let mut context = BrContext {
             pd_client,
@@ -1092,7 +1211,7 @@ impl NativeBrManager {
             backup_worker,
 
             v1x_tasks: Default::default(),
-            limiter,
+            global_limiter,
         };
         if let Err(err) = context.init() {
             warn!("BR context init failed: {:?}", err);
@@ -1110,6 +1229,8 @@ impl NativeBrManager {
                 "Update native br config from {:?} to {:?}",
                 ori_config.native_br, config
             );
+            self.context
+                .update_global_limiter(&config.restore_rate_limit);
             ori_config.native_br = config;
         }
     }
@@ -1144,6 +1265,7 @@ impl NativeBrManager {
         target_keyspace_name: String,
         restore_source: RestoreSource,
         restore_type: RestoreType,
+        max_throughput: ReadableSize,
     ) -> Result<bool> {
         if self.get_not_final_task_count() >= MAX_RESTORE_CONCURRENCY {
             return Err(Error::ReachConcurrencyLimit(MAX_RESTORE_CONCURRENCY));
@@ -1167,6 +1289,7 @@ impl NativeBrManager {
                     target_keyspace_name,
                     restore_source,
                     restore_type,
+                    max_throughput,
                 )
             });
             Ok(true)
@@ -1305,7 +1428,7 @@ pub mod v1x {
     };
     use serde_json::json;
     use tikv::storage::mvcc::TimeStamp;
-    use tikv_util::{box_err, defer, info, warn, HandyRwLock};
+    use tikv_util::{box_err, config::ReadableSize, defer, info, warn, HandyRwLock};
     use tokio::task::spawn_blocking;
 
     use crate::{
@@ -1698,7 +1821,7 @@ pub mod v1x {
         }
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     #[serde(tag = "type")]
     pub enum TaskRequest {
         PackBackup(CreatePackBackupRequest),
@@ -1746,6 +1869,10 @@ pub mod v1x {
                 reporter.report_step(CopyStep::FetchMeta);
                 let mig_env =
                     MigratePackEnv::load_exotic(Arc::clone(&s3fs), &req.exotic_backup).await?;
+                let mig_env = match br_cx.make_byte_limiter(req.max_throughput, "copy", req.id) {
+                    Some(bl) => mig_env.with_byte_limiter(Arc::new(bl)),
+                    None => mig_env,
+                };
                 let mut copy_run = CopyPackedRun::new(mig_env, &req.copy_to, reporter.clone());
                 let res = copy_run.execute().await?;
                 Result::Ok(res)
@@ -1769,6 +1896,10 @@ pub mod v1x {
                     .map(|t| TimeStamp::compose(t.naive_utc().timestamp_millis() as _, 0));
 
                 let mig_env = MigratePackEnv::load_exotic(s3fs.clone(), &req.exotic_backup).await?;
+                let mig_env = match br_cx.make_byte_limiter(req.max_throughput, "unpack", req.id) {
+                    Some(bl) => mig_env.with_byte_limiter(Arc::new(bl)),
+                    None => mig_env,
+                };
                 let packed_keyspace_id = mig_env.get_packed_backup().keyspace_id;
                 let packed_keyspace_name = mig_env.get_packed_backup().keyspace_name.clone();
                 let packed_cluster_id = mig_env.get_packed_backup().cluster_id;
@@ -1787,6 +1918,11 @@ pub mod v1x {
                     cx: br_cx.clone(),
                     id: req.id,
                 });
+                let limiter = br_cx.make_throughput_limiter(
+                    &cfg.native_br.restore_rate_limit,
+                    req.max_throughput,
+                    req.id,
+                );
                 let mut run = UnpackRun::new(mig_env, pd_cli.clone(), reporter.clone());
                 let target = run.execute().await?;
                 let mut restore_cfg = cfg.to_restore_config();
@@ -1814,7 +1950,7 @@ pub mod v1x {
                         &br_cx.runtime,
                         truncate_ts.map(|v| v.into_inner()),
                         reporter,
-                        br_cx.limiter.clone(),
+                        limiter,
                     )
                 })
                 .await
@@ -1949,7 +2085,7 @@ pub mod v1x {
         ForPointInTimeRestore { point_in_time: DateTime<Utc> },
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub struct CreateRestorePackedBackupRequest {
         #[serde(with = "serde_with::rust::display_fromstr")]
         id: u64,
@@ -1959,9 +2095,17 @@ pub mod v1x {
         keyspace: String,
         #[serde(default)]
         point_in_time: Option<DateTime<Utc>>,
+        /// Max throughput for the restore process, e.g. "500MiB".
+        ///
+        /// - `0` (default): follow the global shared `restore_rate_limit`
+        ///   config (if enabled).
+        /// - `>0`: use an independent token bucket for this request (does not
+        ///   consume the global bucket).
+        #[serde(default)]
+        max_throughput: ReadableSize,
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub struct CreateCopyBackupRequest {
         #[serde(with = "serde_with::rust::display_fromstr")]
         id: u64,
@@ -1974,6 +2118,14 @@ pub mod v1x {
         exotic_backup: String,
         /// Copy the backup to the specified prefix.
         copy_to: String,
+        /// Max throughput for the copy process, e.g. "500MiB".
+        ///
+        /// - `0` (default): follow the global shared `restore_rate_limit`
+        ///   config (if enabled).
+        /// - `>0`: use an independent token bucket for this request (does not
+        ///   consume the global bucket).
+        #[serde(default)]
+        max_throughput: ReadableSize,
     }
 
     #[derive(Serialize, Debug, Deserialize)]

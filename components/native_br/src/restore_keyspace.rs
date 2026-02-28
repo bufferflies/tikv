@@ -1669,9 +1669,19 @@ impl BackupCluster {
                     }
                 }
             }
-            files.extend(shard.meta.all_files().iter().map(|(&id, fm)| TableFile {
-                id,
-                ftype: fm.file_type,
+            files.extend(shard.meta.all_files().iter().map(|(&id, fm)| {
+                let size = if fm.file_type == FileType::Blob {
+                    fm.table_meta_off as u64
+                } else if fm.l0_size > 0 {
+                    fm.l0_size as u64
+                } else {
+                    (fm.table_meta_off as f64 * crate::limiter::TABLE_SIZE_MULTIPLIER) as u64
+                };
+                TableFile {
+                    id,
+                    ftype: fm.file_type,
+                    size,
+                }
             }));
             files.extend(
                 shard
@@ -1681,6 +1691,7 @@ impl BackupCluster {
                     .map(|id| TableFile {
                         id,
                         ftype: FileType::TxnChunk,
+                        size: 0,
                     }),
             );
         }
@@ -1692,6 +1703,7 @@ impl BackupCluster {
                 .map(|&id| TableFile {
                     id,
                     ftype: FileType::TxnChunk,
+                    size: 0,
                 }),
         );
         files

@@ -1,7 +1,7 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fmt::Display,
     path::{Path, PathBuf},
     sync::Arc,
@@ -25,7 +25,7 @@ use rfenginepb::ClusterBackupMeta;
 use rfstore::store::PdIdAllocator;
 use security::SecurityConfig;
 use tempdir::TempDir;
-use tikv_util::{box_err, box_try, info, warn};
+use tikv_util::{box_err, box_try, config::ReadableSize, info, warn};
 use tokio::runtime::RuntimeFlavor;
 use uuid::Uuid;
 
@@ -35,7 +35,7 @@ use crate::{
     backup::packed_backup_prefixed,
     common::{create_pd_client, PACKED_META_NAME_FORMAT},
     error::Error,
-    limiter::ThroughputLimiter,
+    limiter::{ByteLimiter, ThroughputLimiter, TABLE_SIZE_MULTIPLIER},
     lock::LockResolver,
     restore::RestoreConfig,
     restore_keyspace::{
@@ -46,6 +46,48 @@ use crate::{
 };
 
 const WORKING_PATH_PREFIX: &str = "pack";
+
+const DEFAULT_UNKNOWN_FILE_SIZE_BYTES: u64 = 1024 * 1024; // 1MiB
+
+fn build_file_size_map(packed: &PackedBackup) -> HashMap<u64, u64> {
+    let mut sizes = HashMap::new();
+    for cs in packed.get_shards() {
+        if !cs.has_snapshot() {
+            continue;
+        }
+        let snap = cs.get_snapshot();
+
+        for l0 in snap.get_l0_creates() {
+            sizes.insert(l0.id, l0.size as u64);
+        }
+        for table in snap.get_table_creates() {
+            let size = (table.meta_offset as f64 * TABLE_SIZE_MULTIPLIER) as u64;
+            if size > 0 {
+                sizes.insert(table.id, size);
+            }
+        }
+        for blob in snap.get_blob_creates() {
+            let size = blob.meta_offset as u64;
+            if size > 0 {
+                sizes.insert(blob.id, size);
+            }
+        }
+        for col in snap.get_columnar_creates() {
+            let size = (col.meta_offset as f64 * TABLE_SIZE_MULTIPLIER) as u64;
+            if size > 0 {
+                sizes.insert(col.id, size);
+            }
+        }
+
+        // TODO: Schema and TxnChunk files are not rate-limited because their
+        // actual size is unknown here (txn_chunk_max_size is a
+        // TiDB-side config, and querying S3 for the size requires a
+        // size-by-key API that DFS doesn't support yet). To fix, either
+        // add a DFS::size_by_key() method, or store chunk size in
+        // the backup metadata.
+    }
+    sizes
+}
 
 pub struct PackContext {
     dfs: Arc<OverlaidFs>,
@@ -385,6 +427,8 @@ pub struct MigratePackEnv {
     dfs: Arc<S3Fs>,
     packed: PackedBackup,
     exotic_path: String,
+    limiter: Option<Arc<ByteLimiter>>,
+    file_sizes: HashMap<u64, u64>,
 }
 
 impl MigratePackEnv {
@@ -445,11 +489,43 @@ impl MigratePackEnv {
         if let Err(err) = s3fs.delete_object(tmp, format!("temp({uuid})")).await {
             warn!("failed to delete tempfile during loading exotic packed backup."; "err" => ?err);
         }
+        let file_sizes = build_file_size_map(&packed);
         Ok(Self {
             dfs: s3fs,
             packed,
             exotic_path: exotic_path.to_owned(),
+            limiter: None,
+            file_sizes,
         })
+    }
+
+    pub fn with_rate_limit(
+        mut self,
+        max_throughput: ReadableSize,
+        source: &'static str,
+        request_id: u64,
+    ) -> Self {
+        self.limiter = (max_throughput.0 > 0)
+            .then(|| Arc::new(ByteLimiter::new(max_throughput.0, source, request_id)));
+        self
+    }
+
+    /// Sets an externally-created ByteLimiter (e.g. one sharing a global token
+    /// bucket).
+    pub fn with_byte_limiter(mut self, limiter: Arc<ByteLimiter>) -> Self {
+        self.limiter = Some(limiter);
+        self
+    }
+
+    pub fn limiter(&self) -> Option<Arc<ByteLimiter>> {
+        self.limiter.clone()
+    }
+
+    pub fn estimate_file_size(&self, file: &FileRef) -> u64 {
+        self.file_sizes
+            .get(&file.file_id)
+            .copied()
+            .unwrap_or(DEFAULT_UNKNOWN_FILE_SIZE_BYTES)
     }
 }
 
@@ -604,7 +680,12 @@ impl CopyPackedRun {
             );
             let target_key = self.prefixed(file_key);
             let mut new_file = file.clone();
+            let file_size = self.menv.estimate_file_size(file);
+            let limiter = self.menv.limiter();
             futures.push(async move {
+                if let Some(limiter) = limiter.as_ref() {
+                    limiter.consume(file_size).await;
+                }
                 self.menv
                     .dfs
                     .raw_copy_object(&source_key, &target_key, None, None)
@@ -776,6 +857,7 @@ impl UnpackRun {
                 self.menv.packed.content_bucket,
                 file.get_file_abs_path()
             );
+            let file_size = self.menv.estimate_file_size(file);
             let new_id = if file.file_type == FileType::Blob as u32 {
                 file.file_id
             } else {
@@ -789,7 +871,11 @@ impl UnpackRun {
                 })?,
             );
             let dfs = self.menv.dfs.as_ref();
+            let limiter = self.menv.limiter();
             futures.push(async move {
+                if let Some(limiter) = limiter.as_ref() {
+                    limiter.consume(file_size).await;
+                }
                 dfs.raw_copy_object(&source_key, &target_key, None, None)
                     .await?;
                 Result::Ok(())

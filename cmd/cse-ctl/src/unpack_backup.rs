@@ -5,7 +5,7 @@ use std::{path::PathBuf, sync::Arc};
 use clap::Args;
 use kvengine::dfs::Dfs;
 use native_br::packing::{MigratePackEnv, NoopReporter, UnpackRun};
-use tikv_util::info;
+use tikv_util::{config::ReadableSize, info};
 
 use crate::common::CommonConfig;
 
@@ -36,6 +36,11 @@ pub struct UnpackBackupArgs {
     /// Path of file that contains X509 key in PEM format
     #[clap(long, default_value = "")]
     pub key: PathBuf,
+
+    /// Max throughput for unpack copy process, e.g. 500MiB. 0 to disable the
+    /// limit.
+    #[clap(long, default_value = "0")]
+    pub max_throughput: ReadableSize,
 }
 
 pub fn execute_unpack_backup(args: UnpackBackupArgs) {
@@ -67,7 +72,9 @@ pub fn execute_unpack_backup(args: UnpackBackupArgs) {
     let load_exotic_backup = async {
         info!("Loading exotic packed backup from: {}", args.exotic_path);
 
-        let migrate_env = MigratePackEnv::load_exotic(s3fs.clone(), &args.exotic_path).await?;
+        let migrate_env = MigratePackEnv::load_exotic(s3fs.clone(), &args.exotic_path)
+            .await?
+            .with_rate_limit(args.max_throughput, "unpack", 0);
         let mut unpack_run = UnpackRun::new(migrate_env, pd_client, Arc::new(NoopReporter));
         let result = unpack_run.execute().await?;
         Ok::<String, native_br::error::Error>(result)

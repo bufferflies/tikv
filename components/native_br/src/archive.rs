@@ -13,7 +13,7 @@ use pd_client::PdClient;
 use protobuf::Message;
 use rfenginepb::ClusterBackupMeta;
 use security::SecurityConfig;
-use tikv_util::{error, info, mpsc::Receiver, time::Instant, warn};
+use tikv_util::{config::ReadableSize, error, info, mpsc::Receiver, time::Instant, warn};
 
 use crate::{
     backup::{backup_file_full_path, packed_backup_prefixed, IncrementalBackupFile},
@@ -22,6 +22,7 @@ use crate::{
         StoreWalRlog, TableFile, INCREMENTAL_BACKUP_FOLDER_FORMAT,
     },
     error::{Error, Result},
+    limiter::ByteLimiter,
     restore::RestoreConfig,
     restore_keyspace::{BackupCluster, RESTORE_RFENGINE_CONCURRENCY},
     wal::WalChunkData,
@@ -240,6 +241,7 @@ pub struct ArchiveConfig {
     pub skip_keyspace_names: Option<HashSet<String>>,
     pub dry_run: bool,
     pub fetch_wal_timeout: Duration,
+    pub max_throughput: ReadableSize,
 }
 
 impl ArchiveConfig {
@@ -261,6 +263,7 @@ impl ArchiveConfig {
             skip_keyspace_names: None,
             dry_run: true,
             fetch_wal_timeout: Duration::from_secs(600), // 10 minutes
+            max_throughput: ReadableSize(0),
         }
     }
 
@@ -277,11 +280,12 @@ impl ArchiveConfig {
 pub struct ArchiveBackup {
     pub date: NaiveDate,
     pub meta_data: Bytes,
-    pub files: HashMap<u64, FileType>,
+    /// Maps file_id -> (file_type, estimated_size).
+    pub files: HashMap<u64, (FileType, u64)>,
 }
 
 impl ArchiveBackup {
-    pub fn new(date: NaiveDate, meta_data: Bytes, files: HashMap<u64, FileType>) -> Self {
+    pub fn new(date: NaiveDate, meta_data: Bytes, files: HashMap<u64, (FileType, u64)>) -> Self {
         Self {
             date,
             meta_data,
@@ -471,7 +475,7 @@ fn write_archive_packages_and_index(
     pd_client: &Arc<dyn PdClient>,
     s3fs: Arc<S3Fs>,
     archive_backup: ArchiveBackup,
-    next_day_files: &HashMap<u64, FileType>,
+    next_day_files: &HashMap<u64, (FileType, u64)>,
 ) -> Result<()> {
     let deleted = get_sorted_deleted_files(&archive_backup.files, next_day_files);
     info!(
@@ -499,6 +503,7 @@ fn write_archive_packages_and_index(
             s3fs.clone(),
             format_date.clone(),
             archive_backup.meta_data,
+            config.max_throughput,
         );
         let (result_tx, result_rx) = tikv_util::mpsc::bounded(cluster_backup.stores.len());
         let mut recv_store_wal_rlog_files =
@@ -542,13 +547,17 @@ fn write_archive_packages_and_index(
 }
 
 fn get_sorted_deleted_files(
-    old: &HashMap<u64, FileType>,
-    new: &HashMap<u64, FileType>,
+    old: &HashMap<u64, (FileType, u64)>,
+    new: &HashMap<u64, (FileType, u64)>,
 ) -> Vec<TableFile> {
     let mut deleted: Vec<_> = old
         .iter()
-        .filter_map(|(&file_id, &ftype)| {
-            (!new.contains_key(&file_id)).then_some(TableFile { id: file_id, ftype })
+        .filter_map(|(&file_id, &(ftype, size))| {
+            (!new.contains_key(&file_id)).then_some(TableFile {
+                id: file_id,
+                ftype,
+                size,
+            })
         })
         .collect();
     deleted.sort_by_key(|f| f.id);
@@ -565,7 +574,7 @@ pub(crate) fn get_cluster_backup_files(
     skip_keyspace_ids: Option<HashSet<u32>>,
     path: PathBuf,
     security_conf: SecurityConfig,
-) -> Result<HashMap<u64, FileType>> {
+) -> Result<HashMap<u64, (FileType, u64)>> {
     if cluster_backup.cluster_id != cluster_id {
         return Err(Error::ArchiveError(format!(
             "cluster id not match, pd cluster id {}, meta cluster id {}",
@@ -600,7 +609,7 @@ pub(crate) fn get_cluster_backup_files(
         cluster
             .get_all_shard_files(skip_shards, skip_keyspace_ids)
             .into_iter()
-            .map(|f| (f.id, f.ftype)),
+            .map(|f| (f.id, (f.ftype, f.size))),
     );
     let shards_count = cluster.shards_count();
     drop(cluster);
@@ -1278,6 +1287,7 @@ struct ArchiveWriter {
     buf: Vec<u8>,
     s3fs: Arc<S3Fs>,
     date: String,
+    limiter: Option<Arc<ByteLimiter>>,
 }
 
 impl ArchiveWriter {
@@ -1287,6 +1297,7 @@ impl ArchiveWriter {
         s3fs: Arc<S3Fs>,
         date: String,
         meta_data: Bytes,
+        max_throughput: ReadableSize,
     ) -> Self {
         let package_id: u32 = 0;
         let mut buf = Vec::new();
@@ -1301,6 +1312,8 @@ impl ArchiveWriter {
             buf,
             s3fs,
             date,
+            limiter: (max_throughput.0 > 0)
+                .then(|| Arc::new(ByteLimiter::new(max_throughput.0, "archive", 0))),
         }
     }
 
@@ -1334,10 +1347,19 @@ impl ArchiveWriter {
         for f in files {
             let s3fs = self.s3fs.clone();
             let tx = result_tx.clone();
+            let limiter = self.limiter.clone();
             self.s3fs.get_runtime().spawn(async move {
+                if let Some(ref limiter) = &limiter {
+                    limiter.consume(f.size).await;
+                }
                 let res = s3fs
                     .read_file(f.id, Options::default().with_type(f.ftype))
                     .await;
+                if res.is_err() {
+                    if let Some(ref limiter) = &limiter {
+                        limiter.unconsume(f.size);
+                    }
+                }
                 let _ = tx.send(res.map(|sst_data| (f, sst_data)));
             });
             if msg_count < self.concurrency {
@@ -1388,6 +1410,9 @@ impl ArchiveWriter {
             return;
         }
         let runtime = self.s3fs.get_runtime();
+        if let Some(ref limiter) = self.limiter {
+            runtime.block_on(limiter.consume(self.buf.len() as u64));
+        }
         let key = archive_package_key(self.s3fs.get_prefix(), self.date.clone(), self.package_id);
         let data = Bytes::from(self.buf.to_vec());
         runtime
@@ -1749,7 +1774,14 @@ mod tests {
         assert!(!meta_data.is_empty());
         let backup_date = chrono::Utc::now().date_naive();
         let format_date = archive_format_date(&backup_date);
-        let mut writer = ArchiveWriter::new(1024, 16, s3fs.clone(), format_date.clone(), meta_data);
+        let mut writer = ArchiveWriter::new(
+            1024,
+            16,
+            s3fs.clone(),
+            format_date.clone(),
+            meta_data,
+            ReadableSize(0),
+        );
 
         let get_snap_epoch = |i: u64| (i + 10) as u32;
         let get_wal_epoch = |i: u64| (i + 11) as u32;
@@ -1776,6 +1808,7 @@ mod tests {
             files.push(TableFile {
                 id: file_id,
                 ftype: get_file_type(file_id),
+                size: 0,
             });
         }
         writer.append_table_files(files).unwrap();
@@ -1893,8 +1926,14 @@ mod tests {
             let meta_data = Bytes::from(cluster_meta.write_to_bytes().unwrap());
             let backup_date = get_date(j);
             let format_date = archive_format_date(&backup_date);
-            let mut writer =
-                ArchiveWriter::new(512, 16, s3fs.clone(), format_date.clone(), meta_data);
+            let mut writer = ArchiveWriter::new(
+                512,
+                16,
+                s3fs.clone(),
+                format_date.clone(),
+                meta_data,
+                ReadableSize(0),
+            );
 
             for i in 0..num_stores {
                 let store_id = i;
@@ -1916,6 +1955,7 @@ mod tests {
                 files.push(TableFile {
                     id: file_id,
                     ftype: get_file_type(get_file_id(j, i)),
+                    size: 0,
                 });
             }
             writer.append_table_files(files).unwrap();

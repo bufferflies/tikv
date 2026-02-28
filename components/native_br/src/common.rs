@@ -1328,6 +1328,8 @@ impl RegionMetaGetter {
 pub struct TableFile {
     pub(crate) id: u64,
     pub(crate) ftype: kvengine::dfs::FileType,
+    /// Estimated file size in bytes. Used for rate limiting pre-consume.
+    pub(crate) size: u64,
 }
 
 pub fn with_retry<T, E, F, FnOnError, FnNextSleep>(
