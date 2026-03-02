@@ -1149,7 +1149,7 @@ impl S3FsCore {
                 }
             }
             if let Err(err) = self.dispatch(req, CopyObjectError::from_response).await {
-                if retry_cnt < MAX_RETRY_COUNT {
+                if self.is_err_retryable(&err) && retry_cnt < MAX_RETRY_COUNT {
                     KVENGINE_DFS_RETRY_COUNTER
                         .copy
                         .get(MetricsFileType::from(file_type))
@@ -1162,14 +1162,13 @@ impl S3FsCore {
                     );
                     tokio::time::sleep(Duration::from_millis(retry_sleep)).await;
                     continue;
-                } else {
-                    let err_msg = format!(
-                        "failed to copy file {} from {}, reach max retry count {}, err {:?}",
-                        target_key, source_key, MAX_RETRY_COUNT, err,
-                    );
-                    error!("{}", err_msg);
-                    return Err(dfs::Error::S3(err_msg));
                 }
+                let err_msg = format!(
+                    "failed to copy file {} from {}, err {:?}",
+                    target_key, source_key, err,
+                );
+                error!("{}", err_msg);
+                return Err(dfs::Error::S3(err_msg));
             }
 
             let duration = start_time.saturating_elapsed();

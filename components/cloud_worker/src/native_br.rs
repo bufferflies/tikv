@@ -2762,6 +2762,9 @@ pub mod v1x {
 
     async fn handle_query_exotic_backup(ctx: HttpRequestContext) -> HttpResult<ExoticBackupInfo> {
         let req: QueryExoticBackupRequest = ctx.query_params()?;
+        if req.exotic_backup.is_empty() {
+            return Err(Error::CheckError("exotic_backup path cannot be empty".to_string()).into());
+        }
         let s3fs = ctx.br.context.s3fs.clone();
         let env = MigratePackEnv::load_exotic(s3fs, &req.exotic_backup).await?;
         let meta = env.get_packed_backup();

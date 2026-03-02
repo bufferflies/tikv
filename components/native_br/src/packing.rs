@@ -478,17 +478,24 @@ impl MigratePackEnv {
         // Don't reconfigurate the client but directly call `copy-object` to verify the
         // origin meta is accessible from this context.
         s3fs.raw_copy_object(exotic_path, &tmp, None, None).await?;
-        let packed_bytes = s3fs
-            .get_object(tmp.clone(), format!("temp({uuid})"), Default::default())
-            .await?;
-        let mut packed = PackedBackup::new();
-        box_try!(packed.merge_from_bytes(&packed_bytes));
 
-        // NOTE: actually, the tmp object won't be deleted but just tagged.
-        // Perhaps a lifecycle rule at the whole `tmp` prefix is fine enough...
+        let result = s3fs
+            .get_object(tmp.clone(), format!("temp({uuid})"), Default::default())
+            .await
+            .map_err(Error::from)
+            .and_then(|packed_bytes| {
+                let mut packed = PackedBackup::new();
+                packed
+                    .merge_from_bytes(&packed_bytes)
+                    .map(|_| packed)
+                    .map_err(|e| box_err!(e))
+            });
+
         if let Err(err) = s3fs.delete_object(tmp, format!("temp({uuid})")).await {
             warn!("failed to delete tempfile during loading exotic packed backup."; "err" => ?err);
         }
+
+        let packed = result?;
         let file_sizes = build_file_size_map(&packed);
         Ok(Self {
             dfs: s3fs,
