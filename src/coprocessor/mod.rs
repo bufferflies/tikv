@@ -152,6 +152,9 @@ pub struct ReqContext {
 
     /// Perf level
     pub perf_level: PerfLevel,
+
+    /// Pattern for lazy remote execution based on actual execution cost.
+    pub lazy_remote_pattern: Option<String>,
 }
 
 impl ReqContext {
@@ -165,6 +168,7 @@ impl ReqContext {
         txn_start_ts: TimeStamp,
         cache_match_version: Option<u64>,
         perf_level: PerfLevel,
+        lazy_remote_pattern: Option<String>,
     ) -> Self {
         let mut deadline_duration = max_handle_duration;
         if context.max_execution_duration_ms > 0 {
@@ -196,6 +200,7 @@ impl ReqContext {
             lower_bound,
             upper_bound,
             perf_level,
+            lazy_remote_pattern,
         }
     }
 
@@ -211,6 +216,7 @@ impl ReqContext {
             TimeStamp::max(),
             None,
             PerfLevel::EnableCount,
+            None,
         )
     }
 
@@ -280,6 +286,7 @@ mod tests {
             TimeStamp::max(),
             None,
             PerfLevel::EnableCount,
+            None,
         )
     }
 

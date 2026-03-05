@@ -1,12 +1,13 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{ops::Deref, sync::Arc, time::Duration};
+use std::{collections::VecDeque, fmt::Write, ops::Deref, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
+use codec::number::NumberDecoder;
 use http::{header, StatusCode};
 use kvengine::{dfs::DFS_REMOTE_CACHE_ADDR_HEADER, SnapAccess, LOCK_CF};
-use kvproto::coprocessor::Response;
+use kvproto::coprocessor::{KeyRange, Response};
 use protobuf::Message;
 use security::SecurityManager;
 use tikv_alloc::MemoryTraceGuard;
@@ -17,7 +18,7 @@ use tikv_util::{
     http::{HeaderExt, CONTENT_TYPE_PROTOBUF},
     retry::sleep_async,
 };
-use tipb::DagRequest;
+use tipb::{DagRequest, ExecType, Executor, ExprType::ColumnRef};
 use txn_types::{TimeStamp, TsSet};
 
 use crate::{
@@ -33,6 +34,7 @@ pub const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 pub const REMOTE_COP_FORMAT_V1: u32 = 1;
 
 const RETRY_MAX_ATTEMPTS: usize = 10;
+const REMOTE_MIN_PAGING_SIZE: u64 = 4096;
 const RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
@@ -166,9 +168,11 @@ pub struct RemoteContextCore {
     pub cop_worker_provider: Arc<dyn CopWorkerProvider>,
     pub cop_min_blocks_size: usize,
     pub cop_num_ranges: usize,
+    pub cop_min_process_duration: Duration,
     pub runtime: tokio::runtime::Handle,
     pub client: security::HttpClient,
     status_addr: String,
+    lazy_remote_patterns: dashmap::DashMap<String, RemotePatternStats>,
 }
 
 pub trait CopWorkerProvider: Send + Sync {
@@ -194,6 +198,7 @@ impl RemoteContext {
         cop_worker_url: String,
         cop_min_blocks_size: usize,
         cop_num_ranges: usize,
+        cop_min_process_duration: Duration,
         security_mgr: Arc<SecurityManager>,
         runtime: tokio::runtime::Handle,
         status_addr: String,
@@ -207,17 +212,38 @@ impl RemoteContext {
         let cop_worker_provider = Arc::new(StaticCopWorkerProvider {
             worker_url: cop_worker_url,
         });
+        let lazy_remote_patterns = dashmap::DashMap::new();
         Some(Self {
             core: Arc::new(RemoteContextCore {
                 remote_worker_url,
                 cop_min_blocks_size,
                 cop_num_ranges,
+                cop_min_process_duration,
                 cop_worker_provider,
                 runtime,
                 client,
                 status_addr,
+                lazy_remote_patterns,
             }),
         })
+    }
+
+    pub fn report_lazy_remote_pattern(
+        &self,
+        pattern: String,
+        processed_size: usize,
+        processed_duration: Duration,
+    ) {
+        let mut stats = self.lazy_remote_patterns.entry(pattern).or_default();
+        stats.push(processed_size, processed_duration);
+    }
+
+    pub fn should_offload(&self, pattern: &str) -> bool {
+        if let Some(stats) = self.lazy_remote_patterns.get(pattern) {
+            stats.should_offload(self.cop_min_blocks_size, self.cop_min_process_duration)
+        } else {
+            false
+        }
     }
 }
 
@@ -226,6 +252,7 @@ pub(crate) fn try_remote_dag_handler(
     dag: &DagRequest,
     req_ctx: &ReqContext,
     remote_ctx: Option<RemoteContext>,
+    paging_size: Option<u64>,
 ) -> Option<Box<dyn RequestHandler>> {
     let remote_ctx = remote_ctx?;
     let start_ts = req_ctx.txn_start_ts.into_inner();
@@ -234,15 +261,29 @@ pub(crate) fn try_remote_dag_handler(
         .cop_worker_provider
         .get(snap.get_keyspace_id(), start_ts)?;
     let keyspace_id = snap.get_keyspace_id();
-    let last_executor = dag.get_executors().last().unwrap();
-    if last_executor.has_limit() {
-        let limit = last_executor.get_limit();
-        if limit.get_partition_by().is_empty() {
+    if let Some(paging_size) = paging_size {
+        if is_index_full_scan(dag) && paging_size <= REMOTE_MIN_PAGING_SIZE {
+            // Do not offload index full scan with small paging size because the upper layer
+            // operator may quickly finish the query.
+            return None;
+        }
+    }
+    let lazy_remote_pattern = if let Some(lazy_remote_pattern) = &req_ctx.lazy_remote_pattern {
+        // Dag that extracts lazy remote pattern should be offloaded to remote
+        // coprocessor based on actual execution cost.
+        if !remote_ctx.should_offload(lazy_remote_pattern) {
+            return None;
+        }
+        lazy_remote_pattern
+    } else {
+        let last_executor = dag.get_executors().last().unwrap();
+        if last_executor.has_limit() {
             // Do not offload coprocessor with limit because the actual cost may be much
             // smaller.
             return None;
         }
-    }
+        ""
+    };
     let mut ranges = Vec::with_capacity(req_ctx.ranges.len());
     for ran in &req_ctx.ranges {
         let start = Bytes::copy_from_slice(&ran.start);
@@ -269,8 +310,9 @@ pub(crate) fn try_remote_dag_handler(
         req_ctx.txn_start_ts.into_inner()
     );
     info!(
-        "{} send remote coprocessor blocks_size:{} ranges:{}",
+        "{} {} send remote coprocessor blocks_size:{} ranges:{}",
         tag,
+        lazy_remote_pattern,
         blocks_size,
         ranges.len(),
     );
@@ -297,6 +339,11 @@ pub(crate) fn try_remote_dag_handler(
         )
         .into_boxed(),
     )
+}
+
+fn is_index_full_scan(dag: &DagRequest) -> bool {
+    let executors = dag.get_executors();
+    executors.len() == 1 && executors[0].get_tp() == ExecType::TypeIndexScan
 }
 
 pub struct RemoteDagDispatcher {
@@ -433,6 +480,117 @@ impl RequestHandler for RemoteDagDispatcher {
     }
 }
 
+impl RemoteContext {
+    pub fn extract(
+        &self,
+        keyspace_id: u32,
+        ranges: &[KeyRange],
+        dag: &DagRequest,
+    ) -> Option<String> {
+        let executors = dag.get_executors();
+        if executors.is_empty() {
+            return None;
+        }
+        let scan_executor = &executors[0];
+        if ranges.len() >= self.cop_num_ranges {
+            // Large range pattern.
+            let mut str_buf = String::new();
+            write!(str_buf, "k{}", keyspace_id).unwrap();
+            Self::write_scan_digest(&mut str_buf, scan_executor);
+            write!(str_buf, "r").unwrap();
+            return Some(str_buf);
+        }
+        if executors.len() < 3 {
+            return None;
+        }
+        let last_executor = &executors[executors.len() - 1];
+        let second_last_executor = &executors[executors.len() - 2];
+        if !last_executor.has_limit() || !second_last_executor.has_selection() {
+            return None;
+        }
+        // Selection with limit pattern.
+        let mut str_buf = String::new();
+        write!(str_buf, "k{}", keyspace_id).unwrap();
+        Self::write_scan_digest(&mut str_buf, scan_executor);
+        let selection = second_last_executor.get_selection();
+        Self::write_selection_digest(&mut str_buf, selection);
+        Some(str_buf)
+    }
+
+    fn write_scan_digest(s: &mut String, executor: &Executor) {
+        match executor.get_tp() {
+            ExecType::TypeTableScan => {
+                let tbl_scan = executor.get_tbl_scan();
+                write!(s, "t{}", tbl_scan.get_table_id()).unwrap();
+                for col in tbl_scan.get_columns() {
+                    write!(s, "c{}", col.get_column_id()).unwrap();
+                }
+            }
+            ExecType::TypeIndexScan => {
+                let idx_scan = executor.get_idx_scan();
+                write!(s, "t{}", idx_scan.get_table_id()).unwrap();
+                write!(s, "i{}", idx_scan.get_index_id()).unwrap();
+                for col in idx_scan.get_columns() {
+                    write!(s, "c{}", col.get_column_id()).unwrap();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn write_selection_digest(s: &mut String, selection: &tipb::Selection) {
+        s.push('s');
+        for expr in selection.get_conditions() {
+            Self::extract_expr(s, expr);
+        }
+    }
+
+    fn extract_expr(s: &mut String, expr: &tipb::Expr) {
+        if expr.get_tp() == ColumnRef {
+            write!(s, "c{}", expr.get_val().read_i64().unwrap_or_default()).unwrap();
+        }
+        if !expr.get_children().is_empty() {
+            for child in expr.get_children() {
+                Self::extract_expr(s, child);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct RemotePatternStats {
+    process_stats: VecDeque<ProcessStat>,
+}
+
+#[derive(Default, Copy, Clone)]
+struct ProcessStat {
+    size: usize,
+    duration: Duration,
+}
+
+impl RemotePatternStats {
+    fn push(&mut self, processed_size: usize, process_duration: Duration) {
+        self.process_stats.push_back(ProcessStat {
+            size: processed_size,
+            duration: process_duration,
+        });
+        if self.process_stats.len() > 5 {
+            self.process_stats.pop_front();
+        }
+    }
+
+    fn should_offload(&self, threshold_size: usize, threshold_dur: Duration) -> bool {
+        if self.process_stats.len() < 2 {
+            return false;
+        }
+        let sum_size: usize = self.process_stats.iter().map(|x| x.size).sum();
+        let avg_size = sum_size / self.process_stats.len();
+        let sum_duration: Duration = self.process_stats.iter().map(|stat| stat.duration).sum();
+        let avg_duration = sum_duration / self.process_stats.len() as u32;
+        avg_size > threshold_size || avg_duration > threshold_dur
+    }
+}
+
 /// If the query has already run for a long time, the additional latency for
 /// offloading to remote coprocessor is non-significant, we can decreases the
 /// min blocks size to reduce the tikv-server resource consumption.
@@ -521,6 +679,10 @@ pub fn decode_remote_cop_request(body: &[u8]) -> Result<(&[u8], &[u8], &[u8])> {
 
 #[cfg(test)]
 mod tests {
+    use codec::number::NumberEncoder;
+    use tidb_query_datatype::{FieldTypeAccessor, FieldTypeTp};
+    use tipb::{Expr, ScalarFuncSig};
+
     use super::*;
 
     #[test]
@@ -566,5 +728,171 @@ mod tests {
         assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 512);
         let ts = TimeStamp::compose(phys_now + 20 * 1000, 1);
         assert_eq!(calc_min_blocks_size(ts, conf_min_blocks_size), 512);
+    }
+
+    #[test]
+    fn test_remote_pattern() {
+        let mut dag = DagRequest::default();
+        dag.mut_executors()
+            .push(new_table_scan_executor(1, vec![1, 2, 3]));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let remote_ctx = RemoteContext::new(
+            "a".to_string(),
+            "b".to_string(),
+            100,
+            2,
+            Duration::from_millis(10),
+            Arc::new(security::SecurityManager::default()),
+            runtime.handle().clone(),
+            "".to_string(),
+        )
+        .unwrap();
+        let make_key_range = |start: u8, end: u8| KeyRange {
+            start: vec![start],
+            end: vec![end],
+            ..Default::default()
+        };
+        let small_key_ranges = vec![make_key_range(1, 2)];
+        assert!(remote_ctx.extract(1, &small_key_ranges, &dag).is_none());
+        let large_key_ranges = vec![
+            make_key_range(1, 2),
+            make_key_range(3, 4),
+            make_key_range(5, 6),
+        ];
+        let large_key_range_pattern = remote_ctx.extract(1, &large_key_ranges, &dag).unwrap();
+        assert_eq!(large_key_range_pattern, "k1t1c1c2c3r");
+
+        assert!(remote_ctx.extract(1, &small_key_ranges, &dag).is_none());
+        dag.mut_executors().push(new_selection(vec![1, 2]));
+        assert!(remote_ctx.extract(1, &small_key_ranges, &dag).is_none());
+        dag.mut_executors().push(new_limit(100));
+        let tbl_pattern = remote_ctx.extract(1, &small_key_ranges, &dag).unwrap();
+        assert_eq!(tbl_pattern, "k1t1c1c2c3sc1c2");
+
+        let mut idx_dag = dag.clone();
+        let executors = idx_dag.mut_executors();
+        executors[0] = new_index_scan_executor(3, 2, vec![1, 2, 3]);
+        let idx_pattern = remote_ctx.extract(1, &small_key_ranges, &idx_dag).unwrap();
+        assert_eq!(idx_pattern, "k1t3i2c1c2c3sc1c2");
+
+        let short_process_dur = Duration::from_millis(5);
+        let long_process_dur = Duration::from_millis(100);
+        remote_ctx.report_lazy_remote_pattern(tbl_pattern.clone(), 101, long_process_dur);
+        assert!(!remote_ctx.should_offload(&tbl_pattern));
+        remote_ctx.report_lazy_remote_pattern(tbl_pattern.clone(), 101, long_process_dur);
+        assert!(remote_ctx.should_offload(&tbl_pattern));
+
+        #[derive(Debug)]
+        struct Case {
+            processed_size: usize,
+            process_duration: Duration,
+            should_offload: bool,
+        }
+        let cases = vec![
+            Case {
+                processed_size: 50,
+                process_duration: short_process_dur,
+                should_offload: false,
+            },
+            Case {
+                processed_size: 50,
+                process_duration: long_process_dur,
+                should_offload: true,
+            },
+            Case {
+                processed_size: 101,
+                process_duration: short_process_dur,
+                should_offload: true,
+            },
+            Case {
+                processed_size: 101,
+                process_duration: long_process_dur,
+                should_offload: true,
+            },
+        ];
+        for case in cases {
+            for _ in 0..10 {
+                remote_ctx.report_lazy_remote_pattern(
+                    tbl_pattern.clone(),
+                    case.processed_size,
+                    case.process_duration,
+                );
+            }
+            assert_eq!(
+                remote_ctx.should_offload(&tbl_pattern),
+                case.should_offload,
+                "case: {:?}",
+                case
+            );
+        }
+    }
+
+    fn new_table_scan_executor(tbl_id: i64, col_ids: Vec<i64>) -> tipb::Executor {
+        let mut executor = tipb::Executor::default();
+        executor.set_tp(tipb::ExecType::TypeTableScan);
+        let tbl_scan = executor.mut_tbl_scan();
+        tbl_scan.set_table_id(tbl_id);
+        for col_id in col_ids {
+            let mut col = tipb::ColumnInfo::new();
+            col.set_column_id(col_id);
+            tbl_scan.mut_columns().push(col);
+        }
+        executor
+    }
+
+    fn new_index_scan_executor(tbl_id: i64, index_id: i64, col_ids: Vec<i64>) -> tipb::Executor {
+        let mut executor = tipb::Executor::default();
+        executor.set_tp(tipb::ExecType::TypeIndexScan);
+        let idx_scan = executor.mut_idx_scan();
+        idx_scan.set_table_id(tbl_id);
+        idx_scan.set_index_id(index_id);
+        for col_id in col_ids {
+            let mut col = tipb::ColumnInfo::new();
+            col.set_column_id(col_id);
+            idx_scan.mut_columns().push(col);
+        }
+        executor
+    }
+
+    fn new_selection(col_offs: Vec<i64>) -> tipb::Executor {
+        let mut executor = tipb::Executor::default();
+        executor.set_tp(tipb::ExecType::TypeSelection);
+        let conditions = executor.mut_selection().mut_conditions();
+        for col_off in col_offs {
+            let mut condition = tipb::Expr::default();
+            condition.set_tp(tipb::ExprType::Int64);
+            condition.set_sig(ScalarFuncSig::EqInt);
+            condition
+                .mut_field_type()
+                .as_mut_accessor()
+                .set_tp(FieldTypeTp::LongLong);
+
+            let mut col = Expr::default();
+            col.set_tp(tipb::ExprType::ColumnRef);
+            col.mut_val().write_i64(col_off).unwrap();
+            col.mut_field_type()
+                .as_mut_accessor()
+                .set_tp(FieldTypeTp::LongLong);
+
+            let mut value = Expr::default();
+            value.set_tp(tipb::ExprType::Int64);
+            value.mut_val().write_i64(1).unwrap();
+            value
+                .mut_field_type()
+                .as_mut_accessor()
+                .set_tp(FieldTypeTp::LongLong);
+            condition.mut_children().push(col);
+            condition.mut_children().push(value);
+            conditions.push(condition);
+        }
+        executor
+    }
+
+    fn new_limit(limit: u64) -> tipb::Executor {
+        let mut executor = tipb::Executor::default();
+        executor.set_tp(tipb::ExecType::TypeLimit);
+        let limit_executor = executor.mut_limit();
+        limit_executor.set_limit(limit);
+        executor
     }
 }

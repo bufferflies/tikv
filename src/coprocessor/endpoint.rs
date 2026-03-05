@@ -182,6 +182,7 @@ impl<E: Engine> Endpoint<E> {
         remote_cop_url: String,
         remote_cop_min_blocks_size: usize,
         remote_cop_num_ranges: usize,
+        cop_min_process_duration: Duration,
     ) {
         let pool = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -196,6 +197,7 @@ impl<E: Engine> Endpoint<E> {
             remote_cop_url,
             remote_cop_min_blocks_size,
             remote_cop_num_ranges,
+            cop_min_process_duration,
             self.security_mgr.clone(),
             pool.handle().clone(),
             self.status_addr.clone(),
@@ -319,7 +321,10 @@ impl<E: Engine> Endpoint<E> {
                 } else {
                     ReqTag::index
                 };
-
+                let lazy_remote_pattern = self
+                    .remote_ctx
+                    .as_ref()
+                    .and_then(|ctx| ctx.extract(context.keyspace_id, &ranges, &dag));
                 req_ctx = ReqContext::new(
                     tag,
                     context,
@@ -330,6 +335,7 @@ impl<E: Engine> Endpoint<E> {
                     start_ts.into(),
                     cache_match_version,
                     self.perf_level,
+                    lazy_remote_pattern,
                 );
                 with_tls_tracker(|tracker| {
                     tracker.req_info.request_type = RequestType::CoprocessorDag;
@@ -342,9 +348,17 @@ impl<E: Engine> Endpoint<E> {
                 let quota_limiter = self.quota_limiter.clone();
                 let remote_ctx = self.remote_ctx.clone();
                 builder = Box::new(move |snap, req_ctx| {
-                    if let Some(handler) =
-                        try_remote_dag_handler(snap.get_kvengine_snap(), &dag, req_ctx, remote_ctx)
-                    {
+                    let paging_size = match req.get_paging_size() {
+                        0 => None,
+                        i => Some(i),
+                    };
+                    if let Some(handler) = try_remote_dag_handler(
+                        snap.get_kvengine_snap(),
+                        &dag,
+                        req_ctx,
+                        remote_ctx,
+                        paging_size,
+                    ) {
                         return Ok(handler);
                     }
                     let data_version = snap.ext().get_data_version();
@@ -396,6 +410,7 @@ impl<E: Engine> Endpoint<E> {
                     start_ts.into(),
                     cache_match_version,
                     self.perf_level,
+                    None,
                 );
                 with_tls_tracker(|tracker| {
                     tracker.req_info.request_type = RequestType::CoprocessorAnalyze;
@@ -447,6 +462,7 @@ impl<E: Engine> Endpoint<E> {
                     start_ts.into(),
                     cache_match_version,
                     self.perf_level,
+                    None,
                 );
                 with_tls_tracker(|tracker| {
                     tracker.req_info.request_type = RequestType::CoprocessorChecksum;
@@ -527,6 +543,7 @@ impl<E: Engine> Endpoint<E> {
         semaphore: Option<Arc<Semaphore>>,
         mut tracker: Box<Tracker<E>>,
         handler_builder: RequestHandlerBuilder<E::Snap>,
+        remote_ctx: Option<RemoteContext>,
     ) -> Result<MemoryTraceGuard<coppb::Response>> {
         // When this function is being executed, it may be queued for a long time, so
         // that deadline may exceed.
@@ -593,7 +610,18 @@ impl<E: Engine> Endpoint<E> {
         tracker.collect_scan_process_time(exec_summary);
         let mut storage_stats = Statistics::default();
         handler.collect_scan_statistics(&mut storage_stats);
+        let processed_size = storage_stats.processed_size;
+        let processed_time = Duration::from_nanos(exec_summary.time_processed_ns as u64);
         tracker.collect_storage_statistics(storage_stats);
+        if let Some(lazy_remote_pattern) = tracker.req_ctx.lazy_remote_pattern.clone() {
+            if let Some(remote_ctx) = remote_ctx {
+                remote_ctx.report_lazy_remote_pattern(
+                    lazy_remote_pattern,
+                    processed_size,
+                    processed_time,
+                );
+            }
+        }
         let (exec_details, exec_details_v2) = tracker.get_exec_details();
         tracker.on_finish_all_items();
 
@@ -634,11 +662,17 @@ impl<E: Engine> Endpoint<E> {
         // box the tracker so that moving it is cheap.
         let tracker = Box::new(Tracker::new(req_ctx, self.slow_log_threshold));
 
+        let remote_ctx = self.remote_ctx.clone();
         let res = self
             .read_pool
             .spawn_handle(
-                Self::handle_unary_request_impl(self.semaphore.clone(), tracker, handler_builder)
-                    .in_resource_metering_tag(resource_tag),
+                Self::handle_unary_request_impl(
+                    self.semaphore.clone(),
+                    tracker,
+                    handler_builder,
+                    remote_ctx,
+                )
+                .in_resource_metering_tag(resource_tag),
                 priority,
                 task_id,
             )
@@ -991,6 +1025,7 @@ impl<E: Engine> Endpoint<E> {
             req.start_ts.into(),
             None,
             self.perf_level,
+            None,
         );
         let check_mem_res = Endpoint::<E>::check_memory_locks(&self.concurrency_manager, &req_ctx);
         let priority = req_ctx.context.get_priority();
@@ -1106,6 +1141,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 start_ts.into(),
                 cache_match_version,
                 PerfLevel::Uninitialized,
+                None,
             );
             // FIXME: Fix the `Locked` error of async commit.
             req_ctx.bypass_locks = TsSet::All;
@@ -1165,6 +1201,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 start_ts.into(),
                 cache_match_version,
                 PerfLevel::Uninitialized,
+                None,
             );
             Box::new(
                 statistics::analyze::AnalyzeContext::<_, F>::new(
@@ -1208,6 +1245,7 @@ pub async fn parse_request_and_handle_remote_cop_impl<S: 'static + Snapshot, F: 
                 cache_match_version,
                 // FIXME: How do we set this?
                 PerfLevel::Uninitialized,
+                None,
             );
             with_tls_tracker(|tracker| {
                 tracker.req_info.request_type = RequestType::CoprocessorChecksum;
@@ -1684,6 +1722,7 @@ mod tests {
             TimeStamp::max(),
             None,
             PerfLevel::EnableCount,
+            None,
         );
         block_on(copr.handle_unary_request(outdated_req_ctx, handler_builder)).unwrap_err();
     }

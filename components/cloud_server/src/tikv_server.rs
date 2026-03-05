@@ -909,6 +909,10 @@ impl TikvServer {
             self.config.kvengine.remote_coprocessor_addr.clone(),
             self.config.kvengine.remote_coprocessor_min_blocks_size,
             self.config.kvengine.remote_coprocessor_num_ranges,
+            self.config
+                .kvengine
+                .remote_coprocessor_min_process_duration
+                .0,
         );
         let copr_config_manager = copr.config_manager();
 
