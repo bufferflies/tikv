@@ -1587,12 +1587,12 @@ impl Peer {
         None
     }
 
-    pub fn update_buckets(&mut self, ctx: &RaftContext) {
+    pub fn update_buckets(&mut self, ctx: &RaftContext) -> bool{
         if !ctx.cfg.enable_region_bucket {
-            return;
+            return false;
         }
         if !self.has_applied_to_current_term() {
-            return;
+            return false;
         }
         if let Some(shard) = ctx.global.engines.kv.get_shard(self.region_id) {
             // Update the buckets whenever the shard meta sequence change, so the bucket
@@ -1601,7 +1601,7 @@ impl Peer {
             if meta_sequence == self.last_bucket_update_meta_sequence {
                 debug!("{} update_buckets:skip", self.tag();
                     "last_bucket_update_meta_sequence" => self.last_bucket_update_meta_sequence);
-                return;
+                return false;
             }
             self.last_bucket_update_meta_sequence = meta_sequence;
             let mut bucket_size = ctx.cfg.region_bucket_size.0;
@@ -1630,7 +1630,7 @@ impl Peer {
                 if old_buckets.meta.keys == bucket_keys {
                     // Skip update if the keys are same.
                     info!("{} skip update buckets for same keys", self.tag());
-                    return;
+                    return false;
                 }
             }
             let mut bucket_meta = BucketMeta::new(self.region(), bucket_keys, bucket_size);
@@ -1652,6 +1652,7 @@ impl Peer {
                 ));
             }
         }
+        true
     }
 
     pub fn heartbeat_pd(&mut self, ctx: &RaftContext) {
