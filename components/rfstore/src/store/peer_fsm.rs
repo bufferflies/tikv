@@ -686,7 +686,7 @@ impl<'a> PeerMsgHandler<'a> {
             self.destroy_regions_for_snapshot(regions_to_destroy);
         }
         if self.fsm.peer.any_new_peer_catch_up(from_peer_id) {
-            self.fsm.peer.heartbeat_pd(self.ctx);
+            self.fsm.peer.heartbeat_pd(self.ctx, true);
         }
         result
     }
@@ -1362,8 +1362,9 @@ impl<'a> PeerMsgHandler<'a> {
             if self.fsm.peer.last_bucket_update_meta_sequence != shard.get_meta_sequence() {
                 // In case the region is under heavy write, we need to update the bucket more
                 // frequently than pd heartbeat.
+                // If the bucket is updated, we need to heartbeat pd to update region size in pd, otherwise.
                 if self.fsm.peer.update_buckets(self.ctx){
-                    self.fsm.peer.heartbeat_pd(self.ctx);
+                    self.fsm.peer.heartbeat_pd(self.ctx,false);
                 }
             }
             let mut region_max_size = self.ctx.cfg.region_split_size.0 * 3 / 2;
@@ -1907,7 +1908,7 @@ impl<'a> PeerMsgHandler<'a> {
         if !self.fsm.peer.is_leader() {
             return;
         }
-        self.fsm.peer.heartbeat_pd(self.ctx);
+        self.fsm.peer.heartbeat_pd(self.ctx,true);
     }
 
     fn on_generate_engine_change_set(&mut self, cs: kvenginepb::ChangeSet) {

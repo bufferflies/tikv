@@ -1857,7 +1857,7 @@ impl<'a> StoreMsgHandler<'a> {
             .set_shard_active(region_id, is_leader);
         let tag = peer_fsm.peer.tag();
         if is_leader {
-            peer_fsm.peer.heartbeat_pd(self.ctx);
+            peer_fsm.peer.heartbeat_pd(self.ctx,true);
             // Notify pd immediately to let it update the region meta.
             info!(
                 "notify pd with split";
@@ -1955,7 +1955,7 @@ impl<'a> StoreMsgHandler<'a> {
             if is_leader {
                 // The new peer is likely to become leader, send a heartbeat immediately to
                 // reduce client query miss.
-                new_peer.peer.heartbeat_pd(self.ctx);
+                new_peer.peer.heartbeat_pd(self.ctx,true);
             }
             self.ctx.global.coprocessor_host.on_region_changed(
                 &new_region,
@@ -2073,7 +2073,7 @@ impl<'a> StoreMsgHandler<'a> {
                 "peer_id" => peer_fsm.peer_id(),
                 "region" => ?peer_fsm.peer.region(),
             );
-            peer_fsm.peer.heartbeat_pd(self.ctx);
+            peer_fsm.peer.heartbeat_pd(self.ctx,true);
 
             // Remove or demote leader will cause this raft group unavailable
             // until new leader elected, but we can't revert this operation
@@ -2440,7 +2440,7 @@ impl<'a> StoreMsgHandler<'a> {
             RegionChangeReason::PrepareMerge,
         );
         if is_leader {
-            peer_fsm.peer.heartbeat_pd(self.ctx);
+            peer_fsm.peer.heartbeat_pd(self.ctx,true);
             info!(
                 "notify pd with prepare merge";
                 "tag" => peer_fsm.peer.tag(),
@@ -2516,7 +2516,7 @@ impl<'a> StoreMsgHandler<'a> {
 
         let tag = peer_fsm.peer.tag();
         if is_leader {
-            peer_fsm.peer.heartbeat_pd(self.ctx);
+            peer_fsm.peer.heartbeat_pd(self.ctx,true);
             // Notify pd immediately to let it update the region meta.
             info!(
                 "notify pd with commit merge";
@@ -2562,7 +2562,7 @@ impl<'a> StoreMsgHandler<'a> {
                 "peer_id" => peer_fsm.peer_id(),
                 "commit_index" => commit,
             );
-            peer_fsm.peer.heartbeat_pd(self.ctx);
+            peer_fsm.peer.heartbeat_pd(self.ctx,true);
         }
     }
 
@@ -2605,7 +2605,7 @@ impl<'a> StoreMsgHandler<'a> {
 
         if is_leader {
             let tag = peer_fsm.peer.tag();
-            peer_fsm.peer.heartbeat_pd(self.ctx);
+            peer_fsm.peer.heartbeat_pd(self.ctx,true);
             info!(
                 "{} store_fsm::on_restore_shard_result: notify pd, peer_id: {}",
                 tag,

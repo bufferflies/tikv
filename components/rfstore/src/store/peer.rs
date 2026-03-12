@@ -1495,7 +1495,7 @@ impl Peer {
                     // A more recent read may happen on the old leader. So max ts should
                     // be updated after a peer becomes leader.
                     self.require_updating_max_ts(&ctx.global.pd_scheduler);
-                    self.heartbeat_pd(ctx);
+                    self.heartbeat_pd(ctx,true);
                 }
                 StateRole::Follower => {
                     self.leader_lease.expire();
@@ -1655,8 +1655,10 @@ impl Peer {
         true
     }
 
-    pub fn heartbeat_pd(&mut self, ctx: &RaftContext) {
-        self.update_buckets(ctx);
+    pub fn heartbeat_pd(&mut self, ctx: &RaftContext, enable_update_buckets:bool) {
+        if enable_update_buckets {
+            self.update_buckets(ctx);
+        }
         let bucket_stat = self.buckets.as_mut().map(|buckets| {
             let stats =
                 std::mem::replace(&mut buckets.stats, new_bucket_write_stats(&buckets.meta));
@@ -1816,7 +1818,7 @@ impl Peer {
         }
         if let Some(ss) = ready.ss() {
             if ss.raft_state == raft::StateRole::Leader {
-                self.heartbeat_pd(ctx)
+                self.heartbeat_pd(ctx,true)
             }
         }
         let mut persist_messages = self.build_raft_messages(ctx, ready.take_persisted_messages());
